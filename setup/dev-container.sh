@@ -34,6 +34,7 @@ if ! podman container exists dev; then
   echo "creating the dev container (Fedora 44 toolbox)"
   "$distrobox" create --yes --name dev --image registry.fedoraproject.org/fedora-toolbox:44
 fi
+"$root/scripts/container-up.sh"
 "$distrobox" enter dev -- bash -c '
 set -euo pipefail
 echo "installing ${#@} packages (already-installed ones are skipped)"

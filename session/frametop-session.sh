@@ -69,6 +69,7 @@ if [ "${1:-}" != --inner ]; then
   socket=ft-screens-0
   read -ra screen_args <<< "$("$here/../layout/ft-layout" screen-args)"
   export FT_SCREEN_COUNT=$(( ${#screen_args[@]} / 2 ))
+  "$here/../scripts/container-up.sh"  # not owned by this desktop, or stopping it would stop the container
   "$HOME/.local/bin/distrobox" enter dev -- "$here/../screens/build/ft-screens" --socket "$socket" \
     "${screen_args[@]}" > /tmp/frametop-screens.log 2>&1 < /dev/null &
   stop_screens() { pkill -x ft-screens 2>/dev/null || true; }

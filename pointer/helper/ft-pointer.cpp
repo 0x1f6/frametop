@@ -32,7 +32,9 @@
 //     It's restored when a controller takes the pointer back.
 //
 // Headset off: when SteamVR says nobody is wearing the headset, the pointer is released and
-// stays off until it's worn again, so the displays can sleep (see the main loop).
+// stays off until it's worn again, so the displays can sleep (see the main loop). While the
+// pointer is off the helper also stops listing overlays with vrcmd, whose connection every
+// second kept SteamVR from going to standby.
 //
 // Last used wins: when a real controller moves (picked up), the pointer is released
 // at once (driver "hide", which also drops its hand role hint), so the controller gets
@@ -194,16 +196,24 @@ void SendTo(int fd, const char *name, const std::string &msg) {
 // public call to enumerate other apps' overlays). Hidden ones are listed too: the
 // window controls under a floating panel only appear while something hovers the
 // panel, and the cursor has to find them the moment they do, not a second later.
+// Paused while the pointer is off: each vrcmd run connects to SteamVR as a new app, and a new
+// app every second kept SteamVR (and the headset's displays) from going to standby.
 class OverlayList {
 public:
     void Start() {
         thread_ = std::thread([this] {
             while (running_) {
-                Refresh();
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (!paused_) Refresh();
+                // Wait a second, or less when the pointer wakes (refresh right away then).
+                for (int i = 0; i < 10 && running_; ++i) {
+                    const bool wasPaused = paused_;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (wasPaused && !paused_) break;
+                }
             }
         });
     }
+    void SetPaused(bool paused) { paused_ = paused; }
     void Stop() {
         running_ = false;
         if (thread_.joinable()) thread_.join();
@@ -239,6 +249,7 @@ private:
     }
 
     std::thread thread_;
+    std::atomic<bool> paused_{false};
     std::atomic<bool> running_{true};
     std::mutex lock_;
     std::vector<std::string> keys_;
@@ -685,6 +696,9 @@ int main() {
             SendTo(out, "ft_pointer", "btn a 0");
             claimHeld = false;
         }
+
+        // The overlay list is only needed while the pointer is awake (see OverlayList).
+        overlays.SetPaused(!active || headsetOff);
 
         // Laser mode on while the pointer is awake.
         if (active != laserModeShown) {

@@ -10,6 +10,7 @@ case $wl in /*) ;; *) wl="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$wl" ;; esac
 session_bus=${DBUS_SESSION_BUS_ADDRESS:-}
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+"$here/../scripts/container-up.sh"
 exec "$HOME/.local/bin/distrobox" enter dev -- env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \
   XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="$session_bus" \
   QT_QPA_PLATFORM="wayland;xcb" \

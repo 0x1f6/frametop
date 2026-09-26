@@ -30,6 +30,7 @@ if [ "$FRAME_LOCAL" = 1 ]; then
   if [ "$on_host" = 1 ]; then
     exec bash -c "$*"
   fi
+  "$REPO_ROOT/scripts/container-up.sh"  # in a scope of its own, not this shell's session
   exec "$HOME/.local/bin/distrobox" enter "$FRAME_BOX" -- bash -lc "$*"
 fi
 
@@ -39,5 +40,5 @@ if [ "$on_host" = 1 ]; then
   exec ssh "${tty[@]}" "$FRAME_HOST" "cd $(printf %q "$dir") && $*"
 else
   exec ssh "${tty[@]}" "$FRAME_HOST" \
-    "cd $(printf %q "$dir") && ~/.local/bin/distrobox enter $(printf %q "$FRAME_BOX") -- bash -lc $(printf %q "$*")"
+    "$(printf %q "$FRAME_REPO")/scripts/container-up.sh; cd $(printf %q "$dir") && ~/.local/bin/distrobox enter $(printf %q "$FRAME_BOX") -- bash -lc $(printf %q "$*")"
 fi
