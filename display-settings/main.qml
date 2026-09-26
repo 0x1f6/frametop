@@ -567,7 +567,7 @@ Kirigami.ApplicationWindow {
 
                     Repeater {
                         model: [
-                            { value: "always", text: "Always", help: "Meta+Shift+H (or a mapped button) hides them, for a VR game." },
+                            { value: "always", text: "Always", help: "They stay up, over VR games too. Meta+Shift+H (or a mapped button) hides them." },
                             { value: "dashboard", text: "Only with the SteamVR dashboard open", help: "They come and go with the dashboard. Meta+Shift+H shows them anyway." },
                             { value: "gesture", text: "While I look at my wrist", help: "They show while you look toward the controller below. Meta+Shift+H shows them anyway." },
                             { value: "toggle", text: "Only when I show them", help: "Hidden until Meta+Shift+H (or a mapped button) shows them." }
@@ -613,6 +613,33 @@ Kirigami.ApplicationWindow {
                             onMoved: backend.setVisibility("gesture_angle", value)
                         }
                         Controls.Label { text: Math.round(gesture.value) + "° of it" }
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Controllers on the screens" }
+
+                    Repeater {
+                        model: [
+                            { value: "outside_games", text: "Except during VR games", help: "Over a VR game the screens stay up, but the controllers stay in the game. Use the 3D mouse, or open the SteamVR dashboard, to work the screens." },
+                            { value: "always", text: "Always", help: "Controllers' lasers work the screens whenever they're visible, even over a VR game (which then can't use the controllers)." },
+                            { value: "dashboard", text: "Only with the SteamVR dashboard open", help: "Otherwise only the 3D mouse works the screens. Also for flatscreen games, which don't count as VR games." }
+                        ]
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            spacing: 0
+                            Controls.RadioButton {
+                                text: modelData.text
+                                checked: (vpage.v.controllers || "outside_games") === modelData.value
+                                onToggled: if (checked) backend.setVisibility("controllers", modelData.value)
+                            }
+                            Controls.Label {
+                                text: modelData.help
+                                opacity: 0.7
+                                font: Kirigami.Theme.smallFont
+                                leftPadding: Kirigami.Units.gridUnit * 1.6
+                                wrapMode: Text.Wrap
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                            }
+                        }
                     }
 
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Screens on a wrist" }

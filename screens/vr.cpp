@@ -25,9 +25,14 @@
 //     its front, within the wrist angle (and fades out over the last kFade degrees).
 //   - visibility modes: always (the hide hotkey toggles), only with the SteamVR dashboard
 //     open, while you look at a chosen controller (the wrist gesture), or toggle only
-//     (hidden until the hotkey shows them). While visible the screens keep SteamVR's laser
-//     mouse on (VROverlayFlags_MakeOverlaysInteractiveIfVisible), so controllers can use
-//     them with the dashboard closed; hidden, VR games get their triggers back.
+//     (hidden until the hotkey shows them).
+//   - controllers on the screens: while visible, the screens can keep SteamVR's laser mouse
+//     on (VROverlayFlags_MakeOverlaysInteractiveIfVisible), so controllers use them with
+//     the dashboard closed. That also takes the controllers away from a VR game, so by
+//     default it's off while a game (a scene app) runs: the screens stay up over the game,
+//     the controllers stay in it, and the 3D mouse (its own laser mode) or the dashboard
+//     works the screens. Modes: always, outside_games (default), dashboard (never on its
+//     own; also for flatscreen games, which aren't scene apps).
 // OpenVR has no overlay-relative transforms here (openvr v2.15.6), so the bar, button,
 // and handle are placed whenever their screen moves.
 #include "vr.h"
@@ -133,6 +138,7 @@ const char *HandName(vr::TrackedDeviceIndex_t i) {
 
 enum class Drag { None, Move, Resize, Roll };
 enum class Mode { Always, Dashboard, Gesture, Toggle };
+enum class Lasers { Always, OutsideGames, Dashboard };
 
 constexpr double kWristZone = 0.06;  // the laser passing this close to a controller is on its wrist
 constexpr double kWristLeave = 0.09; // ...and has left it beyond this (so it doesn't flicker)
@@ -165,6 +171,7 @@ struct Screen {
     Mat rollFrom = Identity();                // roll: the pose at the press (pinRel when pinned)
     double rollAngle = 0;                     // roll: the laser's angle around the centre then
     bool hover[4] = {};                       // a laser is on the bar, curve, roll, resize control
+    bool lasers = true;                       // MakeOverlaysInteractiveIfVisible is set
     float controls = 0;                       // the controls' fade, 0 (hidden) .. 1
     bool controlsUp = false;                  // the controls' overlays are shown
     long nearUntil = 0;                       // a laser was near the controls until this tick
@@ -187,6 +194,8 @@ bool g_manual = false;
 double g_wristAngle = 60;    // a pinned screen shows while you see its front within this
 double g_gestureAngle = 20;  // gesture: look within this of the controller
 std::string g_gestureHand = "left";
+Lasers g_lasers = Lasers::OutsideGames;  // when controllers' lasers work the screens (see the top)
+bool g_gameRunning = false;              // a scene app (VR game) is running
 
 // ---------------------------------------------------------------- chrome (bar, button, handle)
 
@@ -593,6 +602,18 @@ void UpdateVisibility() {
 }
 
 
+// Controllers' lasers on the screens (see the top): the flag follows the mode and whether a
+// VR game runs (checked twice a second).
+void UpdateLasers() {
+    if (g_tick % 45 == 0) g_gameRunning = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
+    const bool want = g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning);
+    for (auto &[i, s] : g_screens) {
+        if (s.lasers == want) continue;
+        s.lasers = want;
+        vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, want);
+    }
+}
+
 // The controls are invisible until a laser passes very close to one of them (within
 // `reach`, about 1.5 times a button's size); they stay kControlsLinger ticks after it
 // leaves, and while in use.
@@ -892,6 +913,14 @@ uint32_t LinuxButton(uint32_t vrButton) {
     }
 }
 
+const char *LasersName() {
+    switch (g_lasers) {
+        case Lasers::Always: return "always";
+        case Lasers::Dashboard: return "dashboard";
+        default: return "outside_games";
+    }
+}
+
 const char *ModeName() {
     switch (g_mode) {
         case Mode::Dashboard: return "dashboard";
@@ -1134,6 +1163,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     }
     ++g_tick;
     UpdateVisibility();
+    UpdateLasers();
     UpdateControls();
     UpdateGuides();
 }
@@ -1154,7 +1184,9 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //   wrist <degrees>           a pinned screen shows while you see its front within this
 //   gesture <left|right> <degrees>   the gesture mode: look within this of that controller
 //   hide | show | toggle      the manual switch (see g_manual)
-//   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>"
+//   controllers always|outside_games|dashboard   when controllers' lasers work the screens
+//   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
+//                     <controllers> <game running 0|1>"
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
 // numbered from 1 here, like everywhere the user sees them.
 void ft_vr_command(const char *cmd, char *reply, int size) {
@@ -1264,9 +1296,17 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         g_manual = g_mode == Mode::Always ? !want : want;
         UpdateVisibility();
         std::snprintf(reply, size, "ok %s", want ? "shown" : "hidden");
+    } else if (std::sscanf(cmd, "controllers %15s", word) == 1) {
+        const std::string m = word;
+        if (m == "always") g_lasers = Lasers::Always;
+        else if (m == "outside_games") g_lasers = Lasers::OutsideGames;
+        else if (m == "dashboard") g_lasers = Lasers::Dashboard;
+        else return (void)std::snprintf(reply, size, "error modes: always outside_games dashboard");
+        UpdateLasers();
+        std::snprintf(reply, size, "ok %s", LasersName());
     } else if (std::strncmp(cmd, "state", 5) == 0) {
-        std::snprintf(reply, size, "ok %s %d %.0f %s %.0f", ModeName(), g_manual ? 1 : 0, g_wristAngle,
-                      g_gestureHand.c_str(), g_gestureAngle);
+        std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d", ModeName(), g_manual ? 1 : 0, g_wristAngle,
+                      g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0);
     } else {
         std::snprintf(reply, size, "error unknown command");
     }
