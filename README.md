@@ -55,7 +55,7 @@ After the restart:
 | While carrying a screen, sweep its laser across your other controller's ring, then let go | Pins it to that wrist, at its size and distance, as you hold it when you let go; it shows while you see its front. Grab its bar to adjust it (it stays pinned); sweep across the ring again to take it off |
 | Meta+Shift+R in the desktop | Puts the screens back in their layout (also the **Reset Screen Layout** menu entry, and a button you can map) |
 | Meta+Shift+H in the desktop | Hides or shows all screens (also **Hide/Show Screens** and a mappable button). **Frametop Display Settings → Visibility & wrist** can instead show them only with the dashboard open, or while you look at your wrist |
-| Play a VR game | The screens stay up over it, and your controllers stay in the game. Work the screens with the 3D mouse, or open the SteamVR dashboard. (**Visibility & wrist → Controllers on the screens** changes this.) |
+| Play a VR game | The screens hide and your controllers stay in the game. Open the SteamVR dashboard (or press Meta+Shift+H) to see and use them. **Visibility & wrist → During VR games** can keep them visible over the game instead; the controllers still stay in the game, and the 3D mouse or the dashboard works the screens. |
 
 Map the mouse's extra buttons to actions such as **Toggle SteamVR dashboard** or **Recenter pointer** in **Frametop Input Settings → Buttons**. Speed, dot size, and the rest are on its **Pointer** page and apply immediately.
 

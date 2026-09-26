@@ -567,7 +567,7 @@ Kirigami.ApplicationWindow {
 
                     Repeater {
                         model: [
-                            { value: "always", text: "Always", help: "They stay up, over VR games too. Meta+Shift+H (or a mapped button) hides them." },
+                            { value: "always", text: "Always", help: "Meta+Shift+H (or a mapped button) hides them. During VR games, see below." },
                             { value: "dashboard", text: "Only with the SteamVR dashboard open", help: "They come and go with the dashboard. Meta+Shift+H shows them anyway." },
                             { value: "gesture", text: "While I look at my wrist", help: "They show while you look toward the controller below. Meta+Shift+H shows them anyway." },
                             { value: "toggle", text: "Only when I show them", help: "Hidden until Meta+Shift+H (or a mapped button) shows them." }
@@ -613,6 +613,41 @@ Kirigami.ApplicationWindow {
                             onMoved: backend.setVisibility("gesture_angle", value)
                         }
                         Controls.Label { text: Math.round(gesture.value) + "° of it" }
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "During VR games" }
+
+                    Repeater {
+                        model: [
+                            { value: "hide", text: "Hide them unless the SteamVR dashboard is open", help: "The game has the view to itself; open the dashboard (or press Meta+Shift+H) to see the screens." },
+                            { value: "visible", text: "Keep them visible over the game", help: "They float over the game as they are outside it." }
+                        ]
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            spacing: 0
+                            Controls.RadioButton {
+                                text: modelData.text
+                                enabled: vpage.v.mode === "always"
+                                checked: (vpage.v.in_games || "hide") === modelData.value
+                                onToggled: if (checked) backend.setVisibility("in_games", modelData.value)
+                            }
+                            Controls.Label {
+                                text: modelData.help
+                                opacity: 0.7
+                                font: Kirigami.Theme.smallFont
+                                leftPadding: Kirigami.Units.gridUnit * 1.6
+                                wrapMode: Text.Wrap
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        visible: vpage.v.mode !== "always"
+                        text: "Applies when the screens show \"Always\"; the other choices above already keep them out of the way."
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     }
 
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Controllers on the screens" }

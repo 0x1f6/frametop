@@ -63,8 +63,10 @@ LOCK_PATH = "/tmp/ft-layout.lock"
 DEFAULT_PANEL = (1.18, 0.664)  # gamescope: a floating 16:9 dashboard panel, measured on the Frame
 PIXELS_PER_METRE = 800         # ft-screens: a new screen's default size in VR (1920 px: 2.4 m)
 # controllers: when controllers' lasers work the screens (always | outside_games | dashboard).
+# in_games: during a VR game, "always" hides the screens unless the dashboard is open (hide),
+# or leaves them up (visible).
 VISIBILITY = {"mode": "always", "wrist_angle": 60, "gesture_hand": "left", "gesture_angle": 20,
-              "controllers": "outside_games"}
+              "controllers": "outside_games", "in_games": "hide"}
 DEFAULTS = {"auto": True, "mode": "preset",
             "preset": {"kind": "arc", "rows": 1, "distance": 2.0, "gap": 0.05, "height": 0.0},
             "screens": [], "panel_size": list(DEFAULT_PANEL)}
@@ -376,6 +378,7 @@ def send_visibility(sock, layout):
     sock.ask(f"wrist {float(v['wrist_angle']):.1f}")
     sock.ask(f"gesture {v['gesture_hand']} {float(v['gesture_angle']):.1f}")
     sock.ask(f"controllers {v['controllers']}")
+    sock.ask(f"ingames {v['in_games']}")
 
 
 def parse_get(reply):

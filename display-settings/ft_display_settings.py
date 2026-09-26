@@ -365,6 +365,8 @@ class Backend(QObject):
                 self._ask_screens(f"wrist {float(value):.1f}")
             elif key == "controllers":
                 self._ask_screens(f"controllers {value}")
+            elif key == "in_games":
+                self._ask_screens(f"ingames {value}")
             else:
                 self._ask_screens(f"gesture {v['gesture_hand']} {float(v['gesture_angle']):.1f}")
 

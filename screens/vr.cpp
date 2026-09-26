@@ -33,6 +33,8 @@
 //     the controllers stay in it, and the 3D mouse (its own laser mode) or the dashboard
 //     works the screens. Modes: always, outside_games (default), dashboard (never on its
 //     own; also for flatscreen games, which aren't scene apps).
+//   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
+//     or stay visible over it; the hotkey still shows them.
 // OpenVR has no overlay-relative transforms here (openvr v2.15.6), so the bar, button,
 // and handle are placed whenever their screen moves.
 #include "vr.h"
@@ -139,6 +141,7 @@ const char *HandName(vr::TrackedDeviceIndex_t i) {
 enum class Drag { None, Move, Resize, Roll };
 enum class Mode { Always, Dashboard, Gesture, Toggle };
 enum class Lasers { Always, OutsideGames, Dashboard };
+enum class InGames { Visible, Hide };
 
 constexpr double kWristZone = 0.06;  // the laser passing this close to a controller is on its wrist
 constexpr double kWristLeave = 0.09; // ...and has left it beyond this (so it doesn't flicker)
@@ -196,6 +199,7 @@ double g_gestureAngle = 20;  // gesture: look within this of the controller
 std::string g_gestureHand = "left";
 Lasers g_lasers = Lasers::OutsideGames;  // when controllers' lasers work the screens (see the top)
 bool g_gameRunning = false;              // a scene app (VR game) is running
+InGames g_inGames = InGames::Hide;       // during a VR game, the always mode acts like the dashboard mode
 
 // ---------------------------------------------------------------- chrome (bar, button, handle)
 
@@ -533,8 +537,25 @@ double FacingAngle(const Mat &p, const Mat &head) {
 }
 
 // The screens' shared visibility for the mode (before a pinned screen's own facing rule).
+// The mode in effect: during a VR game (with g_inGames Hide), "always" becomes "only with
+// the dashboard open", so the screens stay out of the game until you open the dashboard.
+Mode EffectiveMode() {
+    return g_gameRunning && g_inGames == InGames::Hide && g_mode == Mode::Always ? Mode::Dashboard : g_mode;
+}
+
+// A VR game starting or stopping (checked twice a second) resets the hide/show switch, whose
+// meaning depends on the mode in effect.
+void UpdateGame() {
+    if (g_tick % 45) return;
+    const bool running = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
+    if (running == g_gameRunning) return;
+    g_gameRunning = running;
+    g_manual = false;
+    std::printf("%s\n", running ? "a VR game started" : "the VR game ended");
+}
+
 bool ModeVisible() {
-    switch (g_mode) {
+    switch (EffectiveMode()) {
         case Mode::Always: return !g_manual;
         case Mode::Toggle: return g_manual;
         case Mode::Dashboard: return g_manual || vr::VROverlay()->IsDashboardVisible();
@@ -603,9 +624,8 @@ void UpdateVisibility() {
 
 
 // Controllers' lasers on the screens (see the top): the flag follows the mode and whether a
-// VR game runs (checked twice a second).
+// VR game runs.
 void UpdateLasers() {
-    if (g_tick % 45 == 0) g_gameRunning = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
     const bool want = g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning);
     for (auto &[i, s] : g_screens) {
         if (s.lasers == want) continue;
@@ -1162,6 +1182,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         if (ev.eventType == vr::VREvent_TrackedDeviceDeactivated) EndDragsBy(ev.trackedDeviceIndex);
     }
     ++g_tick;
+    UpdateGame();
     UpdateVisibility();
     UpdateLasers();
     UpdateControls();
@@ -1185,8 +1206,10 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //   gesture <left|right> <degrees>   the gesture mode: look within this of that controller
 //   hide | show | toggle      the manual switch (see g_manual)
 //   controllers always|outside_games|dashboard   when controllers' lasers work the screens
+//   ingames hide|visible      during a VR game, "always" acts like "only with the dashboard"
+//                             (hide), or stays as it is (visible)
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
-//                     <controllers> <game running 0|1>"
+//                     <controllers> <game running 0|1> <ingames>"
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
 // numbered from 1 here, like everywhere the user sees them.
 void ft_vr_command(const char *cmd, char *reply, int size) {
@@ -1291,11 +1314,19 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         g_gestureAngle = std::clamp(w, 5.0, 90.0);
         std::snprintf(reply, size, "ok");
     } else if (!std::strncmp(cmd, "hide", 4) || !std::strncmp(cmd, "show", 4) || !std::strncmp(cmd, "toggle", 6)) {
-        const bool shownNow = g_mode == Mode::Always ? !g_manual : g_manual;
+        const bool always = EffectiveMode() == Mode::Always;
+        const bool shownNow = always ? !g_manual : g_manual;
         const bool want = cmd[0] == 's' ? true : cmd[0] == 'h' ? false : !shownNow;
-        g_manual = g_mode == Mode::Always ? !want : want;
+        g_manual = always ? !want : want;
         UpdateVisibility();
         std::snprintf(reply, size, "ok %s", want ? "shown" : "hidden");
+    } else if (std::sscanf(cmd, "ingames %15s", word) == 1) {
+        if (!std::strcmp(word, "hide")) g_inGames = InGames::Hide;
+        else if (!std::strcmp(word, "visible")) g_inGames = InGames::Visible;
+        else return (void)std::snprintf(reply, size, "error modes: hide visible");
+        g_manual = false;
+        UpdateVisibility();
+        std::snprintf(reply, size, "ok %s", word);
     } else if (std::sscanf(cmd, "controllers %15s", word) == 1) {
         const std::string m = word;
         if (m == "always") g_lasers = Lasers::Always;
@@ -1305,8 +1336,9 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         UpdateLasers();
         std::snprintf(reply, size, "ok %s", LasersName());
     } else if (std::strncmp(cmd, "state", 5) == 0) {
-        std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d", ModeName(), g_manual ? 1 : 0, g_wristAngle,
-                      g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0);
+        std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
+                      g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,
+                      g_inGames == InGames::Hide ? "hide" : "visible");
     } else {
         std::snprintf(reply, size, "error unknown command");
     }
