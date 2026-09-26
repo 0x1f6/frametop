@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Reset Screen Layout
+GenericName=Put the VR desktop's screens back in their layout
+Comment=Float the screens and arrange them in the layout from Frametop Display Settings
+Exec=@REPO@/frametop/layout/ft-layout apply
+Icon=view-restore
+Categories=Settings;
+Keywords=display;screen;layout;arrange;reset;steamvr;frametop;
+X-KDE-Shortcuts=Meta+Shift+R

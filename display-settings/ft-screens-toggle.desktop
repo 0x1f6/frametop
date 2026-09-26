@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hide/Show Screens
+GenericName=Hide or show the VR desktop's screens
+Comment=Hide the screens (and SteamVR's laser) for a VR game; press again to bring them back
+Exec=@REPO@/frametop/layout/ft-layout toggle
+Icon=view-visible
+Categories=Settings;
+Keywords=display;screen;hide;show;steamvr;frametop;
+X-KDE-Shortcuts=Meta+Shift+H
