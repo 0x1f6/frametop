@@ -31,6 +31,9 @@
 //     owns the dashboard pointer, dashboard.laserRayWidthScale is 0 so only the dot shows.
 //     It's restored when a controller takes the pointer back.
 //
+// Headset off: when SteamVR says nobody is wearing the headset, the pointer is released and
+// stays off until it's worn again, so the displays can sleep (see the main loop).
+//
 // Last used wins: when a real controller moves (picked up), the pointer is released
 // at once (driver "hide", which also drops its hand role hint), so the controller gets
 // its role and laser back. The next mouse input reconnects and claims the laser again.
@@ -366,8 +369,9 @@ int main() {
     overlay->FindOverlay("system.pointer", &systemPointer);
     Vec3 pivot, tiltOrigin, lastPoint, lastOrigin, lastAim{0, 0, -1};
     Basis tiltBasis{};
+    bool headsetOff = false;  // nobody is wearing the headset (see the main loop)
     auto wake = [&](Clock::time_point t) {
-        if (t < noWakeUntil) return;
+        if (t < noWakeUntil || headsetOff) return;
         wokeAt = t;
         active = true;
         recenter = true;
@@ -537,6 +541,24 @@ int main() {
     std::fflush(stdout);
 
     while (true) {
+        // The headset off: SteamVR drops the HMD's activity to idle as soon as it comes off.
+        // An awake pointer (a connected controller, SteamVR's laser mode forced on) kept the
+        // displays from sleeping, so it's released at once, and the mouse can't wake it until
+        // the headset is back on (then the first mouse input does).
+        const auto level = sys->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+        headsetOff = level == vr::k_EDeviceActivityLevel_Idle || level == vr::k_EDeviceActivityLevel_Standby ||
+                     level == vr::k_EDeviceActivityLevel_Idle_Timeout;
+        if (headsetOff && active) {
+            active = false;
+            claimPending = claimHeld = false;
+            overlay->HideOverlay(cursor);
+            overlay->HideOverlay(marker);
+            SendTo(out, "ft_pointer", "btn a 0");
+            SendTo(out, "ft_pointer", "hide");
+            std::printf("headset off: pointer released\n");
+            std::fflush(stdout);
+        }
+
         // Commands from the relay.
         char buf[256];
         ssize_t n;
