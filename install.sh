@@ -23,13 +23,17 @@ for arg in "$@"; do
   esac
 done
 
+# Only the questions read from the terminal (or whatever stdin is); the build steps get
+# no input, so they can't swallow typed-ahead or piped answers.
+exec 3<&0 </dev/null
+
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ask() {  # ask "question" default(y|n)
   [ "$assume_yes" = 1 ] && [ "$2" = y ] && return 0
   [ "$assume_yes" = 1 ] && return 1
   local hint answer
   hint=$([ "$2" = y ] && echo "Y/n" || echo "y/N")
-  read -r -p "$1 [$hint] " answer
+  read -r -p "$1 [$hint] " answer <&3 || answer=
   answer=${answer:-$2}
   [[ $answer =~ ^[Yy] ]]
 }
