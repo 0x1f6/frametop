@@ -69,6 +69,8 @@ SteamVR opens input devices only when it starts. A Bluetooth mouse that sleeps a
 
 It runs as the user service `frametop-input-relay.service`, ordered before `steamvr.service`.
 
+The relay also owns the volume keys, on every device that has them, the headset's buttons included. It changes the volume itself (`wpctl`, 5% a step, repeating while held), and SteamVR never sees a volume key: on devices with a keymap (the headset's `gpio-keys`, USB and Bluetooth keyboards) it remaps just the volume entries to unused codes (`KEY_MACRO29`, `KEY_MACRO30`), so the headset's click button and the other keys still reach SteamVR, and it grabs `pmic_resin`, which has only volume down. The keymaps go back when the relay stops. With `--no-grab` it leaves the volume keys alone.
+
 ```
 desktops.sh relay install     # enable it (starts with the next reboot or SteamVR start)
 desktops.sh relay status | log | uninstall

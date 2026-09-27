@@ -26,6 +26,14 @@ Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), whi
 types them into the desktop screen that has focus (not while the SteamVR dashboard is
 open): from keyboards that aren't grabbed, and keys a pointer device passes through.
 
+Volume keys, from every device that has them (the headset's own buttons included),
+are handled here: wpctl steps the default output. Nothing else may see a volume key,
+because gamescope aborts on one when no window has keyboard focus, which ends the
+whole VR session. Devices with a keymap (the headset's gpio-keys, USB and Bluetooth
+keyboards) get their volume entries remapped to unused stand-in codes, so their
+other keys keep working for SteamVR; a device without a keymap that has only volume
+keys (the headset's pmic_resin) is grabbed. The keymaps go back when the relay exits.
+
 Pointer mode (POINTER=1 in ~/.config/frametop.conf) sends pointer devices to
 the ft-pointer helper (pointer/helper), which drives the ft_pointer
 SteamVR driver. With POINTER=0, pointer devices go to the virtual mouse and
@@ -47,11 +55,13 @@ kernel's evdev and uinput interfaces.
   input-relay.py --no-grab  never grab, for testing next to a running SteamVR
 """
 import array
+import atexit
 import errno
 import fcntl
 import json
 import os
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -66,6 +76,12 @@ KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
+KEY_VOLUMEDOWN, KEY_VOLUMEUP = 114, 115
+# Volume keys are remapped to KEY_MACRO29 and KEY_MACRO30: above 255, so X11 can't
+# carry them, and bound to nothing in the default keymap.
+VOLUME_STANDIN = {KEY_VOLUMEUP: 0x2AC, KEY_VOLUMEDOWN: 0x2AD}
+VOLUME_ORIGINAL = {v: k for k, v in VOLUME_STANDIN.items()}
+VOLUME_CODES = set(VOLUME_STANDIN) | set(VOLUME_ORIGINAL)
 BUS_USB, BUS_BLUETOOTH, BUS_VIRTUAL = 0x03, 0x05, 0x06
 
 # struct input_event on 64-bit: struct timeval (2 x long), u16 type, u16 code, s32 value.
@@ -92,6 +108,10 @@ UI_SET_KEYBIT = _iow("U", 101, 4)
 UI_SET_RELBIT = _iow("U", 102, 4)
 EVIOCGRAB = _iow("E", 0x90, 4)
 EVIOCGID = _ior("E", 0x02, 8)
+KEYMAP_ENTRY = struct.Struct("BBHI32s")  # struct input_keymap_entry: flags, len, index, keycode, scancode
+INPUT_KEYMAP_BY_INDEX = 1
+EVIOCGKEYCODE_V2 = _ior("E", 0x04, KEYMAP_ENTRY.size)
+EVIOCSKEYCODE_V2 = _iow("E", 0x04, KEYMAP_ENTRY.size)
 EV_NAMES = {EV_KEY: "key", EV_REL: "rel"}
 
 
@@ -215,6 +235,69 @@ def read_rules(path=RULES_PATH):
     rules.setdefault("devices", {})
     rules.setdefault("buttons", {})
     return rules
+
+
+def remap_volume(fd, restore=False):
+    """Point a device's volume keys at their stand-ins in its keymap, or back with restore.
+
+    Returns how many keymap entries are volume keys or stand-ins, or None when the
+    device has no keymap to change (uinput devices, some platform buttons).
+    """
+    swap = VOLUME_ORIGINAL if restore else VOLUME_STANDIN
+    found = 0
+    for index in range(8192):
+        entry = bytearray(KEYMAP_ENTRY.pack(INPUT_KEYMAP_BY_INDEX, 0, index, 0, b""))
+        try:
+            fcntl.ioctl(fd, EVIOCGKEYCODE_V2, entry)
+        except OSError:
+            return found if index else None  # past the last entry
+        _, length, _, code, scancode = KEYMAP_ENTRY.unpack(entry)
+        if code in VOLUME_CODES:
+            found += 1
+        if code in swap:
+            fcntl.ioctl(fd, EVIOCSKEYCODE_V2,
+                        KEYMAP_ENTRY.pack(INPUT_KEYMAP_BY_INDEX, length, index, swap[code], scancode))
+    return found
+
+
+class Volume:
+    """Volume keys: wpctl steps the default output, repeating while a key is held.
+
+    The repeat is our own, since the headset's buttons have none; kernel autorepeat
+    from keyboards is ignored so every device repeats the same way.
+    """
+
+    STEP = 5  # percent
+    DELAY, RATE = 0.4, 0.1  # seconds before repeating, and between repeats
+
+    def __init__(self):
+        self.held = None  # (fd, code) of the key being held
+        self.next_at = None
+
+    def key(self, fd, code, value, now):
+        if value == 1:
+            self.held = (fd, code)
+            self.step(code)
+            self.next_at = now + self.DELAY
+        elif value == 0 and self.held == (fd, code):
+            self.release()
+
+    def release(self):
+        self.held = self.next_at = None
+
+    def step(self, code):
+        sign = "+" if VOLUME_ORIGINAL.get(code, code) == KEY_VOLUMEUP else "-"
+        subprocess.Popen(["wpctl", "set-volume", "--limit", "1.0", "@DEFAULT_AUDIO_SINK@",
+                          f"{self.STEP}%{sign}"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def tick(self, now):
+        if self.next_at is not None and now >= self.next_at:
+            self.step(self.held[1])
+            self.next_at = now + self.RATE
+
+    def timeout(self, now, default):
+        return default if self.next_at is None else max(0.0, min(default, self.next_at - now))
 
 
 class Pointer:
@@ -373,17 +456,21 @@ class Pointer:
 
 
 class Node:
-    """One input event node of a candidate device (mouse or keyboard, USB or Bluetooth)."""
+    """One input event node: a candidate device (mouse or keyboard, USB or Bluetooth),
+    or any other device with volume keys (candidate False, role "volume")."""
 
-    def __init__(self, path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard):
+    def __init__(self, path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard,
+                 candidate=True, volume_keys=False, only_volume=False):
         self.path, self.fd, self.name = path, fd, name
         self.bus, self.vendor, self.product, self.uniq = bus, vendor, product, uniq
         self.is_mouse, self.is_keyboard = is_mouse, is_keyboard
+        self.candidate, self.volume_keys, self.only_volume = candidate, volume_keys, only_volume
         # One physical device, whatever its node: Bluetooth address, else USB ids plus name.
         base = self.name.split(" Mouse")[0].split(" Keyboard")[0]
         self.id = uniq.lower() if uniq else f"usb:{vendor:04x}:{product:04x}:{base}"
-        self.role = None
+        self.role = None if candidate else "volume"
         self.grabbed = False
+        self.remapped = False  # volume keys remapped to their stand-ins
         self.held = set()  # keys and buttons currently down, released if the device vanishes
         self.last_watch = 0.0
 
@@ -395,7 +482,8 @@ class Node:
 
 
 def probe(path):
-    """Open a node if it is a USB or Bluetooth mouse or keyboard, else return None."""
+    """Open a node if it is a USB or Bluetooth mouse or keyboard, or has volume keys,
+    else return None."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
@@ -407,7 +495,7 @@ def probe(path):
         ident = bytearray(8)
         fcntl.ioctl(fd, EVIOCGID, ident)
         bus, vendor, product, _ = struct.unpack("HHHH", ident)
-        if name.startswith(VIRTUAL_PREFIX) or bus not in (BUS_USB, BUS_BLUETOOTH):
+        if name.startswith(VIRTUAL_PREFIX):
             raise ValueError
         uniq_buf = bytearray(64)
         try:
@@ -415,11 +503,15 @@ def probe(path):
             uniq = uniq_buf.split(b"\0", 1)[0].decode(errors="replace")
         except OSError:
             uniq = ""
+        keys = bits(fd, EV_KEY, KEY_MAX + 1)
         is_mouse = REL_X in bits(fd, EV_REL, REL_MAX + 1)
-        is_keyboard = KEY_A in bits(fd, EV_KEY, KEY_MAX + 1)
-        if not (is_mouse or is_keyboard):
+        is_keyboard = KEY_A in keys
+        candidate = bus in (BUS_USB, BUS_BLUETOOTH) and (is_mouse or is_keyboard)
+        volume_keys = bool(keys & VOLUME_CODES)  # stand-ins too: kept from before a relay restart
+        if not (candidate or volume_keys):
             raise ValueError
-        return Node(path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard)
+        return Node(path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard,
+                    candidate, volume_keys, keys <= VOLUME_CODES)
     except (OSError, ValueError):
         os.close(fd)
         return None
@@ -474,6 +566,50 @@ def main():
     seen = {}
     next_scan = 0.0
 
+    volume = Volume()
+
+    def restore_keymaps():
+        """Give remapped devices their volume keys back, so they work without the relay."""
+        for node in nodes.values():
+            if node.remapped:
+                try:
+                    remap_volume(node.fd, restore=True)
+                except OSError:
+                    pass  # device already gone
+
+    atexit.register(restore_keymaps)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so atexit runs on systemctl stop
+
+    def take_volume(node):
+        """Keep the node's volume keys from SteamVR (and so from gamescope).
+
+        Returns False for a non-candidate node there's nothing to do with.
+        """
+        if not can_grab:
+            return node.candidate
+        try:
+            found = remap_volume(node.fd)
+        except OSError as e:
+            log(f"remapping volume keys failed for {node.name}: {e}")
+            # Some entries may have changed already: handle their stand-ins and restore them.
+            node.remapped = True
+            found = None
+        if found:
+            node.remapped = True
+            log(f"{node.name} ({node.path}): volume keys taken over (remapped)")
+            return True
+        if found is None and node.only_volume:
+            try:
+                fcntl.ioctl(node.fd, EVIOCGRAB, 1)
+                node.grabbed = True
+                log(f"{node.name} ({node.path}): volume keys taken over (grabbed)")
+                return True
+            except OSError as e:
+                log(f"grab failed for {node.name}: {e}")
+        # Grabbed pointer devices still have their volume keys handled here.
+        log(f"{node.name} ({node.path}): can't take over its volume keys")
+        return node.candidate
+
     def role_of(node):
         rule = state["rules"]["devices"].get(node.id, {})
         if rule.get("role") in ("pointer", "passthrough", "ignore"):
@@ -490,6 +626,8 @@ def main():
 
     def apply_roles():
         for node in nodes.values():
+            if not node.candidate:
+                continue  # volume keys only, taken over when found
             role = role_of(node)
             want_grab = can_grab and role == "pointer"
             if want_grab != node.grabbed:
@@ -506,6 +644,8 @@ def main():
 
     def drop(node, reason):
         release_held(node)
+        if volume.held and volume.held[0] == node.fd:
+            volume.release()
         os.close(node.fd)
         del nodes[node.fd]
         seen.pop(node.path, None)
@@ -529,7 +669,8 @@ def main():
             cmd = words[0] if words else ""
             if cmd == "devices":
                 reply(addr, {"t": "devices", "pointer_mode": state["pointer"] is not None,
-                             "actions": ACTIONS, "nodes": [n.describe() for n in nodes.values()]})
+                             "actions": ACTIONS,
+                             "nodes": [n.describe() for n in nodes.values() if n.candidate]})
             elif cmd == "watch":
                 seconds = float(words[1]) if len(words) > 1 else 30
                 watchers[addr] = now + min(seconds, 600)
@@ -544,7 +685,7 @@ def main():
                 reply(addr, {"t": "error", "error": f"unknown command {cmd!r}"})
 
     def broadcast(node, etype, code, value, now):
-        if not watchers:
+        if not watchers or not node.candidate:
             return
         if etype == EV_REL and now - node.last_watch < 0.05:
             return  # motion: enough for an activity light
@@ -580,6 +721,9 @@ def main():
                     drop(old, "replaced by a new device node")
                 seen[path] = ino
                 node = probe(path)
+                if node and node.volume_keys and not take_volume(node):
+                    os.close(node.fd)
+                    node = None
                 if node:
                     nodes[node.fd] = node
                     added = True
@@ -587,10 +731,11 @@ def main():
                 apply_roles()
 
         ready, _, _ = select.select(list(nodes) + [control], [], [],
-                                    pointer.timeout() if pointer else 0.5)
+                                    volume.timeout(now, pointer.timeout() if pointer else 0.5))
         now = time.monotonic()
         if pointer:
             pointer.tick(now)
+        volume.tick(now)
         for fd in ready:
             if fd is control:
                 handle_control(now)
@@ -610,7 +755,16 @@ def main():
             for off in range(0, len(data) - EVENT.size + 1, EVENT.size):
                 _, _, etype, code, value = EVENT.unpack_from(data, off)
                 if etype in (EV_KEY, EV_REL):
-                    broadcast(node, etype, code, value, now)
+                    broadcast(node, etype, VOLUME_ORIGINAL.get(code, code) if node.remapped else code,
+                              value, now)
+                if etype == EV_KEY and ((node.remapped and code in VOLUME_ORIGINAL)
+                                        or (node.grabbed and code in VOLUME_STANDIN)):
+                    volume.key(fd, code, value, now)
+                    if value == 1:
+                        meta_down = False  # Meta used as a modifier, not a tap
+                    continue
+                if node.role == "volume":
+                    continue
                 if node.role != "pointer":
                     # Observed only. With META_DASHBOARD=1, a Meta tap on any keyboard
                     # toggles the dashboard.
