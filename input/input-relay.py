@@ -13,8 +13,9 @@ so all its event nodes share one role (the Swiftpoint Z3 has a mouse node and a
 keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
 (written by the Frametop Input Settings app):
   pointer      grabbed; drives the universal 3D mouse (default for devices with a mouse node)
-  passthrough  not grabbed, only observed, e.g. for the Meta dashboard shortcut (default for keyboards;
-               the shortcut is off unless META_DASHBOARD=1 is in ~/.config/frametop.conf)
+  passthrough  keys go to the desktop; grabbed only while typing goes there, otherwise only observed,
+               e.g. for the Meta dashboard shortcut (default for keyboards; the shortcut is off
+               unless META_DASHBOARD=1 is in ~/.config/frametop.conf)
   ignore       not grabbed, only observed for identification in the settings app
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
@@ -23,8 +24,16 @@ their saved layout, screens_toggle = hide or show the desktop screens, key = pas
 through as a key, none).
 
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
-types them into the desktop screen that has focus (not while the SteamVR dashboard is
-open): from keyboards that aren't grabbed, and keys a pointer device passes through.
+types them into the desktop screen that has focus: from pass-through keyboards, and
+keys a pointer device passes through. Typing goes to the panel clicked last, and
+ft-screens says which ("keyboard desktop|steam" on the control socket, every second).
+While it's the desktop, pass-through keyboards are grabbed, so gamescope, which reads
+every keyboard itself, doesn't type them into its focused app too. Without word from
+ft-screens for 3 seconds they're released. With SHARE_KEYS=1 in ~/.config/frametop.conf,
+a grabbed keyboard's keys also go out as "key <code> <value> <device name>" datagrams on
+@frametop_keys, for programs that watch every keyboard for a hotkey and lose it to the grab.
+It's off by default: any local process that binds that name first gets every key typed
+into the desktop.
 
 Volume keys, from every device that has them (the headset's own buttons included),
 are handled here: wpctl steps the default output. Nothing else may see a volume key,
@@ -107,6 +116,7 @@ UI_SET_EVBIT = _iow("U", 100, 4)
 UI_SET_KEYBIT = _iow("U", 101, 4)
 UI_SET_RELBIT = _iow("U", 102, 4)
 EVIOCGRAB = _iow("E", 0x90, 4)
+EVIOCGKEY = _ior("E", 0x18, (KEY_MAX + 8) // 8)
 EVIOCGID = _ior("E", 0x02, 8)
 KEYMAP_ENTRY = struct.Struct("BBHI32s")  # struct input_keymap_entry: flags, len, index, keycode, scancode
 INPUT_KEYMAP_BY_INDEX = 1
@@ -132,6 +142,7 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle", "key", "none")
 SCREENS = "\0ft_screens"
+KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
 FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
 DEFAULT_BUTTONS = {BTN_LEFT: "left", BTN_RIGHT: "right", BTN_MIDDLE: "middle",
                    BTN_SIDE: "back", BTN_EXTRA: "back"}
@@ -531,12 +542,16 @@ def main():
     control.setblocking(False)
     watchers = {}  # address -> watch end time
 
-    state = {"pointer": None, "rules": {}, "meta_dashboard": False}
+    # desktop_until: typing goes to the Frametop desktop until then (ft-screens says so
+    # every second); typing_applied: the grabs match that as of the last apply_roles().
+    state = {"pointer": None, "rules": {}, "meta_dashboard": False, "share_keys": False,
+             "desktop_until": 0.0, "typing_applied": None}
 
     def load_config():
         conf = read_config()
         state["rules"] = read_rules()
         state["meta_dashboard"] = conf.get("META_DASHBOARD", "0") == "1"
+        state["share_keys"] = conf.get("SHARE_KEYS", "0") == "1"
         if conf.get("POINTER", "0") == "1":
             p = state["pointer"] or Pointer(0.03, 30)
             p.sensitivity = float(conf.get("POINTER_SENSITIVITY", "0.03"))
@@ -567,6 +582,19 @@ def main():
     next_scan = 0.0
 
     volume = Volume()
+    keys_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+
+    def share_key(node, code, value):
+        """With SHARE_KEYS=1, a key from a keyboard grabbed for the desktop, for programs
+        that watch every keyboard for a hotkey and lose it to the grab. It can't go on
+        another input device: gamescope reads every keyboard itself and would type it
+        into its focused app."""
+        if not state["share_keys"]:
+            return
+        try:
+            keys_sock.sendto(f"key {code} {value} {node.name}".encode(), KEYS)
+        except OSError:
+            pass  # nobody listening
 
     def restore_keymaps():
         """Give remapped devices their volume keys back, so they work without the relay."""
@@ -581,7 +609,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so atexit runs on systemctl stop
 
     def take_volume(node):
-        """Keep the node's volume keys from SteamVR (and so from gamescope).
+        """Keep the node's volume keys from gamescope and SteamVR, which read every device.
 
         Returns False for a non-candidate node there's nothing to do with.
         """
@@ -619,18 +647,39 @@ def main():
 
     def release_held(node):
         for code in node.held:
-            (mouse if code >= BTN_MISC else keyboard).emit(EV_KEY, code, 0)
+            if node.role == "passthrough":
+                share_key(node, code, 0)
+            else:
+                (mouse if code >= BTN_MISC else keyboard).emit(EV_KEY, code, 0)
         node.held.clear()
         mouse.sync()
         keyboard.sync()
 
+    def keys_down(node):
+        buf = bytearray((KEY_MAX + 8) // 8)
+        try:
+            fcntl.ioctl(node.fd, EVIOCGKEY, buf)
+        except OSError:
+            return False
+        return any(buf)
+
     def apply_roles():
+        """Grab pointer devices, and pass-through keyboards while typing goes to the desktop.
+
+        A keyboard with a key down keeps its grab state until it's released, or the key
+        would stay held on one side. Returns True if one is still waiting.
+        """
+        desktop = time.monotonic() < state["desktop_until"]
+        waiting = False
         for node in nodes.values():
             if not node.candidate:
                 continue  # volume keys only, taken over when found
             role = role_of(node)
-            want_grab = can_grab and role == "pointer"
-            if want_grab != node.grabbed:
+            want_grab = can_grab and (role == "pointer"
+                                      or (role == "passthrough" and node.is_keyboard and desktop))
+            if want_grab != node.grabbed and role == "passthrough" and keys_down(node):
+                waiting = True
+            elif want_grab != node.grabbed:
                 try:
                     fcntl.ioctl(node.fd, EVIOCGRAB, 1 if want_grab else 0)
                     node.grabbed = want_grab
@@ -641,6 +690,10 @@ def main():
             if role != node.role:
                 log(f"{node.name} ({node.path}, {node.id}): {role}{', grabbed' if node.grabbed else ''}")
                 node.role = role
+        if not waiting and desktop != state["typing_applied"]:
+            state["typing_applied"] = desktop
+            log(f"typing goes to {'the desktop (keyboards grabbed)' if desktop else 'Steam'}")
+        return waiting
 
     def drop(node, reason):
         release_held(node)
@@ -663,10 +716,15 @@ def main():
                 data, addr = control.recvfrom(4096)
             except BlockingIOError:
                 return
-            if not addr:
-                continue  # unbound sender, nowhere to reply
             words = data.decode(errors="replace").split()
             cmd = words[0] if words else ""
+            if cmd == "keyboard":
+                # From ft-screens (unbound, no reply): where typing goes, repeated every second.
+                desktop = len(words) > 1 and words[1] == "desktop"
+                state["desktop_until"] = now + 3.0 if desktop else 0.0
+                continue
+            if not addr:
+                continue  # unbound sender, nowhere to reply
             if cmd == "devices":
                 reply(addr, {"t": "devices", "pointer_mode": state["pointer"] is not None,
                              "actions": ACTIONS,
@@ -698,6 +756,7 @@ def main():
             else:
                 reply(addr, msg)
 
+    waiting = False  # a keyboard's grab waits for its keys to come up
     while True:
         now = time.monotonic()
         pointer = state["pointer"]
@@ -736,6 +795,8 @@ def main():
         if pointer:
             pointer.tick(now)
         volume.tick(now)
+        if (now < state["desktop_until"]) != state["typing_applied"] or waiting:
+            waiting = apply_roles()
         for fd in ready:
             if fd is control:
                 handle_control(now)
@@ -766,10 +827,16 @@ def main():
                 if node.role == "volume":
                     continue
                 if node.role != "pointer":
-                    # Observed only. With META_DASHBOARD=1, a Meta tap on any keyboard
-                    # toggles the dashboard.
+                    # Observed only, unless typing goes to the desktop. With META_DASHBOARD=1,
+                    # a Meta tap on any keyboard toggles the dashboard.
                     if node.role == "passthrough" and etype == EV_KEY:
                         to_screens(code, value)
+                        if node.grabbed and code < BTN_MISC and value in (0, 1):
+                            share_key(node, code, value)
+                            if value:
+                                node.held.add(code)
+                            else:
+                                node.held.discard(code)
                     if (pointer and state["meta_dashboard"] and node.role == "passthrough"
                             and etype == EV_KEY):
                         if code in (KEY_LEFTMETA, KEY_RIGHTMETA):

@@ -65,6 +65,7 @@ This is an early release, tested on one Steam Frame (SteamOS 0.3.0 build 2026092
 - The first install downloads 1–2 GB for the build container and compiles everything on the headset, which takes several minutes.
 - During a VR game you can't show the screens with a controller button, because the game owns the buttons. Open the SteamVR dashboard, press Meta+Shift+H, or use a mapped mouse button instead.
 - Flatscreen games aren't detected as games. If your controllers end up working the screens instead of the game, set Controllers on the screens to "Only with the SteamVR dashboard open" (Frametop Display Settings, Visibility & wrist tab).
+- Typing follows your last click. A controller click on a panel other than the screens (the dashboard, a Steam app) doesn't move typing there; click it with the mouse, or click a screen to bring typing back.
 - The screens don't draw a mouse cursor of their own. The 3D mouse's dot or SteamVR's laser shows where you're pointing.
 - Remote desktop over VNC (`./desktops.sh remote on`) needs Tailscale on the Frame.
 

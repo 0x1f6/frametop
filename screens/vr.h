@@ -32,8 +32,8 @@ bool ft_vr_init(void);
 void ft_vr_shutdown(void);
 // Modifiers SteamVR can import for a DRM format. Returns the count (at most max).
 int ft_vr_modifiers(uint32_t format, uint64_t *out, int max);
-// The SteamVR dashboard is open (typing belongs to it then, not to the screens).
-bool ft_vr_dashboard_visible(void);
+// The screens are showing (by the visibility mode; not counting a wrist-pinned screen).
+bool ft_vr_screens_shown(void);
 // A panel for screen `index`, width in metres, placed in a row in front of the head.
 void ft_vr_screen_create(int index, double metres, int count);
 void ft_vr_screen_destroy(int index);

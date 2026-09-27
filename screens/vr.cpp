@@ -1032,7 +1032,7 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
     return int(n < uint32_t(max) ? n : uint32_t(max));
 }
 
-bool ft_vr_dashboard_visible(void) { return vr::VROverlay()->IsDashboardVisible(); }
+bool ft_vr_screens_shown(void) { return ModeVisible(); }
 
 void ft_vr_screen_create(int index, double metres, int count) {
     Screen &s = g_screens[index];

@@ -51,7 +51,7 @@ In the last three modes the hotkey shows the screens anyway. Two more settings o
 - During VR games, the Always mode hides the screens unless the dashboard is open (the default), or leaves them up.
 - Controllers on the screens. Visible screens can keep SteamVR's laser mouse on, so controllers work them with the dashboard closed, but that also takes the controllers away from a game. By default this is off while a VR game runs, and the 3D mouse or the dashboard works the screens. The other choices are always on, or only with the dashboard open, which also suits flatscreen games since they aren't scene apps.
 
-Input from the lasers reaches KWin through ft-screens' own seat. Keys come from the input relay, from any keyboard it doesn't grab and any key a pointer device passes through, and go to the screen you clicked last, except while the SteamVR dashboard is open.
+Input from the lasers reaches KWin through ft-screens' own seat. Keys come from the input relay, from pass-through keyboards and any key a pointer device passes through. Typing follows your last click: after a click on a screen it goes to the desktop, even with the SteamVR dashboard open, and after a mouse click on any other panel (the dashboard, Steam, an app like Spotify) it goes there instead. While it goes to the desktop, the relay grabs pass-through keyboards so gamescope, which reads every keyboard itself, doesn't type them into the Steam app too. A program that watches every keyboard for a hotkey loses a grabbed one; with `SHARE_KEYS=1` in `~/.config/frametop.conf`, their keys also go to `@frametop_keys` for it. That's off by default, since any local process that binds the name first would get everything typed into the desktop. Hidden screens don't take typing.
 
 ft-screens listens for datagrams on the abstract socket `@ft_screens` and replies to the sender:
 
@@ -69,7 +69,7 @@ SteamVR opens input devices only when it starts. A Bluetooth mouse that sleeps a
 
 It runs as the user service `frametop-input-relay.service`, ordered before `steamvr.service`.
 
-The relay also owns the volume keys, on every device that has them, the headset's buttons included. It changes the volume itself (`wpctl`, 5% a step, repeating while held), and SteamVR never sees a volume key: on devices with a keymap (the headset's `gpio-keys`, USB and Bluetooth keyboards) it remaps just the volume entries to unused codes (`KEY_MACRO29`, `KEY_MACRO30`), so the headset's click button and the other keys still reach SteamVR, and it grabs `pmic_resin`, which has only volume down. The keymaps go back when the relay stops. With `--no-grab` it leaves the volume keys alone.
+The relay also owns the volume keys, on every device that has them, the headset's buttons included. It changes the volume itself (`wpctl`, 5% a step, repeating while held), and nothing else sees a volume key, gamescope and SteamVR included: on devices with a keymap (the headset's `gpio-keys`, USB and Bluetooth keyboards) it remaps just the volume entries to unused codes (`KEY_MACRO29`, `KEY_MACRO30`), so the headset's click button and the other keys still work, and it grabs `pmic_resin`, which has only volume down. The keymaps go back when the relay stops. With `--no-grab` it leaves the volume keys alone.
 
 ```
 desktops.sh relay install     # enable it (starts with the next reboot or SteamVR start)
@@ -104,7 +104,7 @@ The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `P
 
 A Kirigami app with a Python backend, in the Plasma menu under Settings. It runs in the `dev` container and talks to the relay over its control socket, `@frametop_relay`. It has four pages:
 
-- Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (not grabbed; the default for keyboards, where a Meta tap toggles the dashboard if `META_DASHBOARD=1` is in `~/.config/frametop.conf`), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
+- Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (grabbed only while typing goes to the desktop; the default for keyboards, where a Meta tap toggles the dashboard if `META_DASHBOARD=1` is in `~/.config/frametop.conf`), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
 - Buttons maps a pointer device's buttons. Choose Capture a button, press the button or key, then pick an action: a click, back, scroll, toggle dashboard, recenter, pointer on or off, faster or slower, pass the key through, or nothing. Devices with saved mappings are listed even while they're asleep.
 - Pointer has sliders for the pointer settings, which apply immediately, and a Recenter button.
 - Bluetooth lists paired devices and has Apply Bluetooth fixes, which runs `/etc/steamframe/bt-fixups.sh` through `pkexec`. Pair new devices in Steam.

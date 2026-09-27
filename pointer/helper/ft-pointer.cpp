@@ -633,6 +633,9 @@ int main() {
                 continue;
             }
             if (std::strncmp(buf, "btn trigger 1", 13) == 0) {
+                // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
+                // its own screens, but only we know when one lands on another panel.
+                SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
                 leftHeld = true;
                 dragDistance = lastDistance;
                 tiltYaw = tiltPitch = 0;  // a new drag starts untilted
