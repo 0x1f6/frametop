@@ -50,7 +50,7 @@ if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 else
   on_frame 'set -e; mkdir -p ~/dev/src
-# A tested release, so an upstream change can't break new installs.
+# A tested release, so upstream changes cannot break new installs.
 [ -d ~/dev/src/distrobox ] || git clone --depth 1 --branch 1.8.2.5 https://github.com/89luca89/distrobox.git ~/dev/src/distrobox
 cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
@@ -89,6 +89,10 @@ cat <<'EOF'
 SteamVR has to restart once, to load the 3D mouse driver and to start the input relay
 before it. Restarting SteamVR closes everything open in VR, including this terminal if
 it's in a VR desktop. Rebooting the headset works too.
+
+Recommended: stop Steam from putting the headset to sleep while it's plugged in. In Steam,
+open Settings > Power, and under "When Plugged In and Idle" set "Sleep after" to Never.
+The displays still turn off when you take the headset off.
 EOF
 if ask "Restart SteamVR now?" n; then
   on_frame 'systemctl --user restart steamvr.service'

@@ -16,6 +16,19 @@
 set -eu
 
 here=$(dirname "$(readlink -f "$0")")
+
+# Started from the VR launcher, the desktop inherits the Steam client's environment. Apps in
+# it should see the system as a normal login does, so drop the client's runtime: its
+# LD_LIBRARY_PATH put Steam's own libraries ahead of the system's (Steam's libavcodec has no
+# H.264 decoder, so VLC couldn't play most videos), and its overlay and launch settings are
+# meant for games. SteamOS's own defaults (/usr/share/deckard/mesavars.sh) stay.
+for var in $(compgen -e); do
+  case $var in
+    LD_LIBRARY_PATH | LD_PRELOAD | STEAM_* | Steam* | SRT_* | PRESSURE_VESSEL_* | MANGOHUD_* | \
+      ENABLE_VK_LAYER_VALVE_steam_overlay_* | STEAMVIDEOTOKEN) unset "$var" ;;
+  esac
+done
+
 conf=$HOME/.config/frametop.conf
 BACKEND=screens SCREENS=2 WIDTH=1920 HEIGHT=1080 PHYS_WIDTH=1.6 REMOTE=0
 # shellcheck disable=SC1090
@@ -46,7 +59,6 @@ if [ "${1:-}" != --inner ]; then
   # Plasma can't find them and opens Discover instead.
   export XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
   set +u; . /etc/profile.d/flatpak.sh; set -u
-  unset LD_PRELOAD
   # Arrange the screens in the saved layout once they're up (layout; skipped
   # when auto-arrange is off).
   setsid "$here/../layout/ft-layout" apply --wait 90 > /tmp/frametop-layout.log 2>&1 < /dev/null &
@@ -80,8 +92,11 @@ if [ "${1:-}" != --inner ]; then
   exit
 fi
 
-# Inside the host compositor (ft-screens or gamescope) from here on.
-unset LD_PRELOAD XDG_DESKTOP_PORTAL_DIR
+# Inside the host compositor (ft-screens or gamescope) from here on. The desktop isn't a
+# gamescope client with ft-screens, so the gamescope session's Vulkan layer stays off, and
+# the gamescope session's portal config isn't Plasma's.
+[ "$backend" = gamescope ] || unset ENABLE_GAMESCOPE_WSI
+unset XDG_DESKTOP_PORTAL_DIR
 [ "$backend" = gamescope ] || screens=${FT_SCREEN_COUNT:-$screens}
 
 host_runtime=$XDG_RUNTIME_DIR

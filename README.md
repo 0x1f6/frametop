@@ -28,6 +28,8 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
+If you work in the desktop for long stretches, stop Steam from putting the headset to sleep while it's plugged in: in Steam, open Settings → Power, and under When Plugged In and Idle set Sleep after to Never. By default Steam suspends the Frame after an hour without input, even while it charges. The displays still turn off a few seconds after you take the headset off.
+
 ### Add a Bluetooth mouse or keyboard
 
 1. Pair it in Steam, under Settings → Bluetooth.
