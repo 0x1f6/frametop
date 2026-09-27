@@ -26,15 +26,17 @@ packages=(
   wayland-utils xorg-x11-server-Xvfb ImageMagick xdotool
 )
 
-on_frame_script "${packages[@]}" <<'EOF'
+on_frame_script "$FRAME_REPO" "${packages[@]}" <<'EOF'
 set -euo pipefail
+repo=$1
+shift
 distrobox=$HOME/.local/bin/distrobox
 [ -x "$distrobox" ] || { echo "distrobox not found at $distrobox (see the top-level README)" >&2; exit 1; }
 if ! podman container exists dev; then
   echo "creating the dev container (Fedora 44 toolbox)"
   "$distrobox" create --yes --name dev --image registry.fedoraproject.org/fedora-toolbox:44
 fi
-"$root/scripts/container-up.sh"
+"$repo/scripts/container-up.sh"  # in a scope of its own, not this shell's
 "$distrobox" enter dev -- bash -c '
 set -euo pipefail
 echo "installing ${#@} packages (already-installed ones are skipped)"
