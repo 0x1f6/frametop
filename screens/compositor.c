@@ -303,13 +303,23 @@ static int child_exited(int sig, void *data) {
     return 0;
 }
 
+static bool key_held(const struct wlr_keyboard *kb, uint32_t code) {
+    for (size_t i = 0; i < kb->num_keycodes; i++)
+        if (kb->keycodes[i] == code) return true;
+    return false;
+}
+
 // Keys from the input relay (physical keyboards): "key <evdev code> <1 press|0 release>".
 // They go to the screen KWin has keyboard focus on (the last one clicked), but not while
-// the SteamVR dashboard is open: typing belongs to Steam then.
+// the SteamVR dashboard is open: typing belongs to Steam then. The release of a key the
+// desktop got the press for always goes through, or the key stays held there (a modifier
+// held as the dashboard opens would otherwise modify every key typed after it).
 static void handle_key(struct server *s, uint32_t code, int value, char *reply, int size) {
     if (value == 2) return (void)snprintf(reply, size, "ok repeat ignored");  // KWin repeats itself
-    if (!s->seat->keyboard_state.focused_surface) return (void)snprintf(reply, size, "ok no focus");
-    if (ft_vr_dashboard_visible()) return (void)snprintf(reply, size, "ok dashboard open");
+    if (value || !key_held(&s->keyboard, code)) {
+        if (!s->seat->keyboard_state.focused_surface) return (void)snprintf(reply, size, "ok no focus");
+        if (ft_vr_dashboard_visible()) return (void)snprintf(reply, size, "ok dashboard open");
+    }
     struct wlr_keyboard_key_event ev = {
         .time_msec = now_ms(), .keycode = code, .update_state = true,
         .state = value ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED};
