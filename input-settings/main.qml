@@ -157,7 +157,7 @@ Kirigami.ApplicationWindow {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 text: "Move or press a device to see which row it is. 3D pointer: grabbed, drives the SteamVR pointer. "
-                      + "Pass through: left alone (a Meta tap still toggles the dashboard). Ignore: left alone."
+                      + "Pass through: left alone (a Meta tap toggles the dashboard if META_DASHBOARD=1). Ignore: left alone."
             }
         }
     }

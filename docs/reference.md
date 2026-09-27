@@ -87,7 +87,7 @@ A mouse drives SteamVR the way a controller's laser does, but shows up as a smal
 
 Whichever device you used last wins. Picking up a controller hands the laser back at once, and moving the mouse takes it again. When the headset comes off, the pointer lets go, so the displays can sleep, and it stays off until you're wearing the headset again.
 
-To move a floating panel, left-drag its grab bar. The scroll wheel pushes and pulls it while you drag. Hold the right button while dragging and move the mouse to tilt the panel around the grab point; the right press isn't sent as a click. The tilt stays for the rest of the drag, and releasing the left button drops the panel as it is. A mapped Toggle dashboard button (or a Meta tap) wakes the pointer if needed and holds the virtual system button for 0.12 s, because SteamVR ignores a press and release in the same instant.
+To move a floating panel, left-drag its grab bar. The scroll wheel pushes and pulls it while you drag. Hold the right button while dragging and move the mouse to tilt the panel around the grab point; the right press isn't sent as a click. The tilt stays for the rest of the drag, and releasing the left button drops the panel as it is. A mapped Toggle dashboard button (or a Meta tap, with `META_DASHBOARD=1`) wakes the pointer if needed and holds the virtual system button for 0.12 s, because SteamVR ignores a press and release in the same instant.
 
 ```
 pointer/driver/build.sh && pointer/driver/install.sh install   # then restart SteamVR
@@ -102,7 +102,7 @@ The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `P
 
 A Kirigami app with a Python backend, in the Plasma menu under Settings. It runs in the `dev` container and talks to the relay over its control socket, `@frametop_relay`. It has four pages:
 
-- Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (not grabbed; the default for keyboards, where a Meta tap still toggles the dashboard), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
+- Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (not grabbed; the default for keyboards, where a Meta tap toggles the dashboard if `META_DASHBOARD=1` is in `~/.config/frametop.conf`), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
 - Buttons maps a pointer device's buttons. Choose Capture a button, press the button or key, then pick an action: a click, back, scroll, toggle dashboard, recenter, pointer on or off, faster or slower, pass the key through, or nothing. Devices with saved mappings are listed even while they're asleep.
 - Pointer has sliders for the pointer settings, which apply immediately, and a Recenter button.
 - Bluetooth lists paired devices and has Apply Bluetooth fixes, which runs `/etc/steamframe/bt-fixups.sh` through `pkexec`. Pair new devices in Steam.

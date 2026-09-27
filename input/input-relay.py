@@ -13,7 +13,8 @@ so all its event nodes share one role (the Swiftpoint Z3 has a mouse node and a
 keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
 (written by the Frametop Input Settings app):
   pointer      grabbed; drives the universal 3D mouse (default for devices with a mouse node)
-  passthrough  not grabbed, only observed, e.g. for the Meta dashboard shortcut (default for keyboards)
+  passthrough  not grabbed, only observed, e.g. for the Meta dashboard shortcut (default for keyboards;
+               the shortcut is off unless META_DASHBOARD=1 is in ~/.config/frametop.conf)
   ignore       not grabbed, only observed for identification in the settings app
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
@@ -438,11 +439,12 @@ def main():
     control.setblocking(False)
     watchers = {}  # address -> watch end time
 
-    state = {"pointer": None, "rules": {}}
+    state = {"pointer": None, "rules": {}, "meta_dashboard": False}
 
     def load_config():
         conf = read_config()
         state["rules"] = read_rules()
+        state["meta_dashboard"] = conf.get("META_DASHBOARD", "0") == "1"
         if conf.get("POINTER", "0") == "1":
             p = state["pointer"] or Pointer(0.03, 30)
             p.sensitivity = float(conf.get("POINTER_SENSITIVITY", "0.03"))
@@ -610,10 +612,12 @@ def main():
                 if etype in (EV_KEY, EV_REL):
                     broadcast(node, etype, code, value, now)
                 if node.role != "pointer":
-                    # Observed only. A Meta tap on any keyboard toggles the dashboard.
+                    # Observed only. With META_DASHBOARD=1, a Meta tap on any keyboard
+                    # toggles the dashboard.
                     if node.role == "passthrough" and etype == EV_KEY:
                         to_screens(code, value)
-                    if pointer and node.role == "passthrough" and etype == EV_KEY:
+                    if (pointer and state["meta_dashboard"] and node.role == "passthrough"
+                            and etype == EV_KEY):
                         if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
                             if value == 1:
                                 meta_down = True
