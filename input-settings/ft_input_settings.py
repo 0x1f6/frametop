@@ -54,6 +54,8 @@ POINTER_SETTINGS = [
     ("POINTER_SCENE_RADIUS", "Dock / window-control reach", 0.5, 0.1, 1.5, 0.05, "m"),
     ("POINTER_EDGE_REACH", "Panel edge reach", 0.3, 0.0, 1.0, 0.05, "m"),
     ("POINTER_LEASH_DEG", "Head follow leash", 10, 0, 60, 1, "°"),
+    ("POINTER_LEASH_RETURN", "Head follow catch-up", 0.2, 0.05, 2.0, 0.05, "s"),
+    ("POINTER_FOLLOW_REACH", "Head follow reach", 70, 20, 85, 1, "°"),
     ("POINTER_WAKE_COUNTS", "Movement to wake", 40, 5, 200, 5, "counts"),
     ("POINTER_IDLE", "Release after idle", 30, 5, 120, 5, "s"),
 ]
@@ -358,7 +360,7 @@ class Backend(QObject):
 
     @Slot(str, float)
     def setPointerSetting(self, key, value):
-        integer = key in ("POINTER_WAKE_COUNTS", "POINTER_IDLE", "POINTER_LEASH_DEG")
+        integer = key in ("POINTER_WAKE_COUNTS", "POINTER_IDLE", "POINTER_LEASH_DEG", "POINTER_FOLLOW_REACH")
         write_conf_value(key, str(int(round(value))) if integer else f"{value:.3f}".rstrip("0").rstrip("."))
         self.reload_timer.start()  # debounce slider drags
         self.pointerChanged.emit()

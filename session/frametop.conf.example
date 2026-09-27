@@ -19,7 +19,9 @@ POINTER_ORIGIN_MARGIN=0.15   # the laser starts at least this far (m) in front o
 POINTER_SCENE_RADIUS=0.5   # texture-less dashboard overlays (dock, window controls): hit radius (m) around their origin
 POINTER_EDGE_REACH=0.3     # just off a panel, the cursor stays on its plane this far (m), to reach its resize edges and window controls
 POINTER_FOLLOW=0           # 1 = the cursor follows your head on a leash (a mouse button mapped to Head follow on/off toggles it)
-POINTER_LEASH_DEG=10       # head follow: how far (degrees) your head can turn before the cursor comes along; 0 locks it to your view
+POINTER_LEASH_DEG=10       # head follow: the most (degrees) the cursor can lag behind your head; 0 locks it to your view
+POINTER_LEASH_RETURN=0.2   # head follow: how quickly (s) the cursor settles back to its place in your view
+POINTER_FOLLOW_REACH=70    # head follow: how far (degrees) from the middle of your view the mouse can move the cursor
 META_DASHBOARD=0   # 1 = a Meta tap on a pass-through keyboard toggles the SteamVR dashboard (pointer mode only)
 SHARE_KEYS=0       # 1 = keys of keyboards grabbed for the desktop also go to @frametop_keys, for hotkey tools (any local process can listen)
 LAYOUT_GRAB_OFFSET=0.075   # arranging screens: where the floating window's grab bar is, in metres below the screen
