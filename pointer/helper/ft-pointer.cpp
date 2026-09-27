@@ -87,16 +87,21 @@
 // SteamVR's resize snap back.
 //
 // Head follow (off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
-// is carried by a reference direction that follows where the head faces, and the cursor turns
-// with it, keeping its offset (mouse movement changes the offset). The reference eases toward
-// the head's facing with a time constant of POINTER_LEASH_RETURN (0.2 s), so small head
-// movements barely move the cursor, and it never lags more than POINTER_LEASH_DEG (10) behind:
-// a fast turn drags it along at the leash's end. Once the head settles, the reference is back
-// on its facing, so the cursor is back where it was in the view (a leash that only moved at its
-// end left the reference up to the leash off, and getting it back meant overshooting). At 0 the
-// reference is the head's facing, so the cursor is head-locked. Head roll is ignored (the frames
-// have no roll), so tilting the head doesn't swing the cursor. The cursor stays within
-// POINTER_FOLLOW_REACH (70) of the reference. The ray starts at the eye. While the left
+// is carried by a reference direction, where the head faced when it last settled, and turns
+// with it, keeping its offset (mouse movement changes the offset, up to POINTER_FOLLOW_REACH,
+// 70 deg, so the cursor can sit in a corner of the view). While the head stays within
+// POINTER_LEASH_DEG (10) of the reference, nothing moves on its own: the cursor stays put in
+// the room. Once the head has been past the leash for POINTER_LEASH_DELAY (0.2 s; a glance
+// out and back doesn't count), the reference follows: it eases toward the head's facing with a
+// time constant of POINTER_LEASH_RETURN (0.2 s), never falling further behind than the leash
+// (or than it already was), until it lands on the facing, and the cursor is back where it was
+// in the view. Then it waits for the leash again. Earlier tries: dragging the reference only at
+// the leash's end left it up to the leash off after turning back (getting it centred took an
+// overshoot), and easing it all the time moved the cursor on every small head movement. At 0
+// the reference is the head's facing, so the cursor is head-locked. Head roll is ignored (the
+// frames have no roll), so tilting the head doesn't swing the cursor. The ray origin (the
+// anchor) moves to the eye with the reference, so leaning inside the leash doesn't move the
+// cursor either. While the left
 // button is held (and the drop hold after it), the leash still moves the reference but the
 // cursor stays put in the room, so a click or a drag can't be nudged by the head; the offset
 // is taken up from where the cursor is when the hold ends, so it doesn't jump.
@@ -134,8 +139,8 @@
 // but never closer than POINTER_ORIGIN_MARGIN (0.15 m) to the cursor point: SteamVR's
 // small controls (undock, frame buttons) float a few centimetres in front of their
 // panel, and a laser that starts behind them can't hit them. POINTER_FOLLOW (0) and
-// POINTER_LEASH_DEG (10), POINTER_LEASH_RETURN (0.2 s), POINTER_FOLLOW_REACH (70 deg): head
-// follow, above.
+// POINTER_LEASH_DEG (10), POINTER_LEASH_DELAY (0.2 s), POINTER_LEASH_RETURN (0.2 s),
+// POINTER_FOLLOW_REACH (70 deg): head follow, above.
 #include <openvr.h>
 
 #include "vrmath.h"
@@ -330,7 +335,7 @@ constexpr double kPlaceDegPerSec = 60;      // tested: 40 deg/s is applied exact
 int main() {
     double freeDistance = 1.5, cursorDeg = 0.4, originFraction = 0.95, originMargin = 0.15, sceneRadius = 0.5,
            edgeReach = 0.3, grabOffset = 0.075,
-           slideSpeed = 0.5, leashDeg = 10, leashReturn = 0.2, followReach = 70;
+           slideSpeed = 0.5, leashDeg = 10, leashReturn = 0.2, leashDelay = 0.2, followReach = 70;
     // Head follow (see the top). followConf is POINTER_FOLLOW as last read: a reload only
     // overrides a "follow" command when the setting itself changed.
     bool follow = false, followConf = false, followReset = true;
@@ -346,6 +351,7 @@ int main() {
         slideSpeed = std::clamp(ConfDouble(conf, "LAYOUT_SLIDE_SPEED", 0.5), 0.02, 2.0);
         leashDeg = std::clamp(ConfDouble(conf, "POINTER_LEASH_DEG", 10), 0.0, 90.0);
         leashReturn = std::clamp(ConfDouble(conf, "POINTER_LEASH_RETURN", 0.2), 0.0, 5.0);
+        leashDelay = std::clamp(ConfDouble(conf, "POINTER_LEASH_DELAY", 0.2), 0.0, 5.0);
         followReach = std::clamp(ConfDouble(conf, "POINTER_FOLLOW_REACH", 70), 10.0, 89.0);
         const bool wantFollow = ConfDouble(conf, "POINTER_FOLLOW", 0) != 0;
         if (wantFollow != followConf) follow = followConf = wantFollow, followReset = true;
@@ -434,6 +440,9 @@ int main() {
     double yaw = 0, pitch = 0;
     Vec3 followRef{0, 0, -1};  // head follow's reference direction (see the top)
     auto followAt = std::chrono::steady_clock::now();  // its last update, for the easing
+    bool following = false;                           // past the leash: easing toward the head
+    double followLag = 0;                             // radians the reference trails the head
+    std::chrono::steady_clock::time_point leashOutSince{};  // head past the leash since (delay)
     vr::TrackedDeviceIndex_t ours = vr::k_unTrackedDeviceIndexInvalid;
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -810,24 +819,43 @@ int main() {
             followReset = true;
         }
 
-        // Head follow (see the top): ease the reference toward the head's facing, never more than
-        // the leash behind, and turn the cursor with it.
+        // Head follow (see the top): past the leash (for the delay), ease the reference to the
+        // head's facing, and turn the cursor with it.
         if (follow && active && anchored && hmd.bPoseIsValid) {
             const Vec3 head = LimitPitch(Vec3{-hm[0][2], -hm[1][2], -hm[2][2]}, 85);
-            if (followReset) followRef = head, followReset = false;
+            if (followReset) {
+                followRef = head, followLag = 0, leashOutSince = {};
+                followReset = following = false;
+            }
             const double dt = std::min(0.1, std::chrono::duration<double>(tnow - followAt).count());
-            double lag = std::acos(std::clamp(Dot(followRef, head), -1.0, 1.0)) *
-                         (leashReturn > 0 ? std::exp(-dt / leashReturn) : 0.0);
-            if (lag < 0.05 * M_PI / 180) lag = 0;  // settled: land exactly on the facing
-            const Vec3 ref =
-                LimitPitch(PullWithin(followRef, head, std::min(lag, leashDeg * M_PI / 180)), 85);
+            const double leash = leashDeg * M_PI / 180;
+            const double lag = std::acos(std::clamp(Dot(followRef, head), -1.0, 1.0));
+            double keep = lag;  // how far the reference stays behind the head after this frame
+            if (leash <= 0) {
+                keep = 0;  // head-locked
+            } else if (following) {
+                keep = lag * (leashReturn > 0 ? std::exp(-dt / leashReturn) : 0.0);
+                // A fast turn drags it at the leash's end; past it already (after the delay), it
+                // can't fall further behind, and it closes in from there without a jump.
+                keep = std::min(keep, std::max(leash, followLag));
+                if (keep < 0.05 * M_PI / 180) keep = 0, following = false;  // landed on the facing
+            } else if (lag > leash) {
+                if (leashOutSince == decltype(leashOutSince){}) leashOutSince = tnow;
+                if (std::chrono::duration<double>(tnow - leashOutSince).count() >= leashDelay)
+                    following = true, leashOutSince = {};
+            } else {
+                leashOutSince = {};  // back inside before the delay: a glance
+            }
+            followLag = keep;
+            const Vec3 ref = LimitPitch(PullWithin(followRef, head, keep), 85);
             if (!leftHeld && tnow >= dropHoldUntil) {
                 // The cursor keeps its offset from the reference (frames without roll).
                 Vec3 d = FromBasis(AimBasis(ref), ToBasis(AimBasis(followRef), Direction(yaw, pitch)));
                 d = PullWithin(Normalize(d), ref, followReach * M_PI / 180);
                 yaw = std::atan2(-d.x, -d.z) * 180 / M_PI;
                 pitch = std::clamp(std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI, -85.0, 85.0);
-                anchor = eye;
+                // The ray origin closes in on the eye as the reference does on the facing.
+                anchor = eye + (anchor - eye) * (leash <= 0 ? 0.0 : lag > 1e-6 ? keep / lag : following ? 0.0 : 1.0);
             }
             followRef = ref;
         }

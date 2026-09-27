@@ -98,7 +98,7 @@ pointer/helper/run.sh status | log | restart
 pointer/driver/install.sh probe     # devices, hand roles, who owns the dashboard pointer
 ```
 
-The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `POINTER_IDLE`, `POINTER_WAKE_COUNTS`, `POINTER_DISTANCE`, `POINTER_CURSOR_DEG`, `POINTER_ORIGIN_FRACTION`, `POINTER_ORIGIN_MARGIN`, `POINTER_SCENE_RADIUS`, `POINTER_EDGE_REACH`, `POINTER_LASER_WIDTH`, and the head follow settings `POINTER_FOLLOW`, `POINTER_LEASH_DEG`, `POINTER_LEASH_RETURN`, and `POINTER_FOLLOW_REACH`. The example config explains each. Frametop Input Settings changes them live; after editing the file by hand, restart the relay or the helper.
+The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `POINTER_IDLE`, `POINTER_WAKE_COUNTS`, `POINTER_DISTANCE`, `POINTER_CURSOR_DEG`, `POINTER_ORIGIN_FRACTION`, `POINTER_ORIGIN_MARGIN`, `POINTER_SCENE_RADIUS`, `POINTER_EDGE_REACH`, `POINTER_LASER_WIDTH`, and the head follow settings `POINTER_FOLLOW`, `POINTER_LEASH_DEG`, `POINTER_LEASH_DELAY`, `POINTER_LEASH_RETURN`, and `POINTER_FOLLOW_REACH`. The example config explains each. Frametop Input Settings changes them live; after editing the file by hand, restart the relay or the helper.
 
 ## Frametop Input Settings
 

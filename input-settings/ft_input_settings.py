@@ -54,6 +54,7 @@ POINTER_SETTINGS = [
     ("POINTER_SCENE_RADIUS", "Dock / window-control reach", 0.5, 0.1, 1.5, 0.05, "m"),
     ("POINTER_EDGE_REACH", "Panel edge reach", 0.3, 0.0, 1.0, 0.05, "m"),
     ("POINTER_LEASH_DEG", "Head follow leash", 10, 0, 60, 1, "°"),
+    ("POINTER_LEASH_DELAY", "Head follow delay", 0.2, 0.0, 1.0, 0.05, "s"),
     ("POINTER_LEASH_RETURN", "Head follow catch-up", 0.2, 0.05, 2.0, 0.05, "s"),
     ("POINTER_FOLLOW_REACH", "Head follow reach", 70, 20, 85, 1, "°"),
     ("POINTER_WAKE_COUNTS", "Movement to wake", 40, 5, 200, 5, "counts"),
