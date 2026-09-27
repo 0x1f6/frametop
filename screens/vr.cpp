@@ -205,6 +205,7 @@ struct Screen {
     float alpha = 1;
     vr::TrackedDeviceIndex_t pinned = kNone;  // riding on this controller
     Mat pinRel = Identity();                  // controller -> screen
+    Mat pose = Identity();                    // where it is in the room, when not pinned
     Drag drag = Drag::None;
     vr::TrackedDeviceIndex_t dragDevice = kNone;
     Mat dragRel = Identity();                 // device -> screen, while moving
@@ -444,8 +445,10 @@ bool ScreenPose(const Screen &s, Mat *out) {
         *out = Mul(d, s.pinRel);
         return true;
     }
-    vr::ETrackingUniverseOrigin origin;
-    return vr::VROverlay()->GetOverlayTransformAbsolute(s.overlay, &origin, out) == vr::VROverlayError_None;
+    // Our own copy: reading it back from SteamVR right after setting it could return the
+    // old pose, which left a moved screen's controls behind.
+    *out = s.pose;
+    return true;
 }
 
 // The controls' size from both the screen's width and its distance from the head (the
@@ -533,6 +536,7 @@ void RefreshChrome() {
 
 void SetAbsolute(Screen &s, const Mat &pose) {
     s.pinned = kNone;
+    s.pose = pose;
     vr::VROverlay()->SetOverlayTransformAbsolute(s.overlay, vr::TrackingUniverseStanding, &pose);
     PlaceChrome(s);
 }
