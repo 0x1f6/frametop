@@ -18,13 +18,21 @@ reg='/opt/steamvr/bin/linuxarm64/vrpathreg'
 case ${1:-install} in
   install)
     "$root/scripts/sync.sh" >/dev/null
+    # Replacing the files of a driver SteamVR has loaded leaves its input bindings in a bad
+    # state (the 3D mouse no longer gets the laser) until SteamVR restarts, so an unchanged
+    # driver is left alone.
     "$frame" --host "set -e; test -f $src/build/driver_ft_pointer.so
-rm -rf $dest; mkdir -p $dest/bin/linuxarm64
-cp -r $src/ft_pointer/. $dest/
-cp $src/build/driver_ft_pointer.so $dest/bin/linuxarm64/
+rm -rf $dest.new; mkdir -p $dest.new/bin/linuxarm64
+cp -r $src/ft_pointer/. $dest.new/
+cp $src/build/driver_ft_pointer.so $dest.new/bin/linuxarm64/
+if [ -d $dest ] && diff -r -q $dest $dest.new >/dev/null; then
+  rm -rf $dest.new; echo 'driver unchanged'
+else
+  rm -rf $dest; mv $dest.new $dest
+  echo 'installed; restart SteamVR to load it'
+fi
 LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 $reg adddriver $dest
-LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 $reg show | grep -A3 -i 'external'
-echo 'installed; restart SteamVR to load it'" ;;
+LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 $reg show | grep -A3 -i 'external'" ;;
   uninstall)
     "$frame" --host "LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 $reg removedriver $dest; rm -rf $dest; echo 'removed; restart SteamVR to unload it'" ;;
   send)

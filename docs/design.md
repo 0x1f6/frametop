@@ -80,6 +80,8 @@ A few overlays need special handling:
 - Just off a panel, the cursor stays on that panel's plane within `POINTER_EDGE_REACH`, so resize margins and window controls just outside the panel are reachable.
 - While the left button is held, the cursor keeps the distance it had at the press and stops re-testing collisions, so dragging past a panel's edge doesn't make it jump.
 
+Replacing a loaded driver's files, as re-running the installer used to do, leaves SteamVR honoring the virtual controller's hand role but not its laser claim: the dashboard pointer stays unassigned until SteamVR restarts. The driver installer now leaves an unchanged driver in place.
+
 `dashboard.laserRayWidthScale` controls the beam's width, but SteamVR only applies a change from its own settings screen or at restart, so it can't be switched per device while running.
 
 ### Handing the laser back and forth
