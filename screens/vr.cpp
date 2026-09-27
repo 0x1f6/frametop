@@ -44,6 +44,7 @@
 #include <linux/input-event-codes.h>
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -56,6 +57,7 @@
 namespace {
 
 using Mat = vr::HmdMatrix34_t;
+using Clock = std::chrono::steady_clock;
 
 Mat Identity() {
     Mat m{};
@@ -120,6 +122,42 @@ bool DevicePose(vr::TrackedDeviceIndex_t dev, Mat *out) {
     *out = g_poses[dev].mDeviceToAbsoluteTracking;
     return true;
 }
+// Where a device's laser starts and points: SteamVR's laser comes from its render model's
+// "tip" component, not the device pose. On the Frame's controllers the tip points 40 degrees
+// below the pose's -Z, so rays from the pose missed what the laser was on. Devices without
+// a tip (the 3D mouse's virtual controller) aim along their pose. Cached per device; a
+// model that isn't loaded yet is asked again a few seconds later.
+struct Tip {
+    std::string model;
+    Mat offset = Identity();
+    bool found = false;
+    Clock::time_point checked;
+};
+Mat TipOffset(vr::TrackedDeviceIndex_t dev) {
+    static std::map<vr::TrackedDeviceIndex_t, Tip> cache;
+    char model[256] = "";
+    vr::VRSystem()->GetStringTrackedDeviceProperty(dev, vr::Prop_RenderModelName_String, model, sizeof model);
+    const auto now = Clock::now();
+    auto it = cache.find(dev);
+    if (it != cache.end() && it->second.model == model &&
+        (it->second.found || now - it->second.checked < std::chrono::seconds(5)))
+        return it->second.offset;
+    Tip tip{model, Identity(), false, now};
+    vr::RenderModel_ControllerMode_State_t mode{};
+    vr::RenderModel_ComponentState_t state{};
+    if (model[0] && vr::VRRenderModels()->GetComponentStateForDevicePath(model, vr::k_pch_Controller_Component_Tip,
+                                                                          vr::k_ulInvalidInputValueHandle, &mode, &state))
+        tip.offset = state.mTrackingToComponentLocal, tip.found = true;
+    cache[dev] = tip;
+    return tip.offset;
+}
+bool LaserPose(vr::TrackedDeviceIndex_t dev, Mat *out) {
+    Mat d;
+    if (!DevicePose(dev, &d)) return false;
+    *out = Mul(d, TipOffset(dev));
+    return true;
+}
+
 bool IsHandController(vr::TrackedDeviceIndex_t i) {
     if (vr::VRSystem()->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) return false;
     char type[64] = "";
@@ -641,7 +679,7 @@ void UpdateControls() {
     std::vector<Mat> lasers;
     for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
         Mat d;
-        if (vr::VRSystem()->GetTrackedDeviceClass(i) == vr::TrackedDeviceClass_Controller && DevicePose(i, &d))
+        if (vr::VRSystem()->GetTrackedDeviceClass(i) == vr::TrackedDeviceClass_Controller && LaserPose(i, &d))
             lasers.push_back(d);
     }
     for (auto &[i, s] : g_screens) {
@@ -792,12 +830,14 @@ void StartDrag(Screen &s, Drag mode, vr::TrackedDeviceIndex_t dev) {
     LightBar(s, s.pinTarget != kNone);
     if (mode == Drag::Resize) {
         double hx, hy;
-        if (RayOnScreen(s, d, &hx, &hy)) s.grabX = hx - s.metres / 2, s.grabY = hy + s.heightMetres() / 2;
+        Mat l;
+        if (LaserPose(dev, &l) && RayOnScreen(s, l, &hx, &hy)) s.grabX = hx - s.metres / 2, s.grabY = hy + s.heightMetres() / 2;
         else s.grabX = s.grabY = 0;
     }
     if (mode == Drag::Roll) {
         s.rollFrom = s.pinned != kNone ? s.pinRel : p;
-        if (!RollLaserAngle(s, d, &s.rollAngle)) s.drag = Drag::None, s.dragDevice = kNone;
+        Mat l;
+        if (!LaserPose(dev, &l) || !RollLaserAngle(s, l, &s.rollAngle)) s.drag = Drag::None, s.dragDevice = kNone;
     }
     ApplyAlpha(s);
 }
@@ -893,14 +933,16 @@ void UpdateDrag(Screen &s, int index) {
     if (s.drag == Drag::Roll) {
         // Like turning a knob: the screen turns as far as the laser has gone around its centre.
         double a;
-        if (!RollLaserAngle(s, d, &a)) return;
+        Mat l;
+        if (!LaserPose(s.dragDevice, &l) || !RollLaserAngle(s, l, &a)) return;
         ApplyRoll(s, std::remainder(a - s.rollAngle, 2 * M_PI));
         return;
     }
     // Resize: the corner follows the ray along the screen's diagonal (so it shrinks and
     // grows from any direction), keeping where on the handle it was grabbed.
     double hx, hy;
-    if (!RayOnScreen(s, d, &hx, &hy)) return;
+    Mat l;
+    if (!LaserPose(s.dragDevice, &l) || !RayOnScreen(s, l, &hx, &hy)) return;
     const double a = s.width > 0 ? double(s.height) / s.width : 9.0 / 16;
     const double cx = hx - s.grabX, cy = hy - s.grabY;  // where the corner should be
     SetWidth(s, 2 * (cx - a * cy) / (1 + a * a));

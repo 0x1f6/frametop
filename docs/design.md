@@ -38,6 +38,8 @@ The curved layout chains screens edge to edge, like monitors on a desk: the midd
 
 A resize handle has to be able to shrink a screen from any direction, so the dragged corner follows the laser along the screen's diagonal rather than taking the larger of its horizontal and vertical reach. Pushing and pulling a carried screen moves it along the line from your head, because the 3D mouse's virtual controller sits just in front of the bar, below the screen's centre, so the line from the device points mostly upward.
 
+Wherever ft-screens needs to know where a laser points (showing the controls, the resize tab, the roll knob), it uses the laser's own pose, the render model's `tip` component, rather than the controller's pose. On the Frame's controllers the tip points 40° below the pose's forward axis, so rays from the pose missed what the laser was actually on. The 3D mouse's virtual controller has no tip, and its laser runs along its pose.
+
 `ComputeOverlayIntersection` ignores `SetOverlayIntersectionMask`, and a control can't be allowed to cover part of its screen, so the resize tab sits entirely outside the corner.
 
 ### Wrist pinning
