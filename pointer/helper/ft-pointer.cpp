@@ -86,7 +86,7 @@
 // doesn't jump the cursor to free space or swap in the laser-catching dot, which made
 // SteamVR's resize snap back.
 //
-// Head follow (off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
+// Head follow (experimental, off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
 // is carried by a reference direction, where the head faced when it last settled, and turns
 // with it, keeping its offset (mouse movement changes the offset, up to POINTER_FOLLOW_REACH,
 // 70 deg, so the cursor can sit in a corner of the view). While the head stays within

@@ -316,9 +316,18 @@ Kirigami.ApplicationWindow {
             Kirigami.FormLayout {
                 Controls.Switch {
                     Kirigami.FormData.label: "Head follow:"
-                    text: "Pointer follows your head (leash below; 0° locks it to your view)"
+                    text: "Pointer follows your head (experimental; leash below, 0° locks it to your view)"
                     checked: backend.pointerFollow
                     onToggled: backend.setPointerFollow(checked)
+                }
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    visible: true
+                    type: Kirigami.MessageType.Warning
+                    text: "Head follow is experimental. It's only lightly tested and not finished: the head "
+                          + "follow settings below are a starting point, and polishing how it feels is left open "
+                          + "for anyone who wants to take it further."
                 }
                 Repeater {
                     model: backend.pointerSettings
