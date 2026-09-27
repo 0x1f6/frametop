@@ -466,7 +466,10 @@ def main():
             except OSError:
                 pass  # ft-screens not running
     nodes = {}  # fd -> Node
-    seen = set()  # paths already probed (rejected or open)
+    # Nodes already probed (rejected or open): path -> inode. A device that disconnects and
+    # reconnects between two scans often gets the same event numbers back, so the path alone
+    # would hide it; the re-created node has a new inode.
+    seen = {}
     next_scan = 0.0
 
     def role_of(node):
@@ -503,7 +506,7 @@ def main():
         release_held(node)
         os.close(node.fd)
         del nodes[node.fd]
-        seen.discard(node.path)
+        seen.pop(node.path, None)
         log(f"released {node.name} ({node.path}): {reason}")
 
     def reply(addr, obj):
@@ -557,11 +560,23 @@ def main():
         pointer = state["pointer"]
         if now >= next_scan:
             next_scan = now + 1.0
-            paths = {f"/dev/input/{n}" for n in os.listdir("/dev/input") if n.startswith("event")}
-            seen &= paths | {n.path for n in nodes.values()}
+            current = {}
+            for name in os.listdir("/dev/input"):
+                if name.startswith("event"):
+                    try:
+                        current[f"/dev/input/{name}"] = os.stat(f"/dev/input/{name}").st_ino
+                    except OSError:
+                        pass
+            for path in [p for p in seen if p not in current]:
+                del seen[path]
             added = False
-            for path in sorted(paths - seen):
-                seen.add(path)
+            for path, ino in sorted(current.items()):
+                if seen.get(path) == ino:
+                    continue
+                # New here: a new device, or one that came back in the same place.
+                for old in [n for n in nodes.values() if n.path == path]:
+                    drop(old, "replaced by a new device node")
+                seen[path] = ino
                 node = probe(path)
                 if node:
                     nodes[node.fd] = node
