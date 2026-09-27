@@ -50,7 +50,8 @@ if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 else
   on_frame 'set -e; mkdir -p ~/dev/src
-[ -d ~/dev/src/distrobox ] || git clone --depth 1 https://github.com/89luca89/distrobox.git ~/dev/src/distrobox
+# A tested release, so an upstream change can't break new installs.
+[ -d ~/dev/src/distrobox ] || git clone --depth 1 --branch 1.8.2.5 https://github.com/89luca89/distrobox.git ~/dev/src/distrobox
 cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
 

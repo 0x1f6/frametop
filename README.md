@@ -61,6 +61,27 @@ Map the mouse's extra buttons to actions such as **Toggle SteamVR dashboard** or
 
 Restarting the desktop (**Frametop Display Settings → Restart desktop**) closes its windows, but background work started in it, like servers, tmux, and builds, keeps running.
 
+## Known limitations
+
+This is an early release, tested on one Steam Frame (SteamOS 0.3.0 build 20260922, SteamVR 2.17.10).
+
+- A SteamOS or SteamVR update can break parts of it until Frametop catches up. If something stops working after an update, please report it (below).
+- The first install downloads 1–2 GB (a Fedora build container) and builds everything on the headset. It takes several minutes.
+- During a VR game, a controller button can't show the screens (the game owns the buttons). Open the SteamVR dashboard, press Meta+Shift+H, or use a mapped mouse button.
+- Flatscreen games don't count as VR games. If the controllers work the screens instead of such a game, set **Frametop Display Settings → Visibility & wrist → Controllers on the screens → Only with the SteamVR dashboard open**.
+- The screens show no mouse cursor of their own: the 3D mouse's dot, or SteamVR's laser, is the cursor.
+- Remote desktop over VNC (`./desktops.sh remote on`) needs Tailscale on the Frame.
+
+## Reporting problems
+
+In a terminal on the headset, run:
+
+```
+cd ~/frametop && scripts/report.sh
+```
+
+It writes `frametop-report-<date>.txt` with the versions, service states, settings, and recent logs (Bluetooth addresses and the headset's serial number are masked). [Open an issue](https://github.com/DeeJanuz/frametop/issues) with what you did, what you expected, and what happened, and attach the file.
+
 ## Update
 
 ```

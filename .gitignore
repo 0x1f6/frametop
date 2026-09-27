@@ -4,3 +4,4 @@ target/
 .env.*
 captures/
 __pycache__/
+frametop-report-*.txt
