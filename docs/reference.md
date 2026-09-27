@@ -1,132 +1,148 @@
-# Frametop
+# Frametop reference
 
-Several desktop screens floating in SteamVR on the Steam Frame, driven by a physical mouse (Bluetooth or USB) whose cursor moves through 3D space. The cursor crosses from one screen to the next based on where the screens actually sit around you, not on a flat monitor layout.
+How each part of Frametop works, where its settings live, and the commands for running parts of it by hand. For why it's built this way, see [design.md](design.md).
 
-How it works: a nested Plasma desktop runs inside ft-screens (`screens/`), our own small Wayland compositor. KWin opens a window per screen; ft-screens gives each one its own size, so every screen is a real monitor of any resolution and shape (ultrawide, portrait, 4K), and shows each as its own SteamVR panel, with KWin's frames passed to SteamVR as they are (no copy). The panels are ours: any size in metres, placed exactly by the layout, with a grab bar to move them, a handle to resize them, and pinning to a hand. See `docs/design.md`. (The older gamescope backend is still there: `BACKEND=gamescope`.)
+## The desktop
 
-Status: the multi-screen desktop works on ft-screens (acceptance test: a 3440 × 1440 ultrawide between two 1080 × 1920 portrait screens, wallpaper on each, the taskbar on the ultrawide). The universal 3D mouse works with the SteamVR dashboard, Steam, overlays, and the screens.
-
-## Run
-
-From the headset: open "Launch a program", then "Desktop". After `install`, that entry starts Frametop instead of the stock single-screen desktop.
+From the headset, open Launch a program → Desktop. The installer replaces that launcher entry with Frametop's (`~/.local/share/applications/deckard-nested-desktop.desktop`), and `desktops.sh uninstall` gives the stock single-screen desktop back.
 
 From a terminal, on the Frame or from a PC over SSH:
 
 ```
-desktops.sh install        # launcher "Desktop" starts Frametop (writes ~/.local/share/applications/deckard-nested-desktop.desktop)
-desktops.sh uninstall      # launcher gets the stock SteamOS desktop back
-desktops.sh screens 3      # default screen count
-desktops.sh start [screens] | stop | restart | status | log [lines]
+desktops.sh install        # the launcher's Desktop entry starts Frametop
+desktops.sh uninstall      # back to the stock SteamOS desktop
+desktops.sh start | stop | restart | status | log [lines]
 ```
 
-Settings: the screens (resolution, width in metres, scale, taskbar screen) and the layout are in `~/.config/frametop-layout.json`; `BACKEND`, `REMOTE`, and the pointer settings in `~/.config/frametop.conf` (see `session/frametop.conf.example`). Frametop Display Settings (below) edits both.
+`session/frametop-session.sh` runs the desktop. It starts ft-screens in the `dev` container (log: `/tmp/frametop-screens.log`), then KWin and Plasma on the host inside it. Only one desktop runs at a time. `desktops.sh start` runs it in its own systemd unit, `frametop-desktop`. It keeps its Plasma config in `~/.config/frametop`, separate from the stock desktop's.
 
-The session script is `session/frametop-session.sh`. It runs on the Frame host and starts ft-screens in the `dev` container (`/tmp/frametop-screens.log`), then KWin and Plasma on the host inside it. Only one instance runs at a time, and `desktops.sh start` runs it in its own systemd unit (`frametop-desktop`). It keeps its own Plasma config in `~/.config/frametop`, separate from the stock desktop.
+Settings are in two files, and Frametop Display Settings edits both. The screens (resolution, width in metres, scale, curve, which one has the taskbar) and their layout are in `~/.config/frametop-layout.json`. The backend, remote desktop, and pointer settings are in `~/.config/frametop.conf`; `session/frametop.conf.example` lists every key.
 
-Restarting the desktop (`desktops.sh restart`, or Restart desktop in Frametop Display Settings) closes its windows, but programs started in it keep running when they can: `session/keep-apps.sh` moves them out of the desktop's systemd unit first. Background work like servers, tmux, and builds survives. An app that stops its own helpers when its window closes still loses them; for work that must survive, run it outside the desktop, for example as a systemd user service.
+Restarting the desktop closes its windows. Before the unit stops, `session/keep-apps.sh` moves every program started in the desktop into a systemd scope of its own, so background work such as servers, tmux, and builds keeps running. An app that shuts down its own helper processes when its window closes will still lose them; run that kind of work outside the desktop, for example as a systemd user service.
 
-## ft-screens (the compositor)
+## ft-screens, the compositor
 
-`screens/compositor.c` (wlroots 0.20) hosts the nested KWin; `screens/vr.cpp` is the SteamVR side. Build: `screens/build.sh` (the installer does it).
+`screens/compositor.c` is a small wlroots 0.20 compositor that hosts the nested KWin, and `screens/vr.cpp` is its SteamVR side. `screens/build.sh` builds it; the installer runs that for you.
 
-- Screens: each KWin window is a screen. ft-screens sizes it (`xdg_toplevel` configure) and KWin resizes that screen to match, live. Frames arrive as DMA-BUFs and go to SteamVR with `ImportDmabuf` (OpenVR's `IVRIPCResourceManagerClient`), no copy, no size limit.
-- Panels: `frametop.screen.N`, with `.bar` (move), `.curve` (the round button next to it), `.roll` (the next one: drag it sideways like a knob to roll the screen, snapping level within 2.5°, or scroll on it for 5° steps), and `.resize` (the tab on the bottom right corner; screens go down to 15 cm wide). The controls are sized from both the screen's width and its distance from you, sit on its surface when it's curved, and are translucent like SteamVR's own until a laser is on them. They're invisible until a laser or the 3D mouse's cursor comes very close to one of them (about 1.5 times a button's size), and fade out a moment after it leaves. Drag the bar with any laser (a controller, or the 3D mouse, whose right-drag tilt works too); scroll while dragging to push it away or pull it closer (along the line from your head). The curve button bends the screen into a cylinder around you (radius: your distance to it), or flat again. Pin to a wrist: while carrying a screen, sweep the laser (the line from whatever carries it to its bar) across your other controller. A ring around that controller shows the target and a dot shows where the laser passes; entering the ring arms the pin (ring and bar turn blue), entering it again disarms it. Let go while armed and the screen rides on that controller as it is then, at its size and distance (a 3.6 m screen 5 m away works; so does pinning all screens), so you can arm it first and then turn it the way you want. Grab a pinned screen's bar to adjust it: it comes back to the same wrist when you let go, unless you sweep across the ring to disarm. A pinned screen shows only while you see its front within the wrist angle, fading over the last 10°.
-- Visibility (Frametop Display Settings → Visibility & wrist tab): always (Meta+Shift+H, the Hide/Show Screens menu entry, or a mapped mouse button hides them), only with the SteamVR dashboard open, while you look at a chosen controller (the wrist gesture), or only when shown with the hotkey. In the last three, the hotkey shows them anyway. Controllers on the screens (same tab): visible screens can keep SteamVR's laser mouse on so controllers work them with the dashboard closed, which also takes the controllers from a VR game. By default that's off while a VR game (a scene app) runs: the screens stay over the game, the controllers stay in it, and the 3D mouse or the dashboard works the screens. The other choices are always and only with the dashboard open (also right for flatscreen games, which aren't scene apps). Control socket: `controllers always|outside_games|dashboard`. During VR games (same tab): with Always, the screens hide unless the dashboard is open (default; `ingames hide`), or stay visible (`ingames visible`); the hotkey still shows them, and a game starting or stopping resets it. (A controller button to show them isn't there yet: in a game the game owns the buttons.)
-- Input: pointer from the panels to KWin through our seat; keys from the input relay (every keyboard it doesn't grab, and keys a pointer device passes through) to the screen that was clicked last, but not while the SteamVR dashboard is open.
-- Control socket `@ft_screens` (datagrams, replies to the sender): `place N x y z yaw pitch roll`, `width N metres`, `curve N radius|on|off`, `pin N|all left|right [12 numbers]`, `unpin N|all`, `size N w h` (live resolution), `get N`, `screens`, `head`, `visibility always|dashboard|gesture|toggle`, `wrist degrees`, `gesture left|right degrees`, `hide | show | toggle`, `controllers always|outside_games|dashboard`, `ingames hide|visible`, `state`, `key code value`.
+Each KWin window is one screen. ft-screens sets its size with an `xdg_toplevel` configure and KWin resizes the output to match, live. Frames arrive as DMA-BUFs and go to SteamVR through OpenVR's `IVRIPCResourceManagerClient::ImportDmabuf`, with no copy and no size limit.
 
-## Input relay (Bluetooth mice and keyboards)
+Every screen is an overlay named `frametop.screen.N` with four controls:
 
-SteamVR opens input devices only when it starts. A Bluetooth mouse that sleeps and reconnects gets new device nodes, and SteamVR keeps reading the dead ones, so the mouse stops working until SteamVR restarts. `input/input-relay.py` fixes that:
+- `.bar` moves the screen. Drag it with any laser or with the 3D mouse, whose right-drag tilts. Scrolling while you drag pushes the screen away or pulls it closer, along the line from your head.
+- `.curve` bends the screen into a cylinder around you, using your current distance as the radius, or makes it flat again.
+- `.roll` rolls the screen when you drag it sideways, like a knob. It snaps level within 2.5°, and scrolling on it turns 5° per notch.
+- `.resize`, the tab on the bottom right corner, sets the width. Screens go down to 15 cm wide.
 
-- It creates `frametop virtual mouse` and `frametop virtual keyboard` through `/dev/uinput` before SteamVR starts.
-- It grabs every USB or Bluetooth mouse and keyboard as they come and go, and forwards their events. SteamVR only sees the virtual devices, which never go away.
-- Service: `frametop-input-relay.service` (user unit, `Before=steamvr.service`, wanted by `steamvr.service` and `default.target`).
+The controls are sized from both the screen's width and its distance from you, follow the surface of a curved screen, and stay invisible until a laser or the 3D mouse's cursor comes within about 1.5 times a button's size of one. They're translucent until a laser is on them, like SteamVR's own window controls.
+
+To pin a screen to a wrist, carry it by its bar and sweep the laser across your other controller. A ring around that controller marks the target, and a dot shows where the laser passes. Crossing the ring arms the pin, and the ring and bar turn blue; crossing it again disarms it. When you let go while armed, the screen rides on that controller at the size, distance, and angle it had, so you can arm the pin first and then turn the screen the way you want. Grab a pinned screen's bar to adjust it; it goes back to the same wrist when you let go unless you disarm it. A pinned screen shows only while you're looking at its front, within the wrist angle, and fades out over the last 10°.
+
+The Visibility & wrist tab of Frametop Display Settings decides when the screens show:
+
+- Always. Meta+Shift+H, the Hide/Show Screens menu entry, or a mapped mouse button hides them.
+- Only while the SteamVR dashboard is open.
+- While you look at a chosen controller (the wrist gesture).
+- Only after you show them with the hotkey.
+
+In the last three modes the hotkey shows the screens anyway. Two more settings on the same tab cover VR games, which ft-screens detects as SteamVR scene apps:
+
+- During VR games, the Always mode hides the screens unless the dashboard is open (the default), or leaves them up.
+- Controllers on the screens. Visible screens can keep SteamVR's laser mouse on, so controllers work them with the dashboard closed, but that also takes the controllers away from a game. By default this is off while a VR game runs, and the 3D mouse or the dashboard works the screens. The other choices are always on, or only with the dashboard open, which also suits flatscreen games since they aren't scene apps.
+
+Input from the lasers reaches KWin through ft-screens' own seat. Keys come from the input relay, from any keyboard it doesn't grab and any key a pointer device passes through, and go to the screen you clicked last, except while the SteamVR dashboard is open.
+
+ft-screens listens for datagrams on the abstract socket `@ft_screens` and replies to the sender:
 
 ```
-desktops.sh relay install     # enable (starts on the next reboot or SteamVR start)
+place N x y z yaw pitch roll     width N metres          curve N radius|on|off
+pin N|all left|right [matrix]    unpin N|all             size N w h
+get N    screens    head    state    key code value
+visibility always|dashboard|gesture|toggle    wrist degrees    gesture left|right degrees
+hide | show | toggle    controllers always|outside_games|dashboard    ingames hide|visible
+```
+
+## Input relay
+
+SteamVR opens input devices only when it starts. A Bluetooth mouse that sleeps and reconnects gets new device nodes, SteamVR keeps reading the dead ones, and the mouse stops working until SteamVR restarts. `input/input-relay.py` avoids this. It creates two virtual devices, `frametop virtual mouse` and `frametop virtual keyboard`, through `/dev/uinput` before SteamVR starts. It then grabs USB and Bluetooth mice and keyboards as they come and go and forwards their events, so SteamVR only ever sees the virtual devices, which never go away.
+
+It runs as the user service `frametop-input-relay.service`, ordered before `steamvr.service`.
+
+```
+desktops.sh relay install     # enable it (starts with the next reboot or SteamVR start)
 desktops.sh relay status | log | uninstall
+input/input-relay.py --no-grab   # try it without taking devices from SteamVR
 ```
 
-- The first time, start it before SteamVR (reboot, or restart SteamVR after `relay install`), so SteamVR opens its virtual devices. After that, restarting the relay is safe: systemd keeps the virtual devices in its file descriptor store (`FileDescriptorStorePreserve=yes`), so SteamVR keeps the same devices.
-- Test without disturbing SteamVR: `input-relay.py --no-grab`.
-- This is where the 3D mouse will hook in.
+The first time, the relay has to start before SteamVR, so reboot or restart SteamVR after installing it. After that it's safe to restart on its own: systemd keeps the virtual devices open in its file descriptor store (`FileDescriptorStorePreserve=yes`), so SteamVR keeps the same devices.
 
-## Universal 3D mouse
+## The 3D mouse
 
-A Bluetooth mouse drives SteamVR like a controller laser, but it looks like a small dot floating in the room. It snaps onto panels and works on the dashboard, Steam, overlays, and this desktop. Details and findings are in `docs/design.md`, "The universal 3D mouse".
+A mouse drives SteamVR the way a controller's laser does, but shows up as a small dot anchored in the room. It snaps onto panels and works on the dashboard, Steam, overlays, and the desktop. Three pieces make it work:
 
-- `input/input-relay.py` (pointer mode, `POINTER=1`) sends mouse motion, clicks, and scroll to the helper. Deliberate movement or a click wakes it; 30 s idle releases it.
-- `pointer/helper/ft-pointer` (`frametop-pointer.service`, runs in the `dev` container, starts with SteamVR) holds the room-anchored cursor. It does collision against every visible overlay, draws the white dot, and sends the driver an exact pose.
-- `pointer/driver/` (`ft_pointer`, loaded by SteamVR) is an invisible virtual right-hand controller whose laser follows the cursor.
-- Last used wins: picking up a controller hands the laser back at once, and moving the mouse takes it again. While you hold a controller the mouse steps aside.
-- Moving panels: left-drag a floating panel's grab bar, and it follows the pointer around you (SteamVR's own move). The scroll wheel during a drag pushes and pulls it. **Tilt**: while left-dragging, hold the right button and move the mouse to rotate the panel around the grab point. The right press isn't sent as a right-click. The tilt stays for the rest of the drag: release right and keep moving the tilted panel, press right again to tilt further. Releasing left drops the panel as it is.
-- Toggle dashboard (a mapped button or a Meta tap) wakes the pointer if needed and holds the virtual system button for 0.12 s. SteamVR ignores a press and release in the same instant.
+- The input relay, in pointer mode (`POINTER=1`), sends mouse motion, clicks, and scrolling to the helper. A deliberate movement or a click wakes the pointer, and 30 seconds without mouse input releases it.
+- The helper, `pointer/helper/ft-pointer`, runs in the `dev` container as `frametop-pointer.service` and starts with SteamVR. It keeps the cursor, tests it against every visible overlay, draws the dot, and sends the driver an exact pose.
+- The driver, `pointer/driver/` (`ft_pointer`), is loaded by SteamVR. It's an invisible virtual right-hand controller whose laser follows the cursor.
+
+Whichever device you used last wins. Picking up a controller hands the laser back at once, and moving the mouse takes it again. When the headset comes off, the pointer lets go, so the displays can sleep, and it stays off until you're wearing the headset again.
+
+To move a floating panel, left-drag its grab bar. The scroll wheel pushes and pulls it while you drag. Hold the right button while dragging and move the mouse to tilt the panel around the grab point; the right press isn't sent as a click. The tilt stays for the rest of the drag, and releasing the left button drops the panel as it is. A mapped Toggle dashboard button (or a Meta tap) wakes the pointer if needed and holds the virtual system button for 0.12 s, because SteamVR ignores a press and release in the same instant.
 
 ```
 pointer/driver/build.sh && pointer/driver/install.sh install   # then restart SteamVR
-pointer/helper/build.sh && pointer/helper/run.sh install        # user service
+pointer/helper/build.sh && pointer/helper/run.sh install
 pointer/helper/run.sh status | log | restart
 pointer/driver/install.sh probe     # devices, hand roles, who owns the dashboard pointer
 ```
 
-Settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `POINTER_IDLE`, `POINTER_WAKE_COUNTS`, `POINTER_DISTANCE`, `POINTER_CURSOR_DEG`, `POINTER_ORIGIN_FRACTION`, `POINTER_ORIGIN_MARGIN`, `POINTER_SCENE_RADIUS`, `POINTER_EDGE_REACH`, and `POINTER_LASER_WIDTH`. See `session/frametop.conf.example`. Restart the relay or the helper after changing them.
+The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `POINTER_IDLE`, `POINTER_WAKE_COUNTS`, `POINTER_DISTANCE`, `POINTER_CURSOR_DEG`, `POINTER_ORIGIN_FRACTION`, `POINTER_ORIGIN_MARGIN`, `POINTER_SCENE_RADIUS`, `POINTER_EDGE_REACH`, and `POINTER_LASER_WIDTH`. The example config explains each. Frametop Input Settings changes them live; after editing the file by hand, restart the relay or the helper.
 
-## Frametop Input Settings (app)
+## Frametop Input Settings
 
-A Plasma app (Kirigami, Python backend) to choose and map input devices. It's in the Plasma menu under Settings on the Frametop desktop (and the stock desktop). It runs in the `dev` container and talks to the relay's control socket `@frametop_relay`.
+A Kirigami app with a Python backend, in the Plasma menu under Settings. It runs in the `dev` container and talks to the relay over its control socket, `@frametop_relay`. It has four pages:
 
-- **Devices**: every USB or Bluetooth mouse and keyboard, with a live activity light (move or press a device to find its row). Roles: **3D pointer** (grabbed, drives the pointer; default for anything with a mouse node), **Pass through** (not grabbed; default for keyboards; a Meta tap still toggles the dashboard), **Ignore**. A physical device is identified by its Bluetooth address (or USB ids and name), so all its nodes share a role.
-- **Buttons**: pick a pointer device (devices with saved bindings are listed even while asleep or disconnected, marked "not connected"; **Forget** on the Devices page drops all of a device's saved settings), press **Capture a button**, press the button or key, then choose an action: left, right, or middle click, back, scroll up or down, toggle dashboard, recenter, pointer on or off, faster or slower, pass through as key, or do nothing. The Z3's extra buttons arrive as keys from its keyboard node. Each row has **Remove** (your own binding; the button passes through again), **Reset** (a changed built-in button goes back to its default), or **Unbind** (a built-in button does nothing). **Remove all** clears the device's custom bindings. `FT_INPUT_PAGE=buttons` opens the app on that page.
-- **Pointer**: sliders for the `POINTER_*` settings, applied live (the relay and helper reload), plus Recenter.
-- **Bluetooth**: paired devices, and **Apply Bluetooth fixes** (runs `/etc/steamframe/bt-fixups.sh` through `pkexec`) after pairing an LE device. Pair new devices in Steam.
+- Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (not grabbed; the default for keyboards, where a Meta tap still toggles the dashboard), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
+- Buttons maps a pointer device's buttons. Choose Capture a button, press the button or key, then pick an action: a click, back, scroll, toggle dashboard, recenter, pointer on or off, faster or slower, pass the key through, or nothing. Devices with saved mappings are listed even while they're asleep.
+- Pointer has sliders for the pointer settings, which apply immediately, and a Recenter button.
+- Bluetooth lists paired devices and has Apply Bluetooth fixes, which runs `/etc/steamframe/bt-fixups.sh` through `pkexec`. Pair new devices in Steam.
 
-Rules are saved to `~/.config/frametop-input.json` and pointer settings to `~/.config/frametop.conf`.
+Device rules are saved in `~/.config/frametop-input.json`. `input-settings/install.sh` installs the menu entry. Its launcher hands podman the real `XDG_RUNTIME_DIR` and user bus and gives the app the session's Wayland socket, because the desktop session runs on a private D-Bus and podman fails on it.
 
-```
-input-settings/install.sh     # menu entry (ft-input-settings.desktop) -> host launcher ft-input-settings
-```
+## Frametop Display Settings and ft-layout
 
-The launcher gives podman the real `XDG_RUNTIME_DIR` and user bus, and gives the app the session's Wayland socket (absolute path) and bus. Without the real user bus, podman fails with `crun: ... cgroup.procs: Permission denied`, because the Frametop session runs on a private bus from `dbus-run-session`.
+When the desktop starts, its screens arrange themselves around where you're facing. You can move them by hand at any time and put them back with Meta+Shift+R, the Reset Screen Layout menu entry, Arrange now in the app, or a mouse button mapped to Reset desktop screen layout.
 
-## Screens and layout (Frametop Display Settings, ft-layout)
+Frametop Display Settings has three tabs:
 
-When the desktop starts, its screens arrange themselves around where you're facing. Move them by hand any time; put them back with **Meta+Shift+R** in the desktop, the **Reset Screen Layout** menu entry, **Arrange now** in the app, or a mouse button mapped to **Reset desktop screen layout** (Frametop Input Settings → Buttons).
+- Screens: add and remove screens, and set each one's resolution (presets from 1080p to 4K, ultrawide, super ultrawide, portrait, or custom), its width in VR (0.5 to 6 m), its scale, whether it's curved, and whether it has the taskbar. Resolution, width, and curve apply at once. Adding or removing a screen takes a desktop restart, which the app offers.
+- Layout: a curve around you, with the screens hinged edge to edge like monitors on a desk and each turned to face you, or a flat wall. Both take rows, distance, gap, and height. Save current arrangement keeps the positions and sizes you set by hand instead. A preview shows the layout from above and from the front, and a switch turns auto-arrange at startup on or off.
+- Visibility & wrist: the visibility, game, and controller settings described above, the wrist angle, and buttons to pin all screens to a wrist or unpin them.
 
-**Frametop Display Settings** (Plasma menu, Settings; Kirigami app in the `dev` container, like Frametop Input Settings):
-
-- **Screens**: add and remove screens; each has a resolution (presets from 1080p to 4K, ultrawide, super ultrawide, portrait, or custom), a width in VR in metres (0.5 to 6), a scale, **Curved**, and **Taskbar here**. Resolution, width, and curve apply at once; adding or removing a screen when the desktop starts again (the app offers the restart).
-- **Layout**: curved around you (screens hinged edge to edge like monitors on a desk, each turned to face you) or a flat wall, with rows, distance, gap, and height; or **Save current arrangement** to keep where you put the screens by hand (and their sizes). A preview shows it from above and from the front. **When the desktop starts** turns auto-arrange on or off.
-
-`layout/ft-layout` does the work (Python standard library, on the host):
+`layout/ft-layout` does the arranging. It's a Python script that uses only the standard library and runs on the host:
 
 ```
-layout/ft-layout apply      # arrange every screen (instant with ft-screens)
-layout/ft-layout capture    # save the current arrangement (and sizes) as the layout
-layout/ft-layout plan       # the arrangement as JSON (no VR needed)
-layout/ft-layout scale      # per-screen scale, side-by-side positions, taskbar screen to KWin
+layout/ft-layout apply      # arrange every screen
+layout/ft-layout capture    # save the current arrangement and sizes as the layout
+layout/ft-layout plan       # print the arrangement as JSON (no VR needed)
+layout/ft-layout scale      # per-screen scale, positions, and taskbar screen, to KWin
 layout/ft-layout toggle     # hide or show all screens
-display-settings/install.sh      # menu entries and the Meta+Shift+R / Meta+Shift+H shortcuts
+display-settings/install.sh # menu entries and the Meta+Shift+R and Meta+Shift+H shortcuts
 ```
 
-The layout is saved in `~/.config/frametop-layout.json`, relative to your head when it's applied. `/tmp/frametop-layout.log` has the startup run. With `BACKEND=gamescope`, `ft-layout` floats each dashboard panel with `vrcmd --dock-overlay` and the pointer helper carries it into place (`place`), since SteamVR's dashboard owns those panels.
+The layout is stored relative to your head when it's applied. `/tmp/frametop-layout.log` has the run from the last desktop start.
 
-## Remote desktop (VNC)
+## Remote desktop over VNC
 
-With `REMOTE=1` in the config (`desktops.sh remote on`), the session also serves the VR desktop over VNC. Use RealVNC Viewer or macOS Screen Sharing.
+With `REMOTE=1` in the config (`desktops.sh remote on`), the desktop is also served over VNC, for RealVNC Viewer or macOS Screen Sharing. `desktops.sh remote info` prints the address and password.
 
-- Address: the Frame's tailnet name or address, port 5900 (`desktops.sh remote info` prints it). It listens on the tailnet address only, not the LAN. It needs Tailscale on the Frame ([deck-tailscale](https://github.com/tailscale-dev/deck-tailscale)).
-- Password: in `~/.config/frametop-remote/vnc-password` on the Frame. VNC limits it to 8 characters. `desktops.sh remote info` prints it.
-- Encryption: VNC auth has none of its own, so viewers warn about an unencrypted connection. The traffic is still encrypted by the tailnet (WireGuard), which is why it listens only there.
-- How it works: no VNC server can capture KWin on SteamOS. `krfb` needs `xdg-desktop-portal-kde`, which SteamOS lacks, and `wayvnc` is wlroots-only. So `session/remote-desktop.sh` captures the desktop with KDE's `krdpserver --plasma` on `127.0.0.1:3390` (never reachable from outside). `session/vnc-bridge.sh` runs TigerVNC's `Xvnc` on display `:20` with a full-screen FreeRDP client connected to it, and serves that over VNC. Everything runs in the `dev` container. The extra hop adds some latency.
-- Security trade-off: with `REMOTE=1` the nested KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, so any app inside the Frametop desktop can capture its screen or inject input. This applies to that nested session only, not the stock desktop.
-- To rotate the password, delete `~/.config/frametop-remote/` on the Frame and restart the desktop.
-- Port 3389 is SteamOS's own `xrdp`, which starts a separate X11 session, not the VR desktop.
-- Check what a viewer sees: `import -window root -display :20 /tmp/vnc.png` in the container.
+It listens on port 5900 on the Frame's Tailscale address only, not the LAN, so it needs Tailscale on the Frame ([deck-tailscale](https://github.com/tailscale-dev/deck-tailscale)). VNC authentication has no encryption of its own, so viewers warn about it, but the tailnet encrypts the traffic. The password is in `~/.config/frametop-remote/vnc-password` and VNC limits it to 8 characters. To change it, delete that folder and restart the desktop.
+
+No VNC server can capture KWin on SteamOS directly: `krfb` needs `xdg-desktop-portal-kde`, which SteamOS doesn't ship, and `wayvnc` only works with wlroots compositors. So `session/remote-desktop.sh` captures the desktop with KDE's `krdpserver --plasma` on `127.0.0.1:3390`, and `session/vnc-bridge.sh` runs TigerVNC's `Xvnc` on display `:20` with a full-screen FreeRDP client inside it and serves that. Both run in the `dev` container, and the extra hop adds a little latency.
+
+With remote access on, the nested KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, so any app in the Frametop desktop could capture its screen or inject input. This applies only to that desktop, not the stock one. Port 3389 is SteamOS's own `xrdp`, which starts a separate X11 session rather than showing the VR desktop.
 
 ## Limits
 
-- Keyboard typing into the screens is wired (relay → ft-screens) but not yet tested with a real keyboard.
-- There's no pin to the head (HUD) yet, and no controller button to show hidden screens (a mapped mouse or keyboard button works).
-- The KWin cursor isn't drawn on the screens (KWin draws it as a host cursor, which ft-screens ignores); the 3D mouse's dot and SteamVR's laser dot show where you point.
-- With `BACKEND=gamescope`: one resolution for all screens, at most 1920 × 1080 worth of pixels; arranging borrows the pointer for a few seconds; a SteamVR update that moves the floating window's grab bar would break arranging (`LAYOUT_GRAB_OFFSET`, the helper's `grabprobe`).
+- There's no way yet to pin a screen to your head like a HUD.
+- A controller button can't show hidden screens; a mapped mouse or keyboard button can.
+- KWin's cursor isn't drawn on the screens, because KWin draws it as a host cursor, which ft-screens doesn't render. The 3D mouse's dot and SteamVR's laser dot show where you're pointing.
+- The old gamescope backend (`BACKEND=gamescope`) still works, but it gives every screen the same resolution, at most 1920×1080 pixels' worth, and arranging screens borrows the pointer for a few seconds.

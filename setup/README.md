@@ -21,8 +21,8 @@ It creates the `dev` distrobox if it's missing and installs the packages listed 
 
 On stock SteamOS 0.3.0, Bluetooth LE mice and keyboards that use private addresses, such as the Swiftpoint Z3, pair but never reconnect. After the device sleeps or the Frame reboots, it stays disconnected. Two separate problems cause this:
 
-1. **BlueZ 5.79 never sets the `ADDRESS_RESOLUTION` device flag.** Without it, kernel 6.18 doesn't load the device's identity key into the Bluetooth controller, so the controller can't recognize the device's rotating private address and ignores it. This is fixed upstream in BlueZ commit `f1fb4f95f4` ("core: Fix not resolving addresses"), but SteamOS doesn't ship that fix yet.
-2. **Some devices only know the Frame's public address.** The Z3 doesn't accept the Frame's identity key during pairing, so it can only reconnect to the Frame's fixed public address. SteamOS sets `Privacy = device` in `/etc/bluetooth/main.conf`, and bluetoothd turns privacy back on at every start.
+1. BlueZ 5.79 never sets the `ADDRESS_RESOLUTION` device flag. Without it, kernel 6.18 doesn't load the device's identity key into the Bluetooth controller, so the controller can't recognize the device's rotating private address and ignores it. This is fixed upstream in BlueZ commit `f1fb4f95f4` ("core: Fix not resolving addresses"), but SteamOS doesn't ship that fix yet.
+2. Some devices only know the Frame's public address. The Z3 doesn't accept the Frame's identity key during pairing, so it can only reconnect to the Frame's fixed public address. SteamOS sets `Privacy = device` in `/etc/bluetooth/main.conf`, and bluetoothd turns privacy back on at every start.
 
 Both settings reset whenever bluetoothd restarts or the Frame reboots, so they have to be reapplied every time. That's what this setup installs.
 
@@ -33,14 +33,14 @@ Both settings reset whenever bluetoothd restarts or the Frame reboots, so they h
 | `/etc/steamframe/bt-fixups.sh` | Turns controller privacy off, then sets the `ADDRESS_RESOLUTION` flags (`0x6`) on every bonded LE device that has an identity key |
 | `/etc/systemd/system/steamframe-bt-fixups.service` | Runs the script after every Bluetooth start |
 
-The service runs **after** Bluetooth has started and never makes Bluetooth wait for it. That matters: SteamOS's `set-bluetooth-mac-address.service` gives the Bluetooth chip its address, and it needs `bluetooth.service` to finish starting first. SteamOS's own files, including `main.conf`, are left untouched, so system updates won't conflict.
+The service runs after Bluetooth has started and never makes Bluetooth wait for it, because SteamOS's `set-bluetooth-mac-address.service`, which gives the Bluetooth chip its address, needs `bluetooth.service` to finish starting first. SteamOS's own files, including `main.conf`, are left untouched, so system updates won't conflict.
 
 ### Step 1: have a password for sudo
 
 The install writes to `/etc`, so it needs `sudo` and the `steamos` user's password.
 
-- **On the headset:** `sudo` asks for the password in the terminal. If you've never set one, run `passwd` first.
-- **From a PC over SSH:** there's no terminal on the Frame to ask in, so put the password in a `.env` file at the repo root:
+- On the headset, `sudo` asks for the password in the terminal. If you've never set one, run `passwd` first.
+- From a PC over SSH, there's no terminal on the Frame to ask in, so put the password in a `.env` file at the repo root:
 
   ```
   steamos_root_pwd="your-password"
@@ -58,13 +58,13 @@ It copies the files above into place (`/etc` survives SteamOS updates) and enabl
 
 ### Step 3: pair your mouse or keyboard
 
-Pair it the normal way: in Steam, **Settings → Bluetooth**. Then apply the fixes to the new device, either way:
+Pair it the normal way, in Steam under Settings → Bluetooth. Then apply the fixes to the new device:
 
 ```
 setup/bluetooth/install.sh run
 ```
 
-or, on the Frame, **Frametop Input Settings → Bluetooth → Apply Bluetooth fixes** (it asks for the password). Do this once per newly paired device. From then on, the service applies the fixes automatically at every boot.
+or use Apply Bluetooth fixes on the Bluetooth page of Frametop Input Settings, which asks for the password. Do this once per newly paired device. From then on, the service applies the fixes automatically at every boot.
 
 If a device won't pair at all, turn the fixes on first (`run`), then pair again. With privacy on, some devices, the Z3 included, fail to finish connecting.
 
@@ -84,9 +84,13 @@ The real test is to reboot the Frame, then move or click the device. It should r
 
 ### Troubleshooting
 
-**The device paired but won't reconnect.** Run `setup/bluetooth/install.sh run` again, then wake the device. Check that its address appears in the service log. The script only flags devices that have an identity key: look for `[IdentityResolvingKey]` in `/var/lib/bluetooth/<controller>/<device>/info` (readable as root).
+#### The device paired but won't reconnect
 
-**No Bluetooth at all after a boot.** Check the controller:
+Run `setup/bluetooth/install.sh run` again, then wake the device. Check that its address appears in the service log. The script only flags devices that have an identity key: look for `[IdentityResolvingKey]` in `/var/lib/bluetooth/<controller>/<device>/info` (readable as root).
+
+#### No Bluetooth at all after a boot
+
+Check the controller:
 
 ```
 hciconfig hci0 | head -3    # healthy: "BD Address: 90:82:C3:..." and "UP RUNNING"
@@ -101,7 +105,9 @@ sudo systemctl restart steamframe-bt-fixups.service
 
 This happened once, while an earlier version of the fix made Bluetooth wait on it. Never add an `ExecStartPost` or anything else that holds up `bluetooth.service`.
 
-**The mouse connects but does nothing in VR.** That's not Bluetooth. SteamVR only reads input devices that existed when it started. Frametop's input relay (`README.md`) handles this with permanent virtual devices.
+#### The mouse connects but does nothing in VR
+
+That's not Bluetooth. SteamVR only reads input devices that existed when it started. Frametop's input relay handles this with permanent virtual devices (see `docs/reference.md`).
 
 ### Uninstall
 

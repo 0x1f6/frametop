@@ -1,13 +1,13 @@
 # Working on Frametop
 
-Rules for people and coding agents changing this repo. The README covers what Frametop is and how to install it; `docs/reference.md` covers each component, and `docs/design.md` records how SteamVR on the Frame behaves and why things are built the way they are. Read the findings there before changing how the screens, the pointer, or the input relay talk to SteamVR.
+Rules for people and coding agents changing this repo. The README covers what Frametop is and how to install it; `docs/reference.md` covers each component, and `docs/design.md` records how SteamVR on the Frame behaves and why things are built the way they are. Read its notes on SteamVR before changing how the screens, the pointer, or the input relay talk to SteamVR.
 
 ## Two ways to run the scripts
 
 Every script works in both modes, and must keep working in both:
 
-- **On the Frame** (SteamOS, VR variant): commands run locally, in this checkout.
-- **From a PC over SSH:** the repo is synced to `~/dev/frametop` on the Frame (`scripts/sync.sh`), and commands run there. `scripts/_env.sh` works out which mode applies (`FRAME_LOCAL`, `FRAME_HOST`, `FRAME_REPO`).
+- On the Frame (SteamOS, VR variant), commands run locally, in this checkout.
+- From a PC over SSH, the repo is synced to `~/dev/frametop` on the Frame (`scripts/sync.sh`), and commands run there. `scripts/_env.sh` works out which mode applies (`FRAME_LOCAL`, `FRAME_HOST`, `FRAME_REPO`).
 
 ```
 scripts/sync.sh                          # PC -> ~/dev/frametop on the Frame
