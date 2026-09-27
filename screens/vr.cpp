@@ -12,7 +12,7 @@
 //   - a resize tab on the bottom right corner: drag it to set the width (the height
 //     follows the screen's resolution).
 //   The controls are translucent, like SteamVR's own, and brighten under a laser. They
-//   are invisible until a laser (a controller's, or the 3D mouse's) passes very close to
+//   are invisible until a laser (a controller's, or the 3D mouse's) lands on or passes very close to
 //   one of them (UpdateControls).
 //   - pin to a wrist: while carrying a screen, sweep the laser (the line from the carrying
 //     device to the bar) across your other controller. A ring around each controller
@@ -672,9 +672,9 @@ void UpdateLasers() {
     }
 }
 
-// The controls are invisible until a laser passes very close to one of them (within
-// `reach`, about 1.5 times a button's size); they stay kControlsLinger ticks after it
-// leaves, and while in use.
+// The controls are invisible until a laser is on one of them (SteamVR's hover event) or
+// passes very close (within `reach`, about 1.5 times a button's size); they stay
+// kControlsLinger ticks after it leaves, and while in use.
 void UpdateControls() {
     std::vector<Mat> lasers;
     for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
@@ -711,18 +711,17 @@ void UpdateControls() {
         }
         const bool inUse = s.drag != Drag::None || s.hover[0] || s.hover[1] || s.hover[2] || s.hover[3];
         const bool want = s.visible && (inUse || g_tick < s.nearUntil);
-        const float before = s.controls;
-        s.controls = std::clamp(s.controls + (want ? 0.2f : -0.1f), 0.f, 1.f);
-        if (s.controls == before) continue;
-        if (s.controls > 0 && !s.controlsUp) {
+        // The controls stay shown while their screen is, just fully transparent when not
+        // wanted: SteamVR's laser still hits them, and the hover event brings them in, for
+        // any device's laser, whatever its shape.
+        if (s.visible && !s.controlsUp) {
             for (auto o : s.Controls()) vr::VROverlay()->ShowOverlay(o);
             s.controlsUp = true;
+            ApplyAlpha(s);
         }
-        ApplyAlpha(s);
-        if (s.controls == 0 && s.controlsUp) {
-            for (auto o : s.Controls()) vr::VROverlay()->HideOverlay(o);
-            s.controlsUp = false;
-        }
+        const float before = s.controls;
+        s.controls = std::clamp(s.controls + (want ? 0.2f : -0.1f), 0.f, 1.f);
+        if (s.controls != before) ApplyAlpha(s);
     }
 }
 
