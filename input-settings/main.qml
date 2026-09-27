@@ -314,6 +314,12 @@ Kirigami.ApplicationWindow {
             ]
 
             Kirigami.FormLayout {
+                Controls.Switch {
+                    Kirigami.FormData.label: "Head follow:"
+                    text: "Pointer follows your head (leash below; 0° locks it to your view)"
+                    checked: backend.pointerFollow
+                    onToggled: backend.setPointerFollow(checked)
+                }
                 Repeater {
                     model: backend.pointerSettings
                     delegate: RowLayout {

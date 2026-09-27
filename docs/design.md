@@ -80,6 +80,8 @@ A few overlays need special handling:
 - Just off a panel, the cursor stays on that panel's plane within `POINTER_EDGE_REACH`, so resize margins and window controls just outside the panel are reachable.
 - While the left button is held, the cursor keeps the distance it had at the press and stops re-testing collisions, so dragging past a panel's edge doesn't make it jump.
 
+Head follow is off by default. With it on (`POINTER_FOLLOW=1`, or a mouse button mapped to Head follow on/off), the cursor rides on a reference direction that's on a leash `POINTER_LEASH_DEG` from where you're facing. Turn your head within the leash and the cursor stays where it is in the room. Turn further and the reference is dragged along, and the cursor turns with it, keeping its offset. A leash of 0 makes the reference your facing direction, so the cursor is locked to your view, and mouse movement shifts it within the view. Head roll is ignored, so tilting your head doesn't swing the cursor around, and the cursor can't be pushed more than 40 degrees from the reference, so it stays in view. While the left button is held the cursor stays put in the room, so your head can't nudge a click or a drag. When you let go, it carries on from where it is instead of jumping.
+
 Replacing a loaded driver's files, as re-running the installer used to do, leaves SteamVR honoring the virtual controller's hand role but not its laser claim: the dashboard pointer stays unassigned until SteamVR restarts. The driver installer now leaves an unchanged driver in place.
 
 `dashboard.laserRayWidthScale` controls the beam's width, but SteamVR only applies a change from its own settings screen or at restart, so it can't be switched per device while running.

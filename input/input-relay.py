@@ -19,8 +19,8 @@ keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
   ignore       not grabbed, only observed for identification in the settings app
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
-pointer_toggle, sens_up, sens_down, layout_reset = put the desktop screens back in
-their saved layout, screens_toggle = hide or show the desktop screens, key = pass
+pointer_toggle, follow_toggle = head follow on or off, sens_up, sens_down,
+layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens, key = pass
 through as a key, none).
 
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
@@ -140,7 +140,7 @@ def eviocguniq(length):
 VIRTUAL_PREFIX = "frametop virtual"
 RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
-           "pointer_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle", "key", "none")
+           "pointer_toggle", "follow_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle", "key", "none")
 SCREENS = "\0ft_screens"
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
 FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
@@ -406,6 +406,9 @@ class Pointer:
                 log("pointer off (toggle)")
             else:
                 self.wake(now)
+        elif name == "follow_toggle":
+            self.send("follow toggle")  # until the next restart; the setting is POINTER_FOLLOW
+            log("head follow toggled")
         elif name == "screens_toggle":
             try:
                 self.sock.sendto(b"toggle", SCREENS)

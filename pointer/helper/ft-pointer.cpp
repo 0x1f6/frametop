@@ -86,6 +86,18 @@
 // doesn't jump the cursor to free space or swap in the laser-catching dot, which made
 // SteamVR's resize snap back.
 //
+// Head follow (off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
+// is carried by a reference direction on a leash, POINTER_LEASH_DEG (10) from where the head
+// faces. While the head turns within the leash, the reference and the cursor stay put in the
+// room; past it, the reference is dragged along at the leash's end, and the cursor turns with
+// it, keeping its offset (mouse movement changes the offset). At 0 the reference is the head's
+// facing, so the cursor is head-locked. Head roll is ignored (the frames have no roll), so
+// tilting the head doesn't swing the cursor. The cursor stays within kFollowReachDeg of the
+// reference, so it can't be pushed out of view. The ray starts at the eye. While the left
+// button is held (and the drop hold after it), the leash still moves the reference but the
+// cursor stays put in the room, so a click or a drag can't be nudged by the head; the offset
+// is taken up from where the cursor is when the hold ends, so it doesn't jump.
+//
 // Placement (for layout): SteamVR keeps a floating panel's position inside the
 // dashboard, where nothing outside can set it, so the helper carries panels like a user
 // would. It measures the panel (md::ScanPanel), aims the device at its grab bar
@@ -100,6 +112,7 @@
 // twice while it's more than 1.5 cm or 1 deg off.
 //
 // Commands (datagrams on @ft_pointer_helper): show, hide, recenter, move <dyaw> <dpitch>,
+// follow on|off|toggle (head follow, until the next restart or a change to POINTER_FOLLOW),
 // reload (re-read the settings below), debug (toggle a twice-a-second state log),
 // and btn/scroll lines, which are forwarded to the driver unchanged. For layouts, with a
 // reply datagram to the sender's (abstract) address:
@@ -117,7 +130,8 @@
 // POINTER_ORIGIN_FRACTION (0.95): the laser starts this far along the eye-to-cursor line,
 // but never closer than POINTER_ORIGIN_MARGIN (0.15 m) to the cursor point: SteamVR's
 // small controls (undock, frame buttons) float a few centimetres in front of their
-// panel, and a laser that starts behind them can't hit them.
+// panel, and a laser that starts behind them can't hit them. POINTER_FOLLOW (0) and
+// POINTER_LEASH_DEG (10): head follow, above.
 #include <openvr.h>
 
 #include "vrmath.h"
@@ -290,15 +304,34 @@ std::vector<uint8_t> DotTexture(int size) {
     return px;
 }
 
+// Unit vector v, turned toward unit vector `center` until it's at most maxRad from it.
+Vec3 PullWithin(Vec3 v, Vec3 center, double maxRad) {
+    if (std::acos(std::clamp(Dot(v, center), -1.0, 1.0)) <= maxRad) return v;
+    Vec3 axis = Cross(center, v);
+    if (Length(axis) < 1e-9) axis = Cross(center, {0, 1, 0});  // opposite: any perpendicular
+    return RotateAbout(center, Normalize(axis), maxRad);
+}
+
+// Unit direction with its pitch limited to +-maxDeg (AimBasis needs it off vertical).
+Vec3 LimitPitch(Vec3 d, double maxDeg) {
+    const double pitch = std::clamp(std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI, -maxDeg, maxDeg);
+    return Direction(std::atan2(-d.x, -d.z) * 180 / M_PI, pitch);
+}
+
 }  // namespace
 
 // Placement speeds (see "Placement" at the top).
 constexpr double kPlaceDegPerSec = 60;      // tested: 40 deg/s is applied exactly
+// Head follow (see the top): the farthest the cursor can be from the reference direction.
+constexpr double kFollowReachDeg = 40;
 
 int main() {
     double freeDistance = 1.5, cursorDeg = 0.4, originFraction = 0.95, originMargin = 0.15, sceneRadius = 0.5,
            edgeReach = 0.3, grabOffset = 0.075,
-           slideSpeed = 0.5;
+           slideSpeed = 0.5, leashDeg = 10;
+    // Head follow (see the top). followConf is POINTER_FOLLOW as last read: a reload only
+    // overrides a "follow" command when the setting itself changed.
+    bool follow = false, followConf = false, followReset = true;
     auto loadConfig = [&] {
         const auto conf = ReadConfig();
         freeDistance = std::clamp(ConfDouble(conf, "POINTER_DISTANCE", 1.5), 0.3, 10.0);
@@ -309,6 +342,9 @@ int main() {
         edgeReach = std::clamp(ConfDouble(conf, "POINTER_EDGE_REACH", 0.3), 0.0, 2.0);
         grabOffset = std::clamp(ConfDouble(conf, "LAYOUT_GRAB_OFFSET", 0.075), 0.0, 1.0);
         slideSpeed = std::clamp(ConfDouble(conf, "LAYOUT_SLIDE_SPEED", 0.5), 0.02, 2.0);
+        leashDeg = std::clamp(ConfDouble(conf, "POINTER_LEASH_DEG", 10), 0.0, 90.0);
+        const bool wantFollow = ConfDouble(conf, "POINTER_FOLLOW", 0) != 0;
+        if (wantFollow != followConf) follow = followConf = wantFollow, followReset = true;
     };
     loadConfig();
     const float laserWidth = float(ConfDouble(ReadConfig(), "POINTER_LASER_WIDTH", 0.8));
@@ -392,6 +428,7 @@ int main() {
     };
     Vec3 anchor;
     double yaw = 0, pitch = 0;
+    Vec3 followRef{0, 0, -1};  // head follow's reference direction (see the top)
     vr::TrackedDeviceIndex_t ours = vr::k_unTrackedDeviceIndexInvalid;
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -667,8 +704,16 @@ int main() {
                 recenter = true;
             } else if (std::strncmp(buf, "reload", 6) == 0) {
                 loadConfig();
-                std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f\n", freeDistance, cursorDeg,
-                            originFraction);
+                std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f, head follow %s, leash %.0f deg\n",
+                            freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg);
+                std::fflush(stdout);
+            } else if (std::strncmp(buf, "follow", 6) == 0) {
+                const char *arg = buf + 6;
+                while (*arg == ' ') ++arg;
+                const bool was = follow;
+                follow = std::strncmp(arg, "on", 2) == 0 ? true : std::strncmp(arg, "off", 3) == 0 ? false : !follow;
+                if (follow && !was) followReset = true;
+                std::printf("head follow %s (leash %.0f deg)\n", follow ? "on" : "off", leashDeg);
                 std::fflush(stdout);
             } else if (std::strncmp(buf, "show", 4) == 0) {
                 if (!active) wake(Clock::now());
@@ -757,6 +802,23 @@ int main() {
             pitch = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
             anchored = true;
             recenter = false;
+            followReset = true;
+        }
+
+        // Head follow (see the top): drag the reference along on its leash, and the cursor with it.
+        if (follow && active && anchored && hmd.bPoseIsValid) {
+            const Vec3 head = LimitPitch(Vec3{-hm[0][2], -hm[1][2], -hm[2][2]}, 85);
+            if (followReset) followRef = head, followReset = false;
+            const Vec3 ref = LimitPitch(PullWithin(followRef, head, leashDeg * M_PI / 180), 85);
+            if (!leftHeld && tnow >= dropHoldUntil) {
+                // The cursor keeps its offset from the reference (frames without roll).
+                Vec3 d = FromBasis(AimBasis(ref), ToBasis(AimBasis(followRef), Direction(yaw, pitch)));
+                d = PullWithin(Normalize(d), ref, kFollowReachDeg * M_PI / 180);
+                yaw = std::atan2(-d.x, -d.z) * 180 / M_PI;
+                pitch = std::clamp(std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI, -85.0, 85.0);
+                anchor = eye;
+            }
+            followRef = ref;
         }
 
         // Slow work, once a second: overlay handles, our device index, laser width.

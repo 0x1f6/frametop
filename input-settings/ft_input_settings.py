@@ -37,7 +37,8 @@ DEFAULT_BUTTONS = {0x110: "left", 0x111: "right", 0x112: "middle", 0x113: "back"
 ACTION_LABELS = {
     "left": "Left click", "right": "Right click", "middle": "Middle click", "back": "Back",
     "scroll_up": "Scroll up", "scroll_down": "Scroll down", "dashboard": "Toggle SteamVR dashboard",
-    "recenter": "Recenter pointer", "pointer_toggle": "Pointer on/off", "sens_up": "Faster pointer",
+    "recenter": "Recenter pointer", "pointer_toggle": "Pointer on/off",
+    "follow_toggle": "Head follow on/off", "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "key": "Pass through as key",
     "none": "Do nothing",
@@ -52,6 +53,7 @@ POINTER_SETTINGS = [
     ("POINTER_ORIGIN_MARGIN", "Room for small controls", 0.15, 0.03, 0.5, 0.01, "m"),
     ("POINTER_SCENE_RADIUS", "Dock / window-control reach", 0.5, 0.1, 1.5, 0.05, "m"),
     ("POINTER_EDGE_REACH", "Panel edge reach", 0.3, 0.0, 1.0, 0.05, "m"),
+    ("POINTER_LEASH_DEG", "Head follow leash", 10, 0, 60, 1, "°"),
     ("POINTER_WAKE_COUNTS", "Movement to wake", 40, 5, 200, 5, "counts"),
     ("POINTER_IDLE", "Release after idle", 30, 5, 120, 5, "s"),
 ]
@@ -356,9 +358,19 @@ class Backend(QObject):
 
     @Slot(str, float)
     def setPointerSetting(self, key, value):
-        integer = key in ("POINTER_WAKE_COUNTS", "POINTER_IDLE")
+        integer = key in ("POINTER_WAKE_COUNTS", "POINTER_IDLE", "POINTER_LEASH_DEG")
         write_conf_value(key, str(int(round(value))) if integer else f"{value:.3f}".rstrip("0").rstrip("."))
         self.reload_timer.start()  # debounce slider drags
+        self.pointerChanged.emit()
+
+    @Property(bool, notify=pointerChanged)
+    def pointerFollow(self):
+        return read_conf().get("POINTER_FOLLOW", "0") not in ("", "0")
+
+    @Slot(bool)
+    def setPointerFollow(self, on):
+        write_conf_value("POINTER_FOLLOW", "1" if on else "0")
+        self.reload_timer.start()
         self.pointerChanged.emit()
 
     @Slot(result=bool)
