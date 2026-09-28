@@ -99,7 +99,7 @@ setup/bluetooth/install.sh uninstall   # if you installed the Bluetooth fixes
 
 ## How it works
 
-A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland compositor. KWin opens one window per screen, ft-screens sets each window's size, and each frame goes to SteamVR as an overlay without being copied. An input relay (`input/`) keeps Bluetooth mice working in SteamVR and feeds the mouse to the 3D pointer, which drives a virtual SteamVR controller (`pointer/`). [docs/reference.md](docs/reference.md) covers each piece, and [docs/design.md](docs/design.md) explains the design and what we learned about SteamVR on the Frame.
+A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland compositor. KWin opens one window per screen, ft-screens sets each window's size, and each frame goes to SteamVR as an overlay without being copied. An input relay (`input/`) keeps Bluetooth mice working in SteamVR and feeds the mouse to the 3D pointer, which drives a virtual SteamVR controller (`pointer/`). [docs/reference.md](docs/reference.md) covers each piece, and [docs/design.md](docs/design.md) explains the design and what we learned about SteamVR on the Frame. [docs/hazards.md](docs/hazards.md) lists known ways the input handling can go wrong.
 
 | Folder | What it is |
 | --- | --- |
