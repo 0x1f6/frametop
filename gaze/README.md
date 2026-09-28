@@ -1,15 +1,29 @@
 # Gaze (experimental)
 
-Tools for trying the Steam Frame's eye tracking as pointer input, before any of it goes into the 3D mouse.
+The Steam Frame's eye tracking as pointer input: a gaze mode for the 3D mouse (the pointer goes where you look, and the mouse does the last bit), and the tools to calibrate and measure it.
 
 - `ft-gaze` (C++, OpenVR, runs in the dev container) reads the eye tracker and prints one JSON line per sample (90 Hz). For each source, it gives the gaze direction relative to the head and the Frametop screen pixel it lands on.
+- `gazecal.py` has what the probe and the gaze service share: the correction models, filters, and the reader for SteamVR's eye tracking log.
 - `probe/ft-gazeprobe` (GTK 4, host Python) is a fullscreen playground. It runs ft-gaze, draws where you're looking, measures accuracy, and tries out hold-to-adjust clicking with a calibration that learns from your adjustments.
 
 ```
 gaze/build.sh                 # build ft-gaze
 gaze/probe/install.sh         # build, and add Frametop Gaze Probe to the app menu
 gaze/probe/ft-gazeprobe --screen 1
+gaze/run.sh install           # the gaze service, with SteamVR
+gaze/ft-gazectl on            # the pointer follows your gaze (off: the mouse alone)
 ```
+
+## Gaze pointer
+
+Gaze as an input method for the whole desktop, without replacing anything of SteamVR's:
+
+- `ft-gazed` (host Python, a user service: `gaze/run.sh install`) runs ft-gaze and corrects its gaze. It drops blinks and dropouts, smooths with a fixation lock, and applies the calibration from the probe (`calibration.json`, reloaded when the probe changes it) plus what the pointer has learned since (`pointer-lessons.json`). It sends the result to the pointer helper 90 times a second. It follows SteamVR's eye tracking log, and when the headset goes back on (SteamVR starts its eye model over, and the error moves), older lessons count less, so the first few after relearn the offset.
+- The pointer helper's **gaze mode** (off by default: `gaze/ft-gazectl on`, `POINTER_GAZE=1` in `~/.config/frametop.conf`, or a button mapped to "Gaze pointer on/off") works like MAGIC pointing (Zhai et al., 1999). The pointer goes where you look. Move the mouse and it's the mouse's, from where the gaze put it, for the last bit. Look well away (5 degrees) and the gaze takes it back. Clicks and drags work as usual.
+- **Learning from nudges:** if the mouse took the pointer from the gaze and moved it a little (0.2 to 8 degrees) before you clicked, you were nudging it onto what you looked at. The helper sends that as a lesson, from the raw gaze when the mouse took over to where you clicked, and ft-gazed learns it. So using it is what calibrates it. `ft-gazectl status` shows the lessons, and `ft-gazectl forget` drops them.
+- Nothing writes to SteamVR, its eye tracker, or its files: ft-gaze maps the eye tracker's shared memory read-only. With no fresh gaze (a blink, the service stopped, the headset off), the pointer stays where it is, and the mouse works as always.
+
+Lessons are logged to `pointer-lessons.jsonl`: the raw gaze, the true direction, the correction at the time, and how far off it was.
 
 ## Gaze sources
 

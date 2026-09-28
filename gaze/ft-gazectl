@@ -1,0 +1,54 @@
+#!/usr/bin/python3
+"""ft-gazectl: turn the gaze pointer on or off, and ask the gaze service how it's doing.
+
+  ft-gazectl on|off|toggle   gaze mode in the pointer helper (until it restarts; the
+                             setting is POINTER_GAZE in ~/.config/frametop.conf)
+  ft-gazectl status          the gaze service (ft-gazed): samples, lessons, the correction
+  ft-gazectl forget          drop what the pointer's lessons taught (the calibration stays)
+  ft-gazectl reload          the service reads calibration.json again
+"""
+
+import json
+import os
+import socket
+import sys
+
+
+def ask(name, msg, timeout=1.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC)
+    s.bind(f"\0ft_gazectl.{os.getpid()}")
+    s.settimeout(timeout)
+    try:
+        s.sendto(msg.encode(), "\0" + name)
+        return s.recv(4096).decode()
+    except ConnectionRefusedError:
+        return None
+    except socket.timeout:
+        return ""
+    finally:
+        s.close()
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd in ("on", "off", "toggle"):
+        r = ask("ft_pointer_helper", f"gaze {cmd}")
+        if r is None:
+            sys.exit("the pointer helper isn't running")
+        print(f"gaze mode {r.removeprefix('ok ')}" if r else "no answer (an older pointer helper without gaze mode?)")
+        if ask("ft_gazed", "status", 0.3) is None:
+            print("note: the gaze service (ft-gazed) isn't running, so the pointer has no gaze to follow")
+    elif cmd in ("status", "forget", "reload"):
+        r = ask("ft_gazed", cmd)
+        if r is None:
+            sys.exit("the gaze service (ft-gazed) isn't running")
+        try:
+            print(json.dumps(json.loads(r), indent=1))
+        except ValueError:
+            print(r)
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
