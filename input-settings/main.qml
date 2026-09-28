@@ -357,22 +357,22 @@ Kirigami.ApplicationWindow {
                 }
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
-                    visible: cpage.status.helper && !cpage.status.global
+                    visible: cpage.status.helper && !cpage.status.global && backend.controllerMappings.length > 0
                     type: Kirigami.MessageType.Warning
-                    text: "SteamVR's \"Enable global input from overlays (Experimental)\" is off. Without it the "
-                          + "buttons only reach Frametop when nothing else has focus, if at all."
-                    actions: [
-                        Kirigami.Action {
-                            text: "Turn it on"
-                            icon.name: "dialog-ok-apply"
-                            onTriggered: backend.setGlobalInput(true)
-                        }
-                    ]
+                    text: "Global input is off, so the mapped buttons only reach Frametop when nothing else has "
+                          + "focus, if at all."
                 }
 
                 Kirigami.FormLayout {
                     Layout.fillWidth: true
 
+                    Controls.Switch {
+                        Kirigami.FormData.label: "Global input:"
+                        text: "SteamVR's \"Enable global input from overlays (Experimental)\", which mapped buttons need"
+                        checked: cpage.status.global
+                        enabled: cpage.status.helper
+                        onToggled: backend.setGlobalInput(checked)
+                    }
                     Controls.Switch {
                         Kirigami.FormData.label: "In games:"
                         text: "Mapped buttons work while a game is running too (the game loses them)"
