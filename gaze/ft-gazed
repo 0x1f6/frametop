@@ -3,8 +3,13 @@
 
 Runs ft-gaze (in the dev container), and for every eye tracker sample (90 Hz):
 
-  1. drops blinks and moments the tracker lost an eye: openness under half its running
-     median, or the angle between the eyes jumping more than 1.5 degrees from its median;
+  1. drops blinks: both eyes' openness under half its running median (each eye its own).
+     With the default source, mmap set 1, that's all: set 1 is SteamVR's combined gaze,
+     which keeps going when the tracker loses one eye (its two directions stay together).
+     Set 2's combined direction is the mean of the eyes' own, so with one eye lost it's
+     off by half of whatever that eye reads (9 to 14 degrees apart were seen): with set 2,
+     samples with an eye under its floor, or the angle between the eyes jumping more than
+     1.5 degrees from its median, are dropped too;
   2. smooths it with a fixation lock (the running mean of the current fixation, 1 degree);
   3. corrects it: the calibration from ft-gazeprobe (calibration.json, reloaded when the
      probe changes it) plus what the pointer's corrections have taught since (LiveCorrection,
@@ -31,7 +36,8 @@ Control socket: abstract unix datagram "@ft_gazed":
   forget                           drop what the lessons taught (the calibration stays)
   reload                           read calibration.json again
 
-Options: --source action|mmap1|mmap2 (default mmap2, the quietest), -v (a status line every
+Options: --source action|mmap1|mmap2 (default mmap1; set 2 was a little quieter in the probe,
+but loses the pointer whenever the tracker loses an eye), -v (a status line every
 5 s on stderr), --to NAME (send the gaze to the abstract socket @NAME instead of the pointer
 helper; for testing: a helper without gaze mode forwards what it doesn't know to its driver).
 """
@@ -83,9 +89,9 @@ class Service:
         self.live.wear_time = self.steam.worn()
         self.live.refit(self.base, self.mode)
         self.fix = Fixation(radius=1.0)
-        self.opens = deque(maxlen=90)
+        self.opens = (deque(maxlen=90), deque(maxlen=90))  # left, right
         self.vergence = deque(maxlen=90)
-        self.counts = {"samples": 0, "sent": 0, "dropped": 0, "lessons": 0, "refused": 0}
+        self.counts = {"samples": 0, "sent": 0, "blinks": 0, "one_eye": 0, "dropped": 0, "lessons": 0, "refused": 0}
         self.last_sample = 0.0
         self.last = None
 
@@ -232,18 +238,30 @@ class Service:
         m1 = s["src"].get("mmap1") or {}
         o = m1.get("open")
         lr = src.get("lr", m1.get("lr"))
-        if o:
-            self.opens.append(min(o))
-        if lr is not None:
-            self.vergence.append(lr)
-        # Blinks and dropouts, judged against the last second (see steady_samples: relative,
+        # Blinks and lost eyes, judged against the last second (see steady_samples: relative,
         # because the lids come down looking down, and the vergence depends on distance).
-        if o and len(self.opens) >= 30 and min(o) < max(0.12, 0.5 * statistics.median(self.opens)):
-            self.counts["dropped"] += 1
+        # An eye's floor comes from its good readings, so a lost eye doesn't drag it to 0.
+        low = [False, False]
+        if o and len(o) == 2:
+            for k in (0, 1):
+                hist = self.opens[k]
+                good = [v for v in hist if v >= 0.12]
+                floor = max(0.12, 0.5 * statistics.median(good)) if len(good) >= 30 else 0.12
+                low[k] = o[k] < floor
+                hist.append(o[k])
+        if all(low):
+            self.counts["blinks"] += 1
             return
-        if lr is not None and len(self.vergence) >= 30 and abs(lr - statistics.median(self.vergence)) > 1.5:
-            self.counts["dropped"] += 1
-            return
+        if any(low):
+            self.counts["one_eye"] += 1
+        if self.source == "mmap2":
+            jump = (lr is not None and len(self.vergence) >= 30
+                    and abs(lr - statistics.median(self.vergence)) > 1.5)
+            if lr is not None and not any(low):
+                self.vergence.append(lr)
+            if any(low) or jump:
+                self.counts["dropped"] += 1
+                return
         # The fixation lock works in degrees here (1 degree per "pixel").
         fy, fp = self.fix(src["hy"], src["hp"], s["t"], 1.0)
         cy, cp = self.correction(fy, fp)
@@ -342,7 +360,7 @@ class Service:
 
 def main():
     ap = argparse.ArgumentParser(description="The gaze service: corrected eye tracking for the pointer")
-    ap.add_argument("--source", choices=["action", "mmap1", "mmap2"], default="mmap2")
+    ap.add_argument("--source", choices=["action", "mmap1", "mmap2"], default="mmap1")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--to", default="ft_pointer_helper", help="abstract socket to send the gaze to")
     args = ap.parse_args()
