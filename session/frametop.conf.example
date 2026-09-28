@@ -23,6 +23,9 @@ POINTER_LEASH_DEG=10       # head follow: how far (degrees) your head can turn b
 POINTER_LEASH_DELAY=0.2    # head follow: how long (s) your head has to stay past the leash, so a glance doesn't move the cursor
 POINTER_LEASH_RETURN=0.2   # head follow: once it comes along, how quickly (s) the cursor settles back to its place in your view
 POINTER_FOLLOW_REACH=70    # head follow: how far (degrees) from the middle of your view the mouse can move the cursor
+POINTER_GAZE=0             # 1 = the pointer goes where you look, the mouse does the last bit (needs the gaze service: gaze/run.sh install)
+POINTER_GAZE_RETAKE=5      # gaze mode: how far (degrees) you look away from the pointer before the gaze takes it back from the mouse
+POINTER_GAZE_NUDGE_MAX=8   # gaze mode: a mouse nudge up to this far (degrees) before a click is learned as the eye tracker's error
 META_DASHBOARD=0   # 1 = a Meta tap on a pass-through keyboard toggles the SteamVR dashboard (pointer mode only)
 SHARE_KEYS=0       # 1 = keys of keyboards grabbed for the desktop also go to @frametop_keys, for hotkey tools (any local process can listen)
 LAYOUT_GRAB_OFFSET=0.075   # arranging screens: where the floating window's grab bar is, in metres below the screen

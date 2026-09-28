@@ -106,6 +106,24 @@
 // cursor stays put in the room, so a click or a drag can't be nudged by the head; the offset
 // is taken up from where the cursor is when the hold ends, so it doesn't jump.
 //
+// Gaze mode (experimental, off by default; POINTER_GAZE=1, "gaze on|off|toggle", or the
+// relay's gaze_toggle): the pointer goes where you look, and the mouse does the last bit
+// (MAGIC pointing: Zhai, Morimoto and Ihde, CHI 1999). The gaze service (gaze/ft-gazed)
+// sends the corrected gaze 90 times a second, "gz <yaw> <pitch> <raw yaw> <raw pitch>"
+// (head-relative degrees), and while the gaze has the pointer, the cursor ray is simply
+// that gaze from the eye: nothing is steered, so nothing can pile up. Moving the mouse takes
+// the pointer from the gaze, and it moves from where the gaze left it, as usual. Looking
+// well away from it (more than POINTER_GAZE_RETAKE, 5 deg, for 120 ms, with the mouse still
+// for 300 ms) gives it back to the gaze; small eye movements around the pointer don't. A
+// click or a drag holds the pointer where it is, like any other press.
+//   When the mouse took the pointer and you then click, the nudge was probably onto what
+// you were looking at: from the raw gaze when the mouse took over to where you clicked is
+// the tracker's error there. The helper sends it to ft-gazed as a lesson ("lesson <raw yaw>
+// <raw pitch> <true yaw> <true pitch>", the true direction relative to the head as it was
+// when the mouse took over) if the mouse moved between 0.2 deg and POINTER_GAZE_NUDGE_MAX
+// (8 deg) and the click came within 10 s; more is using the mouse, not a nudge. With no
+// fresh gaze (a blink, the service stopped, the headset off), the pointer stays put.
+//
 // Placement (for layout): SteamVR keeps a floating panel's position inside the
 // dashboard, where nothing outside can set it, so the helper carries panels like a user
 // would. It measures the panel (md::ScanPanel), aims the device at its grab bar
@@ -121,6 +139,7 @@
 //
 // Commands (datagrams on @ft_pointer_helper): show, hide, recenter, move <dyaw> <dpitch>,
 // follow on|off|toggle (head follow, until the next restart or a change to POINTER_FOLLOW),
+// gaze on|off|toggle (gaze mode, likewise with POINTER_GAZE), gz ... (the gaze, from ft-gazed),
 // reload (re-read the settings below), debug (toggle a twice-a-second state log),
 // and btn/scroll lines, which are forwarded to the driver unchanged. For layouts, with a
 // reply datagram to the sender's (abstract) address:
@@ -140,7 +159,8 @@
 // small controls (undock, frame buttons) float a few centimetres in front of their
 // panel, and a laser that starts behind them can't hit them. POINTER_FOLLOW (0) and
 // POINTER_LEASH_DEG (10), POINTER_LEASH_DELAY (0.2 s), POINTER_LEASH_RETURN (0.2 s),
-// POINTER_FOLLOW_REACH (70 deg): head follow, above.
+// POINTER_FOLLOW_REACH (70 deg): head follow, above. POINTER_GAZE (0), POINTER_GAZE_RETAKE
+// (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg): gaze mode, above.
 #include <openvr.h>
 
 #include "vrmath.h"
@@ -339,6 +359,9 @@ int main() {
     // Head follow (see the top). followConf is POINTER_FOLLOW as last read: a reload only
     // overrides a "follow" command when the setting itself changed.
     bool follow = false, followConf = false, followReset = true;
+    // Gaze mode (see the top); gazeConf is POINTER_GAZE as last read, like followConf.
+    bool gazeOn = false, gazeConf = false;
+    double gazeRetake = 5, gazeNudgeMax = 8;
     auto loadConfig = [&] {
         const auto conf = ReadConfig();
         freeDistance = std::clamp(ConfDouble(conf, "POINTER_DISTANCE", 1.5), 0.3, 10.0);
@@ -355,6 +378,10 @@ int main() {
         followReach = std::clamp(ConfDouble(conf, "POINTER_FOLLOW_REACH", 70), 10.0, 89.0);
         const bool wantFollow = ConfDouble(conf, "POINTER_FOLLOW", 0) != 0;
         if (wantFollow != followConf) follow = followConf = wantFollow, followReset = true;
+        gazeRetake = std::clamp(ConfDouble(conf, "POINTER_GAZE_RETAKE", 5), 1.0, 45.0);
+        gazeNudgeMax = std::clamp(ConfDouble(conf, "POINTER_GAZE_NUDGE_MAX", 8), 1.0, 30.0);
+        const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
+        if (wantGaze != gazeConf) gazeOn = gazeConf = wantGaze;
     };
     loadConfig();
     const float laserWidth = float(ConfDouble(ReadConfig(), "POINTER_LASER_WIDTH", 0.8));
@@ -443,6 +470,17 @@ int main() {
     bool following = false;                           // past the leash: easing toward the head
     double followLag = 0;                             // radians the reference trails the head
     std::chrono::steady_clock::time_point leashOutSince{};  // head past the leash since (delay)
+    // Gaze mode (see the top).
+    struct Gaze {
+        double hy = 0, hp = 0, rhy = 0, rhp = 0;  // corrected, and raw
+        Clock::time_point at{};
+    } gz;
+    bool gazeOwns = true;  // the pointer follows the gaze; false: the mouse has it
+    bool nudging = false;  // the mouse took it from the gaze: the next click may be a lesson
+    double nudgeRawHy = 0, nudgeRawHp = 0, nudgeMoved = 0;
+    vr::HmdMatrix34_t nudgeHead{}, lastHead{};
+    bool haveHead = false, havePoint = false;
+    Clock::time_point nudgeAt{}, retakeSince{};
     vr::TrackedDeviceIndex_t ours = vr::k_unTrackedDeviceIndexInvalid;
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -636,6 +674,22 @@ int main() {
                 if (senderLen > offsetof(sockaddr_un, sun_path))
                     sendto(out, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr *>(&sender), senderLen);
             };
+            // The gaze, from ft-gazed: not mouse input, it never wakes the pointer.
+            double g[4];
+            if (std::sscanf(buf, "gz %lf %lf %lf %lf", &g[0], &g[1], &g[2], &g[3]) == 4) {
+                gz = {g[0], g[1], g[2], g[3], Clock::now()};
+                continue;
+            }
+            if (std::strncmp(buf, "gaze", 4) == 0) {
+                const char *arg = buf + 4;
+                while (*arg == ' ') ++arg;
+                gazeOn = std::strncmp(arg, "on", 2) == 0 ? true : std::strncmp(arg, "off", 3) == 0 ? false : !gazeOn;
+                gazeOwns = true, nudging = false;
+                std::printf("gaze mode %s\n", gazeOn ? "on" : "off");
+                std::fflush(stdout);
+                reply(gazeOn ? "ok on" : "ok off");
+                continue;
+            }
             const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
                                     std::strncmp(buf, "scroll", 6) == 0;
             if (mouseInput) lastMouse = Clock::now();
@@ -687,6 +741,18 @@ int main() {
                 // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
                 // its own screens, but only we know when one lands on another panel.
                 SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
+                // A click after nudging the gaze-placed pointer: the nudge is a lesson (see the top).
+                if (gazeOn && nudging && !gazeOwns && havePoint && Clock::now() - nudgeAt < std::chrono::seconds(10) &&
+                    nudgeMoved >= 0.2 && nudgeMoved <= gazeNudgeMax) {
+                    const Vec3 d = RotateInverse(nudgeHead, Normalize(lastPoint - Position(nudgeHead)));
+                    char msg[160];
+                    std::snprintf(msg, sizeof msg, "lesson %.3f %.3f %.3f %.3f", nudgeRawHy, nudgeRawHp,
+                                  std::atan2(-d.x, -d.z) * 180 / M_PI, std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI);
+                    SendTo(out, "ft_gazed", msg);
+                    if (debug) std::printf("gaze %s (nudged %.2f deg)\n", msg, nudgeMoved);
+                    if (debug) std::fflush(stdout);
+                }
+                nudging = false;
                 leftHeld = true;
                 dragDistance = lastDistance;
                 tiltYaw = tiltPitch = 0;  // a new drag starts untilted
@@ -709,6 +775,14 @@ int main() {
                 continue;
             }
             if (std::sscanf(buf, "move %lf %lf", &a, &b) == 2) {
+                if (gazeOn && gazeOwns) {
+                    // The mouse takes the pointer from the gaze, from where the gaze left it.
+                    gazeOwns = false;
+                    nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
+                    nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+                    nudgeAt = Clock::now(), nudgeMoved = 0;
+                }
+                if (nudging) nudgeMoved += std::hypot(a, b);
                 if (!anchored) recenter = true;
                 yaw += a;
                 while (yaw > 180) yaw -= 360;
@@ -819,9 +893,33 @@ int main() {
             followReset = true;
         }
 
+        // Gaze mode (see the top): the gaze has the pointer, or takes it back when you look
+        // well away from it. Not while a press holds the pointer, and only on fresh gaze.
+        if (hmd.bPoseIsValid) lastHead = hmd.mDeviceToAbsoluteTracking, haveHead = true;
+        if (gazeOn && active && hmd.bPoseIsValid && !tilting && !leftHeld && tnow >= dropHoldUntil &&
+            tnow - gz.at < std::chrono::milliseconds(150)) {
+            const Vec3 g = Rotate(hmd.mDeviceToAbsoluteTracking, Direction(gz.hy, gz.hp));
+            if (!gazeOwns && havePoint) {
+                const double off = std::acos(std::clamp(Dot(g, Normalize(lastPoint - eye)), -1.0, 1.0)) * 180 / M_PI;
+                if (off > gazeRetake && tnow - lastMouse > std::chrono::milliseconds(300)) {
+                    if (retakeSince == Clock::time_point{}) retakeSince = tnow;
+                    if (tnow - retakeSince >= std::chrono::milliseconds(120)) gazeOwns = true, nudging = false;
+                } else {
+                    retakeSince = {};
+                }
+            }
+            if (gazeOwns) {
+                retakeSince = {};
+                anchor = eye;
+                anchored = true;
+                yaw = std::atan2(-g.x, -g.z) * 180 / M_PI;
+                pitch = std::clamp(std::asin(std::clamp(g.y, -1.0, 1.0)) * 180 / M_PI, -85.0, 85.0);
+            }
+        }
+
         // Head follow (see the top): past the leash (for the delay), ease the reference to the
-        // head's facing, and turn the cursor with it.
-        if (follow && active && anchored && hmd.bPoseIsValid) {
+        // head's facing, and turn the cursor with it. Not in gaze mode: the gaze places it.
+        if (follow && !gazeOn && active && anchored && hmd.bPoseIsValid) {
             const Vec3 head = LimitPitch(Vec3{-hm[0][2], -hm[1][2], -hm[2][2]}, 85);
             if (followReset) {
                 followRef = head, followLag = 0, leashOutSince = {};
@@ -1037,12 +1135,14 @@ int main() {
             const Vec3 originStanding = eye + Normalize(point - eye) * originDist;
             const Vec3 eyeRaw = Position(R) + Rotate(R, RotateInverse(S, originStanding - eye));
             lastPoint = point, lastOrigin = originStanding, lastAim = aimStanding;  // tilt starts from here
+            havePoint = true;
             if (debug && tnow - lastDebug > std::chrono::milliseconds(500)) {
                 lastDebug = tnow;
                 if (systemPointer == vr::k_ulOverlayHandleInvalid) overlay->FindOverlay("system.pointer", &systemPointer);
-                std::printf("dbg %s hit=%s dist=%.2f eye->point=%.2f origin=%.2f yaw=%.1f pitch=%.1f steamvr_dot=%d primary=%u\n",
+                std::printf("dbg %s hit=%s dist=%.2f eye->point=%.2f origin=%.2f yaw=%.1f pitch=%.1f gaze=%s steamvr_dot=%d primary=%u\n",
                             dragging ? "DRAG" : occluded ? "INFRONT" : onEdge ? "EDGE" : onScene ? "SCENE" : (best < 1e8 ? "PANEL" : "FREE"), lastHit.empty() ? "-" : lastHit.c_str(),
                             distance, toPoint, originDist, yaw, pitch,
+                            !gazeOn ? "off" : tnow - gz.at > std::chrono::milliseconds(150) ? "stale" : gazeOwns ? "owns" : "mouse",
                             systemPointer != vr::k_ulOverlayHandleInvalid && overlay->IsOverlayVisible(systemPointer),
                             overlay->GetPrimaryDashboardDevice());
                 std::fflush(stdout);
