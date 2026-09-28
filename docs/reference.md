@@ -115,6 +115,8 @@ Device rules are saved in `~/.config/frametop-input.json`. `input-settings/insta
 
 When the desktop starts, its screens arrange themselves around where you're facing. You can move them by hand at any time and put them back with Meta+Shift+R, the Reset Screen Layout menu entry, Arrange now in the app, or a mouse button mapped to Reset desktop screen layout.
 
+The desktop's own screen arrangement follows where the screens are around you, whatever their numbers: a screen you see to the left of another is to its left in Plasma too, so the pointer and dragged windows cross straight to it. Screens one above the other stack, and screens pinned to a wrist come last. It's updated at startup, after arranging or saving the layout, and half a second after you let go of a screen you moved. With the headset off there's no head pose to go by, and the arrangement stays as it was.
+
 Frametop Display Settings has three tabs:
 
 - Screens: add and remove screens, and set each one's resolution (presets from 1080p to 4K, ultrawide, super ultrawide, portrait, or custom), its width in VR (0.5 to 6 m), its scale, whether it's curved, and whether it has the taskbar. Resolution, width, and curve apply at once. Adding or removing a screen takes a desktop restart, which the app offers.
@@ -127,7 +129,7 @@ Frametop Display Settings has three tabs:
 layout/ft-layout apply      # arrange every screen
 layout/ft-layout capture    # save the current arrangement and sizes as the layout
 layout/ft-layout plan       # print the arrangement as JSON (no VR needed)
-layout/ft-layout scale      # per-screen scale, positions, and taskbar screen, to KWin
+layout/ft-layout scale      # per-screen scale, positions (as the screens are around you), and taskbar screen, to KWin
 layout/ft-layout toggle     # hide or show all screens
 display-settings/install.sh # menu entries and the Meta+Shift+R and Meta+Shift+H shortcuts
 ```
