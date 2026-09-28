@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Frametop Gaze Probe
+GenericName=Eye tracking playground
+Comment=How accurate the headset's eye tracking is on your screens, and gaze clicking with calibration
+Exec=@REPO@/gaze/probe/ft-gazeprobe
+Icon=view-visible
+Categories=Utility;Development;
+Keywords=eye;gaze;tracking;calibration;pointer;steamvr;frametop;
