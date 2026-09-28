@@ -24,6 +24,17 @@ pointer_toggle, follow_toggle = head follow on or off, gaze_toggle = gaze mode o
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens, key = pass
 through as a key, none).
 
+Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
+rules file; any action but key). The controllers aren't input devices here, only SteamVR sees
+them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
+It only takes the buttons the relay tells it to ("vrbind <button>..." to @ft_pointer_helper,
+sent on start, reload, and when the helper says "vrhello"), and only while no game runs,
+unless "controller_in_games" is true in the rules file (then a mapped button no longer
+reaches games; see pointer/helper/vrbuttons.h).
+
+In gaze mode outside games, the helper keeps the pointer ("gazeawake 1", repeated every 5
+seconds; "gazeawake 0" or silence ends it): the pointer isn't released when the mouse is idle.
+
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
 types them into the desktop screen that has focus: from pass-through keyboards, and
 keys a pointer device passes through. Typing goes to the panel clicked last, and
@@ -53,6 +64,9 @@ Control socket (abstract datagram @frametop_relay, JSON replies to the sender):
   devices           list event nodes with id, name, kinds, role, grabbed
   watch <seconds>   stream input events from every candidate node (identification)
   reload            re-read both config files, re-apply roles, tell the helper
+  vrcapture <s>     take every controller button for s seconds (0: stop), so the settings
+                    app can capture one; watchers see them as events with id frame_controller
+  vrbtn, vrhello, gazeawake   from the pointer helper (above)
 
 Runs on the Frame host as a user service (frametop-input-relay.service). The
 virtual devices are parked in systemd's file descriptor store, so a relay
@@ -143,6 +157,12 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle",
            "key", "none")
+HELPER = "\0ft_pointer_helper"
+# Frame controller buttons the pointer helper can read (pointer/helper/vrbuttons.h).
+VR_BUTTONS = ("left/view", "left/dpad_up", "left/dpad_down", "left/dpad_left", "left/dpad_right", "left/bumper",
+              "left/trigger", "left/grip", "left/thumbstick", "right/menu", "right/a", "right/b", "right/x", "right/y",
+              "right/bumper", "right/trigger", "right/grip", "right/thumbstick")
+VR_DEVICE = "frame_controller"  # the id controller buttons have in watch events
 SCREENS = "\0ft_screens"
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
 FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
@@ -239,7 +259,8 @@ def read_config(path=os.path.expanduser("~/.config/frametop.conf")):
 
 
 def read_rules(path=RULES_PATH):
-    """{"devices": {id: {"role", "name"}}, "buttons": {id: {"<code>": action}}}."""
+    """{"devices": {id: {"role", "name"}}, "buttons": {id: {"<code>": action}},
+    "controller_buttons": {"<hand>/<button>": action}}."""
     try:
         with open(path) as f:
             rules = json.load(f)
@@ -247,6 +268,7 @@ def read_rules(path=RULES_PATH):
         rules = {}
     rules.setdefault("devices", {})
     rules.setdefault("buttons", {})
+    rules.setdefault("controller_buttons", {})
     return rules
 
 
@@ -345,10 +367,11 @@ class Pointer:
         self.wake_counts = wake_counts
         self.pending = 0
         self.pending_since = 0.0
+        self.gaze_awake_until = 0.0  # the helper's gaze mode keeps the pointer until then
 
     def send(self, command):
         try:
-            self.sock.sendto(command.encode(), "\0ft_pointer_helper")
+            self.sock.sendto(command.encode(), HELPER)
         except OSError:
             pass  # helper not running (SteamVR not running)
 
@@ -464,7 +487,7 @@ class Pointer:
         if self.scroll_until is not None and now >= self.scroll_until:
             self.send("scroll 0 0")
             self.scroll_until = None
-        if self.active and now - self.last_used > self.idle:
+        if self.active and now - self.last_used > self.idle and now >= self.gaze_awake_until:
             self.send("hide")
             self.active = False
             log("pointer off (idle)")
@@ -552,8 +575,9 @@ def main():
 
     # desktop_until: typing goes to the Frametop desktop until then (ft-screens says so
     # every second); typing_applied: the grabs match that as of the last apply_roles().
+    # vr_capture_until: every controller button is taken until then (the settings app capturing one).
     state = {"pointer": None, "rules": {}, "meta_dashboard": False, "share_keys": False,
-             "desktop_until": 0.0, "typing_applied": None}
+             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0}
 
     def load_config():
         conf = read_config()
@@ -574,6 +598,34 @@ def main():
     load_config()
     meta_down = False  # Meta pressed with no other key yet: a tap toggles the dashboard
     screens_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+
+    def vr_bind(now):
+        """Tell the pointer helper which controller buttons to take from games."""
+        if now < state["vr_capture_until"]:
+            buttons = "*"
+        else:
+            state["vr_capture_until"] = 0.0
+            buttons = " ".join(b for b, a in state["rules"]["controller_buttons"].items()
+                               if b in VR_BUTTONS and a in ACTIONS and a not in ("key", "none")) or "-"
+            if state["rules"].get("controller_in_games"):
+                buttons = "+games " + buttons
+        try:
+            screens_sock.sendto(f"vrbind {buttons}".encode(), HELPER)
+        except OSError:
+            pass  # helper not running; it says vrhello when it starts
+
+    def vr_button(button, value, now):
+        """A Frame controller button from the pointer helper."""
+        for addr, until in list(watchers.items()):
+            if now > until:
+                del watchers[addr]
+            else:
+                reply(addr, {"t": "event", "id": VR_DEVICE, "path": "", "name": "Steam Frame controllers",
+                             "type": "vr", "code": button, "value": value})
+        action = state["rules"]["controller_buttons"].get(button)
+        if state["pointer"] and action in ACTIONS and action not in ("key", "none"):
+            state["pointer"].action(action, value, now)
+
 
     def to_screens(code, value):
         """A key for the desktop screens (ft-screens decides whether it types)."""
@@ -731,6 +783,16 @@ def main():
                 desktop = len(words) > 1 and words[1] == "desktop"
                 state["desktop_until"] = now + 3.0 if desktop else 0.0
                 continue
+            if cmd == "vrbtn" and len(words) == 3 and words[1] in VR_BUTTONS and words[2] in ("0", "1"):
+                vr_button(words[1], int(words[2]), now)
+                continue
+            if cmd == "vrhello":
+                vr_bind(now)
+                continue
+            if cmd == "gazeawake" and len(words) == 2:
+                if state["pointer"]:
+                    state["pointer"].gaze_awake_until = now + 12.0 if words[1] == "1" else 0.0
+                continue
             if not addr:
                 continue  # unbound sender, nowhere to reply
             if cmd == "devices":
@@ -746,7 +808,13 @@ def main():
                 apply_roles()
                 if state["pointer"]:
                     state["pointer"].send("reload")
+                vr_bind(now)
                 reply(addr, {"t": "reloaded"})
+            elif cmd == "vrcapture":
+                seconds = float(words[1]) if len(words) > 1 else 30
+                state["vr_capture_until"] = now + min(seconds, 120) if seconds > 0 else 0.0
+                vr_bind(now)
+                reply(addr, {"t": "vrcapture", "seconds": seconds})
             else:
                 reply(addr, {"t": "error", "error": f"unknown command {cmd!r}"})
 
@@ -764,6 +832,7 @@ def main():
             else:
                 reply(addr, msg)
 
+    vr_bind(time.monotonic())  # a helper that's already running keeps its buttons in step
     waiting = False  # a keyboard's grab waits for its keys to come up
     while True:
         now = time.monotonic()
@@ -803,6 +872,8 @@ def main():
         if pointer:
             pointer.tick(now)
         volume.tick(now)
+        if state["vr_capture_until"] and now >= state["vr_capture_until"]:
+            vr_bind(now)  # capture over: back to the mapped buttons
         if (now < state["desktop_until"]) != state["typing_applied"] or waiting:
             waiting = apply_roles()
         for fd in ready:

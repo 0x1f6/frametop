@@ -69,6 +69,18 @@ LESSON_MAX = 8.0  # degrees past the correction
 RETRY = 3.0       # seconds before starting ft-gaze again
 
 
+class PointerLessons(LiveCorrection):
+    """LiveCorrection, with the offset held back: one lesson moves the whole correction by a
+    third of what it measured, not all of it (two alike, half; three, three fifths). In the
+    probe, clicks came thick and fast on a stale calibration, where the error was mostly one
+    offset. Here lessons are few and the calibration is often fresh: in the first live test a
+    6 degree lesson shifted everything 6 degrees, and the next target, 10 degrees away and
+    1.4 off before, was 7.1 off (3.6 with this). Near the lesson, the kernel still takes up
+    most of it (5.1 of the 6 degrees)."""
+
+    RIDGE = [2.0] + LiveCorrection.RIDGE[1:]
+
+
 def log(msg):
     print(f"ft-gazed: {msg}", file=sys.stderr, flush=True)
 
@@ -80,7 +92,7 @@ class Service:
         self.base = Correction()
         self.mode = DEFAULT_MODEL
         self.cal_mtime = None
-        self.live = LiveCorrection()
+        self.live = PointerLessons()
         self.dirty = False
         self.load_calibration()
         self.load_lessons()
@@ -91,7 +103,7 @@ class Service:
         self.fix = Fixation(radius=1.0)
         self.opens = (deque(maxlen=90), deque(maxlen=90))  # left, right
         self.vergence = deque(maxlen=90)
-        self.counts = {"samples": 0, "sent": 0, "blinks": 0, "one_eye": 0, "dropped": 0, "lessons": 0, "refused": 0}
+        self.counts = {"samples": 0, "sent": 0, "blinks": 0, "one_eye": 0, "dropped": 0, "lessons_taken": 0, "refused": 0}
         self.last_sample = 0.0
         self.last = None
 
@@ -124,7 +136,7 @@ class Service:
         try:
             d = json.loads(LESSONS.read_text())
             if d.get("source") == self.source:
-                self.live.samples = d.get("samples", [])[-LiveCorrection.KEEP:]
+                self.live.samples = d.get("samples", [])[-PointerLessons.KEEP:]
         except (OSError, ValueError):
             pass
         log(f"{len(self.live.samples)} lessons")
@@ -152,7 +164,7 @@ class Service:
         else:
             self.live.add({"time": rec["time"], "hy": rhy, "hp": rhp, "dy": dy, "dp": dp, "wy": 1.0, "wp": 1.0,
                            "how": "pointer"}, self.base, self.mode)
-            self.counts["lessons"] += 1
+            self.counts["lessons_taken"] += 1
             self.dirty = True
         try:
             with open(LESSON_LOG, "a") as f:
@@ -293,7 +305,7 @@ class Service:
             elif words[:1] == ["status"]:
                 reply = json.dumps(self.status())
             elif words[:1] == ["forget"]:
-                self.live = LiveCorrection()
+                self.live = PointerLessons()
                 self.live.wear_time = self.steam.worn()
                 self.save_lessons()
                 reply = "ok"

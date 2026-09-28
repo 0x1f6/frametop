@@ -6,7 +6,12 @@ to the input relay over its control socket (@frametop_relay):
   - Devices: every USB/Bluetooth mouse and keyboard, a live activity light to
     identify them, and a role for each (3D pointer, pass through, ignore).
   - Buttons: press a button or key on a pointer device, then pick an action.
+  - Controllers: the same for the Frame controllers' buttons. They're read by the pointer
+    helper through SteamVR input (@ft_pointer_helper: vrstatus, vrglobal), and a mapped
+    button is taken from games.
   - Pointer: speed, dot size, distance and the rest, applied live.
+  - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
+    (gaze/ft-gazed, @ft_gazed: status, forget, reload).
   - Bluetooth: paired devices, and re-applying the Bluetooth LE fixes after pairing.
 Rules go to ~/.config/frametop-input.json and pointer settings to
 ~/.config/frametop.conf; then the relay (and through it the helper) reloads.
@@ -19,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 from PySide6.QtCore import Property, QObject, QSocketNotifier, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIcon
@@ -29,6 +35,9 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 CONF_PATH = os.path.expanduser("~/.config/frametop.conf")
 RELAY = "\0frametop_relay"
 HELPER = "\0ft_pointer_helper"
+GAZED = "\0ft_gazed"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GAZE_PROBE = os.path.join(REPO, "gaze", "probe", "ft-gazeprobe")
 BTN_MISC = 0x100
 # Header names that mark the start of a range, not a real key (BTN_MOUSE == BTN_LEFT).
 RANGE_ALIASES = {"BTN_MISC", "BTN_MOUSE", "BTN_JOYSTICK", "BTN_GAMEPAD", "BTN_DIGI", "BTN_WHEEL",
@@ -45,6 +54,24 @@ ACTION_LABELS = {
     "none": "Do nothing",
 }
 ROLE_LABELS = {"pointer": "3D pointer", "passthrough": "Pass through", "ignore": "Ignore"}
+# Frame controller buttons the pointer helper can read (pointer/helper/vrbuttons.h). The
+# system button stays SteamVR's.
+CONTROLLER_BUTTONS = {
+    "left/view": "Left View", "left/dpad_up": "Left D-pad up", "left/dpad_down": "Left D-pad down",
+    "left/dpad_left": "Left D-pad left", "left/dpad_right": "Left D-pad right", "left/bumper": "Left bumper",
+    "left/trigger": "Left trigger", "left/grip": "Left grip", "left/thumbstick": "Left stick click",
+    "right/menu": "Right Menu", "right/a": "Right A", "right/b": "Right B", "right/x": "Right X", "right/y": "Right Y",
+    "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
+    "right/thumbstick": "Right stick click",
+}
+CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none")]
+# Gaze mode settings (pointer helper), like POINTER_SETTINGS.
+GAZE_SETTINGS = [
+    ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
+    ("POINTER_GAZE_NUDGE_MAX", "Largest nudge to learn", 8, 1, 30, 0.5, "°"),
+    ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
+    ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
+]
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [
     ("POINTER_SENSITIVITY", "Speed", 0.03, 0.005, 0.12, 0.001, "°/count"),
@@ -134,8 +161,11 @@ class Backend(QObject):
     mappingsChanged = Signal()
     pointerChanged = Signal()
     bluetoothChanged = Signal()
+    controllersChanged = Signal()
+    gazeChanged = Signal()
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
+    capturedController = Signal(str, str)  # button, label
     message = Signal(str, bool)  # text, is error
 
     def __init__(self):
@@ -146,6 +176,13 @@ class Backend(QObject):
         self._capture_id = ""
         self._bluetooth = []
         self._relay_ok = False
+        self._capture_vr = False
+        self._vr = {}  # the helper's vrstatus, {} when it doesn't answer
+        self._vr_at = 0.0
+        self._gaze = {}  # ft-gazed's status, {} when it isn't running
+        self._gaze_prev = None  # the status before, for rates
+        self._gaze_at = 0.0
+        self._gaze_mode = None  # the helper's gaze mode: True, False, None (no answer)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.sock.bind("")  # autobind an abstract address the relay can reply to
         self.sock.setblocking(False)
@@ -173,6 +210,19 @@ class Backend(QObject):
 
     def _refresh(self):
         self._send("devices")
+        self._send("vrstatus", HELPER)
+        self._send("gaze ?", HELPER)
+        if not self._send("status", GAZED) and self._gaze:
+            self._gaze, self._gaze_prev = {}, None
+            self.gazeChanged.emit()
+        now = time.monotonic()
+        # No answer for a while: that side isn't running (any more).
+        if self._vr and now - self._vr_at > 5:
+            self._vr = {}
+            self.controllersChanged.emit()
+        if self._gaze_mode is not None and now - self._gaze_at > 5:
+            self._gaze_mode = None
+            self.gazeChanged.emit()
 
     def _read(self):
         while True:
@@ -180,9 +230,20 @@ class Backend(QObject):
                 data = self.sock.recv(65536)
             except BlockingIOError:
                 return
+            text = data.decode(errors="replace")
+            if text in ("ok on", "ok off"):  # the helper's answer to "gaze ?" (from an unbound socket)
+                self._gaze_mode = text == "ok on"
+                self._gaze_at = time.monotonic()
+                self.gazeChanged.emit()
+                continue
             try:
                 msg = json.loads(data)
             except ValueError:
+                continue
+            if isinstance(msg, dict) and "samples" in msg and "t" not in msg:  # ft-gazed's status
+                self._gaze_status(msg)
+                continue
+            if not isinstance(msg, dict):
                 continue
             t = msg.get("t")
             if t == "devices":
@@ -190,6 +251,16 @@ class Backend(QObject):
                 self._pointer_mode = bool(msg.get("pointer_mode"))
                 self._relay_ok = True
                 self.devicesChanged.emit()
+            elif t == "vrstatus":
+                self._vr = msg
+                self._vr_at = time.monotonic()
+                self.controllersChanged.emit()
+            elif t == "event" and msg.get("type") == "vr":
+                self.activity.emit(msg["id"])
+                if self._capture_vr and msg["value"] == 1 and msg["code"] in CONTROLLER_BUTTONS:
+                    self._capture_vr = False
+                    self._send("vrcapture 0")
+                    self.capturedController.emit(msg["code"], CONTROLLER_BUTTONS[msg["code"]])
             elif t == "event":
                 self.activity.emit(msg["id"])
                 if (self._capture_id and msg["id"] == self._capture_id and msg["type"] == "key"
@@ -380,6 +451,167 @@ class Backend(QObject):
     @Slot(result=bool)
     def recenter(self):
         return self._send("recenter", HELPER)
+
+    # --- controllers ---
+    @Property("QVariantList", constant=True)
+    def controllerActions(self):
+        return [{"value": a, "text": ACTION_LABELS[a]} for a in CONTROLLER_ACTIONS]
+
+    @Property("QVariantList", constant=True)
+    def controllerButtons(self):
+        return [{"value": b, "text": label} for b, label in CONTROLLER_BUTTONS.items()]
+
+    @Property("QVariantList", notify=mappingsChanged)
+    def controllerMappings(self):
+        mapped = read_json(RULES_PATH).get("controller_buttons", {})
+        return [{"button": b, "label": label, "action": mapped[b],
+                 "actionLabel": ACTION_LABELS.get(mapped[b], mapped[b])}
+                for b, label in CONTROLLER_BUTTONS.items() if b in mapped]
+
+    @Property("QVariantMap", notify=controllersChanged)
+    def controllerStatus(self):
+        """helper: answering; manifest: its SteamVR input is set up; global: SteamVR's
+        "Enable global input from overlays"; active: mapped buttons SteamVR delivers now."""
+        vr = self._vr
+        return {"helper": bool(vr), "manifest": bool(vr.get("manifest")), "global": bool(vr.get("global")),
+                "inGame": bool(vr.get("in_game")), "bound": vr.get("bound", []), "active": vr.get("active", [])}
+
+    @Property(bool, notify=mappingsChanged)
+    def controllerInGames(self):
+        return bool(read_json(RULES_PATH).get("controller_in_games"))
+
+    @Slot(bool)
+    def setControllerInGames(self, on):
+        rules = read_json(RULES_PATH)
+        rules["controller_in_games"] = bool(on)
+        self._save_rules(rules)
+        self.message.emit("Mapped controller buttons: " + ("taken in games too" if on else "left to games"), False)
+
+    @Slot(str, str)
+    def setControllerMapping(self, button, action):
+        if button not in CONTROLLER_BUTTONS or action not in CONTROLLER_ACTIONS:
+            return
+        rules = read_json(RULES_PATH)
+        rules.setdefault("controller_buttons", {})[button] = action
+        self._save_rules(rules)
+        self.message.emit(f"{CONTROLLER_BUTTONS[button]} → {ACTION_LABELS[action]}", False)
+
+    @Slot(str)
+    def removeControllerMapping(self, button):
+        rules = read_json(RULES_PATH)
+        rules.get("controller_buttons", {}).pop(button, None)
+        self._save_rules(rules)
+        self.message.emit(f"{CONTROLLER_BUTTONS.get(button, button)}: back to games", False)
+
+    @Slot()
+    def clearControllerMappings(self):
+        rules = read_json(RULES_PATH)
+        removed = len(rules.pop("controller_buttons", {}) or {})
+        self._save_rules(rules)
+        self.message.emit(f"Removed {removed} controller binding{'s' if removed != 1 else ''}", False)
+
+    @Slot()
+    def startControllerCapture(self):
+        self._capture_vr = True
+        self._send("watch 60")
+        self._send("vrcapture 30")
+
+    @Slot()
+    def cancelControllerCapture(self):
+        if self._capture_vr:
+            self._capture_vr = False
+            self._send("vrcapture 0")
+
+    @Slot(bool)
+    def setGlobalInput(self, on):
+        """SteamVR's "Enable global input from overlays (Experimental)", which the helper needs
+        to get controller buttons while a game or the dashboard has focus."""
+        if self._send(f"vrglobal {'on' if on else 'off'}", HELPER):
+            self.message.emit(f"SteamVR global input from overlays {'on' if on else 'off'}", False)
+        else:
+            self.message.emit("The pointer helper isn't running (frametop-pointer.service)", True)
+
+    # --- gaze ---
+    def _gaze_status(self, status):
+        now = time.monotonic()
+        prev = self._gaze_prev
+        # Rates over the last poll: samples per second, and the share with only one eye.
+        if prev and now - prev[0] > 0.5 and status["samples"] >= prev[1]["samples"]:
+            n = status["samples"] - prev[1]["samples"]
+            status["rate"] = n / (now - prev[0])
+            status["one_eye_share"] = (status["one_eye"] - prev[1]["one_eye"]) / n if n else 0.0
+        elif self._gaze:
+            status.setdefault("rate", self._gaze.get("rate"))
+            status.setdefault("one_eye_share", self._gaze.get("one_eye_share"))
+        if not prev or now - prev[0] > 0.5:
+            self._gaze_prev = (now, status)
+        self._gaze = status
+        self.gazeChanged.emit()
+
+    @Property("QVariantMap", notify=gazeChanged)
+    def gazeStatus(self):
+        return self._gaze
+
+    @Property(bool, notify=gazeChanged)
+    def gazeServiceRunning(self):
+        return bool(self._gaze)
+
+    @Property(int, notify=gazeChanged)
+    def gazeMode(self):
+        """The helper's gaze mode now: 1 on, 0 off, -1 no answer (helper not running)."""
+        return -1 if self._gaze_mode is None else int(self._gaze_mode)
+
+    @Property(bool, notify=gazeChanged)
+    def gazeDefault(self):
+        return read_conf().get("POINTER_GAZE", "0") not in ("", "0")
+
+    @Slot(bool)
+    def setGazeMode(self, on):
+        """On or off now and from now on (POINTER_GAZE); a mapped button toggles it until restart."""
+        write_conf_value("POINTER_GAZE", "1" if on else "0")
+        self._send(f"gaze {'on' if on else 'off'}", HELPER)
+        self.reload_timer.start()
+        self.gazeChanged.emit()
+
+    @Property("QVariantList", notify=pointerChanged)
+    def gazeSettings(self):
+        conf = read_conf()
+        out = []
+        for key, label, default, lo, hi, step, unit in GAZE_SETTINGS:
+            try:
+                value = float(conf.get(key, default))
+            except ValueError:
+                value = default
+            out.append({"key": key, "label": label, "value": value, "min": lo, "max": hi, "step": step,
+                        "unit": unit, "default": default})
+        return out
+
+    @Slot()
+    def forgetGazeLessons(self):
+        if self._send("forget", GAZED):
+            self.message.emit("Forgot what the pointer's nudges taught; the calibration stays", False)
+        else:
+            self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def reloadGazeCalibration(self):
+        if self._send("reload", GAZED):
+            self.message.emit("The gaze service read the calibration again", False)
+        else:
+            self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def openGazeProbe(self):
+        """Calibrate in ft-gazeprobe (a GTK app on the host, fullscreen on a Frametop screen)."""
+        runner = ["distrobox-host-exec"] if shutil.which("distrobox-host-exec") else []
+        env = [f"{k}={os.environ[k]}" for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")
+               if os.environ.get(k)]
+        try:
+            subprocess.Popen(runner + ["env"] + env + [GAZE_PROBE], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            self.message.emit("Opening the gaze probe: calibrate there, then close it", False)
+        except OSError as e:
+            self.message.emit(f"Couldn't open the gaze probe: {e}", True)
 
     # --- bluetooth ---
     @Property("QVariantList", notify=bluetoothChanged)
