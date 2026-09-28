@@ -13,7 +13,8 @@
 //                                                     head, degrees (yaw +left, pitch +up)
 //         mmap1 adds "open":[l,r] (probably eye openness, 0 in a blink) and "dist" (vergence
 //         distance, m); both mmap sets add "lr", the angle between the eyes (deg), which
-//         jumps when the tracker loses an eye.
+//         jumps when the tracker loses an eye, and "eyes":[[hy,hp],[hy,hp]], each eye's own
+//         direction (left, right), for calibrating the eyes separately.
 //   HIT = {"s":<screen>,"x":..,"y":..,"j":[dx/dhy,dy/dhy,dx/dhp,dy/dhp],"dpp":<deg per px>}
 //         or null. x, y are pixels on that screen; j is pixels per degree of head-relative
 //         yaw and pitch there, so a correction in degrees can be turned into pixels and back.
@@ -429,12 +430,20 @@ int main(int argc, char **argv) {
                 auto lr = [](Vec3 l, Vec3 r) {
                     return std::acos(std::clamp(Dot(Normalize(l), Normalize(r)), -1.0, 1.0)) * 180 / M_PI;
                 };
+                auto eyes = [](Vec3 l, Vec3 r) {
+                    double ly, lp, ry, rp;
+                    Angles(Normalize(l), ly, lp);
+                    Angles(Normalize(r), ry, rp);
+                    char b[96];
+                    std::snprintf(b, sizeof b, "\"eyes\":[[%.4f,%.4f],[%.4f,%.4f]],", ly, lp, ry, rp);
+                    return std::string(b);
+                };
                 char extra[128];
                 std::snprintf(extra, sizeof extra, "\"dist\":%.3f,\"open\":[%.3f,%.3f],\"lr\":%.3f,", Length(s.fix1),
                               s.open[0], s.open[1], lr(s.left1, s.right1));
-                m1 = SrcJson(list, headThen, s.left1 + s.right1, extra);
+                m1 = SrcJson(list, headThen, s.left1 + s.right1, extra + eyes(s.left1, s.right1));
                 std::snprintf(extra, sizeof extra, "\"lr\":%.3f,", lr(s.left2, s.right2));
-                m2 = SrcJson(list, headThen, s.left2 + s.right2, extra);
+                m2 = SrcJson(list, headThen, s.left2 + s.right2, extra + eyes(s.left2, s.right2));
             }
 
             double yaw, pitch;
