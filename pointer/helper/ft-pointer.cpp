@@ -74,6 +74,20 @@
 // desktops) also report 0x0, but they're placed as dashboard tabs, stay up when the
 // dashboard closes, and ComputeOverlayIntersection hits them normally.
 //
+// SteamVR Settings (a workaround for that page only): Steam's pages (Library and the rest)
+// are drawn in valve.steam.gamepadui.main, a dashboard overlay ComputeOverlayIntersection hits
+// exactly. SteamVR's Settings page isn't: the main overlay is hidden, and the page is drawn by
+// the scene-graph panel (valve.steam.gamepadui.frame.menu.N), whose shape OpenVR doesn't give
+// out. Its transform's plane isn't the page's surface, which is nearer, so the laser, starting
+// a few cm in front of where we thought the page was, started behind it: most of the page
+// took no clicks, which went through to a desktop screen behind, and the page covered our
+// dot. So while the cursor is on that page (OnSettingsPage), the laser starts near the eye
+// (SETTINGS_ORIGIN) and SteamVR's own hit test finds the page; our dot is drawn close in front
+// (SETTINGS_DOT), and the laser-catching dot sits far behind everything (SETTINGS_CATCHER),
+// invisible and with SteamVR's hit dot hidden, so it can't cover the page. The beam and
+// SteamVR's hit dot on the page then look like a controller's. Everywhere else nothing
+// changes.
+//
 // Panel edges: off a panel, the cursor stays on that panel's plane while it's within
 // POINTER_EDGE_REACH (0.3 m) of the last point it touched, instead of jumping to
 // POINTER_DISTANCE. A floating panel's resize margins and the window controls under it
@@ -375,6 +389,28 @@ Vec3 LimitPitch(Vec3 d, double maxDeg) {
     return Direction(std::atan2(-d.x, -d.z) * 180 / M_PI, pitch);
 }
 
+// SteamVR Settings page (see the top): the laser starts this far from the eye, the dot is
+// drawn this far out, and the laser-catching dot sits this far out (metres).
+constexpr double SETTINGS_ORIGIN = 0.25, SETTINGS_DOT = 0.6, SETTINGS_CATCHER = 8.0;
+
+// Whether the line of sight from `eye` along `d` crosses the SteamVR Settings page, drawn by
+// the dashboard's scene-graph panel (valve.steam.gamepadui.frame.menu.N, transform t); see
+// "SteamVR Settings" at the top. The page has no size in OpenVR, so this is its area as
+// measured on the Frame, generously: in metres from the panel's origin, which is near the
+// page's left edge, it ran from about -0.35 (the sidebar) to 1.15 across and +-0.4 up and
+// down, with the transform scaled 0.369. Kept in the transform's units so it scales with it.
+bool OnSettingsPage(const vr::HmdMatrix34_t &t, Vec3 eye, Vec3 d) {
+    const Vec3 c = Position(t), x{t.m[0][0], t.m[1][0], t.m[2][0]}, y{t.m[0][1], t.m[1][1], t.m[2][1]},
+               z{t.m[0][2], t.m[1][2], t.m[2][2]};
+    const double sx = Dot(x, x), sy = Dot(y, y), denom = Dot(d, z);
+    if (sx < 1e-9 || sy < 1e-9 || std::fabs(denom) < 1e-6) return false;
+    const double along = Dot(c - eye, z) / denom;
+    if (along <= 0) return false;
+    const Vec3 off = eye + d * along - c;
+    const double u = Dot(off, x) / sx, v = Dot(off, y) / sy;  // in the transform's units
+    return u >= -1.35 && u <= 3.4 && std::fabs(v) <= 1.25;
+}
+
 }  // namespace
 
 // Placement speeds (see "Placement" at the top).
@@ -483,6 +519,8 @@ int main() {
     bool leftHeld = false, tilting = false, tiltStart = false, swallowedRight = false;
     double tiltYaw = 0, tiltPitch = 0;
     double dragDistance = 0, lastDistance = 1.5;  // drag lock: distance from the anchor at the press
+    bool onVrSettings = false;       // the cursor is on the SteamVR Settings page (kept while dragging)
+    bool catcherHidesHit = false;    // the laser-catching dot hides SteamVR's hit dot (Settings page)
     Clock::time_point dropHoldUntil{};  // after a left release: keep the drag pose this long
     bool debug = false;
     std::string lastHit;
@@ -1235,8 +1273,49 @@ int main() {
             }
             const bool onScene = !dragging && ((bestScene && best < 1e8) || onEdge);
             const bool onPanel = dragging || (best < 1e8 && !onScene);
+            const Vec3 sight = Normalize(point - eye);
+            if (!dragging) {
+                // SteamVR Settings (see the top): the dashboard's main panel is hidden and its
+                // scene-graph panel shows the page.
+                onVrSettings = false;
+                const auto mainIt = visible.find("valve.steam.gamepadui.main");
+                if (overlay->IsDashboardVisible() && !(mainIt != visible.end() && mainIt->second)) {
+                    for (const auto &[key, handle] : handles) {
+                        if (!visible[key] || key.rfind("valve.steam.gamepadui.frame.menu.", 0) != 0) continue;
+                        vr::ETrackingUniverseOrigin uo;
+                        vr::HmdMatrix34_t t{};
+                        if (overlay->GetOverlayTransformAbsolute(handle, &uo, &t) == vr::VROverlayError_None &&
+                            OnSettingsPage(t, eye, sight))
+                            onVrSettings = true;
+                    }
+                }
+            }
+            if (onVrSettings != catcherHidesHit) {
+                overlay->SetOverlayFlag(cursor, vr::VROverlayFlags_HideLaserIntersection, onVrSettings);
+                catcherHidesHit = onVrSettings;
+            }
 
-            {
+            if (onVrSettings) {
+                // The dot close in front of the page, which is nearer than any guess of ours;
+                // the laser-catching dot far behind everything, invisible, so it never covers
+                // the page, with SteamVR's hit dot hidden on it.
+                const Vec3 near = eye + sight * SETTINGS_DOT, far = eye + sight * SETTINGS_CATCHER;
+                double alpha = 1;
+                if (gazeOn) {
+                    auto secs = [&](Clock::time_point t) { return std::chrono::duration<double>(tnow - t).count(); };
+                    alpha = std::clamp(1 - std::min(secs(lastMove) - gazeShow, secs(lastHeld)) / 0.25, 0.0, 1.0);
+                }
+                overlay->SetOverlayAlpha(marker, float(alpha));
+                overlay->SetOverlayWidthInMeters(marker, float(2 * SETTINGS_DOT * std::tan(cursorDeg * M_PI / 360)));
+                auto mm = Billboard(near, eye);
+                overlay->SetOverlayTransformAbsolute(marker, vr::TrackingUniverseStanding, &mm);
+                overlay->SetOverlayAlpha(cursor, 0);
+                overlay->SetOverlayWidthInMeters(cursor, float(2 * SETTINGS_CATCHER * std::tan(cursorDeg * M_PI / 360)));
+                auto mc = Billboard(far, eye);
+                overlay->SetOverlayTransformAbsolute(cursor, vr::TrackingUniverseStanding, &mc);
+                overlay->ShowOverlay(marker);
+                overlay->ShowOverlay(cursor);
+            } else {
                 // On a panel: the non-interactive marker, pulled 5 mm toward the eye so it
                 // draws on top. In free space: the interactive dot the laser lands on.
                 const vr::VROverlayHandle_t show = onPanel ? marker : cursor, hide = onPanel ? cursor : marker;
@@ -1269,7 +1348,8 @@ int main() {
             const Vec3 aim = Rotate(R, RotateInverse(S, aimStanding));  // raw <- head <- standing
             // Origin partway along the line of sight to the cursor (smaller hit dot).
             const double toPoint = std::sqrt(Dot(point - eye, point - eye));
-            const double originDist = std::max(0.0, std::min(toPoint * originFraction, toPoint - originMargin));
+            double originDist = std::max(0.0, std::min(toPoint * originFraction, toPoint - originMargin));
+            if (onVrSettings) originDist = std::min(originDist, SETTINGS_ORIGIN);  // SteamVR finds the page
             const Vec3 originStanding = eye + Normalize(point - eye) * originDist;
             const Vec3 eyeRaw = Position(R) + Rotate(R, RotateInverse(S, originStanding - eye));
             lastPoint = point, lastOrigin = originStanding, lastAim = aimStanding;  // tilt starts from here
@@ -1277,9 +1357,9 @@ int main() {
             if (debug && tnow - lastDebug > std::chrono::milliseconds(500)) {
                 lastDebug = tnow;
                 if (systemPointer == vr::k_ulOverlayHandleInvalid) overlay->FindOverlay("system.pointer", &systemPointer);
-                std::printf("dbg %s hit=%s dist=%.2f eye->point=%.2f origin=%.2f yaw=%.1f pitch=%.1f gaze=%s steamvr_dot=%d primary=%u\n",
+                std::printf("dbg %s hit=%s dist=%.2f eye->point=%.2f origin=%.2f vrsettings=%d yaw=%.1f pitch=%.1f gaze=%s steamvr_dot=%d primary=%u\n",
                             dragging ? "DRAG" : occluded ? "INFRONT" : onEdge ? "EDGE" : onScene ? "SCENE" : (best < 1e8 ? "PANEL" : "FREE"), lastHit.empty() ? "-" : lastHit.c_str(),
-                            distance, toPoint, originDist, yaw, pitch,
+                            distance, toPoint, originDist, onVrSettings, yaw, pitch,
                             !gazeOn ? "off" : tnow - gz.at > std::chrono::milliseconds(150) ? "stale" : gazeOwns ? "owns" : "mouse",
                             systemPointer != vr::k_ulOverlayHandleInvalid && overlay->IsOverlayVisible(systemPointer),
                             overlay->GetPrimaryDashboardDevice());
