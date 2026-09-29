@@ -14,7 +14,7 @@ Kirigami.ApplicationWindow {
     readonly property var pages: backend.backend === "screens"
         ? [{ text: "Screens", icon: "video-display", page: screensPage },
            { text: "Layout", icon: "view-grid", page: layoutPage },
-           { text: "Visibility & wrist", icon: "view-visible", page: visibilityPage }]
+           { text: "Visibility & pins", icon: "view-visible", page: visibilityPage }]
         : [{ text: "Screens", icon: "video-display", page: screensPage },
            { text: "Layout", icon: "view-grid", page: layoutPage }]
 
@@ -62,6 +62,89 @@ Kirigami.ApplicationWindow {
                 text: "Cancel"
                 icon.name: "dialog-cancel"
                 onTriggered: restartDialog.close()
+            }
+        ]
+    }
+
+    // Save the arrangement under a name, or rename a saved layout.
+    Kirigami.PromptDialog {
+        id: nameDialog
+        property string mode: "save"  // save | rename
+        property string oldName: ""
+        readonly property var names: backend.layoutNames
+        readonly property string name: nameField.text.trim().split(/\s+/).join(" ")
+        readonly property bool taken: name !== oldName && names.indexOf(name) >= 0
+        readonly property bool ok: name !== "" && !(mode === "rename" && taken)
+        title: mode === "save" ? "Save the arrangement" : "Rename " + oldName
+        standardButtons: Kirigami.Dialog.NoButton
+
+        function openFor(m, text) {
+            mode = m
+            oldName = m === "rename" ? text : ""
+            nameField.text = text
+            open()
+            nameField.forceActiveFocus()
+            nameField.selectAll()
+        }
+        function accept() {
+            if (!ok) return
+            close()
+            if (mode === "save") backend.saveLayout(name)
+            else if (name !== oldName) backend.renameLayout(oldName, name)
+        }
+
+        ColumnLayout {
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: nameDialog.mode === "save"
+                      ? "Where the screens are now, with their sizes, curves, and pins, under this name:"
+                      : "New name:"
+            }
+            Controls.TextField {
+                id: nameField
+                Layout.fillWidth: true
+                maximumLength: 40
+                onAccepted: nameDialog.accept()
+            }
+            Controls.Label {
+                visible: nameDialog.taken
+                opacity: 0.7
+                text: nameDialog.mode === "save" ? "Replaces the saved layout with that name."
+                                                 : "There's already a layout with that name."
+            }
+        }
+        customFooterActions: [
+            Kirigami.Action {
+                text: nameDialog.mode === "save" ? "Save" : "Rename"
+                icon.name: nameDialog.mode === "save" ? "document-save" : "edit-rename"
+                enabled: nameDialog.ok
+                onTriggered: nameDialog.accept()
+            },
+            Kirigami.Action {
+                text: "Cancel"
+                icon.name: "dialog-cancel"
+                onTriggered: nameDialog.close()
+            }
+        ]
+    }
+
+    Kirigami.PromptDialog {
+        id: deleteDialog
+        property string name: ""
+        title: "Delete " + name + "?"
+        subtitle: "The screens stay where they are; only the saved layout goes."
+        standardButtons: Kirigami.Dialog.NoButton
+        customFooterActions: [
+            Kirigami.Action {
+                text: "Delete"
+                icon.name: "edit-delete"
+                onTriggered: { deleteDialog.close(); backend.deleteLayout(deleteDialog.name) }
+            },
+            Kirigami.Action {
+                text: "Cancel"
+                icon.name: "dialog-cancel"
+                onTriggered: deleteDialog.close()
             }
         ]
     }
@@ -335,6 +418,15 @@ Kirigami.ApplicationWindow {
             property var layout: backend.layout
             property var preset: layout.preset || {}
             property bool hasCustom: (layout.screens || []).some(s => s.pos !== undefined)
+            // Named layouts: the arrangement is one of them (named) when it came from it, and
+            // hasn't been placed by hand and saved without a name since.
+            property var names: backend.layoutNames
+            property bool fromNamed: names.indexOf(layout.active) >= 0
+            property bool named: layout.mode === "custom" && fromNamed
+            property bool unnamed: names.length === 0 || ((hasCustom || layout.mode === "custom") && !fromNamed)
+            property var choices: [{ text: "Curved around you", value: "arc" }, { text: "Flat wall", value: "flat" }]
+                .concat(names.map(n => ({ text: n, value: "layout:" + n })))
+                .concat(unnamed ? [{ text: names.length ? "Unnamed arrangement" : "Saved arrangement", value: "custom" }] : [])
 
             actions: [
                 Kirigami.Action {
@@ -345,11 +437,12 @@ Kirigami.ApplicationWindow {
                     onTriggered: backend.arrange()
                 },
                 Kirigami.Action {
-                    text: "Save current arrangement"
+                    text: "Save current arrangement…"
                     icon.name: "document-save"
-                    tooltip: "Use where the screens are now (placed by hand) as the layout"
+                    tooltip: "Save where the screens are now (placed by hand) as a named layout, and use it"
                     enabled: backend.desktopRunning && backend.busy === ""
-                    onTriggered: backend.capture()
+                    onTriggered: nameDialog.openFor("save", lpage.named ? lpage.layout.active
+                                                                        : "Layout " + (lpage.names.length + 1))
                 }
             ]
 
@@ -366,27 +459,49 @@ Kirigami.ApplicationWindow {
                 Kirigami.FormLayout {
                     Layout.fillWidth: true
 
-                    Controls.ComboBox {
+                    RowLayout {
                         Kirigami.FormData.label: "Arrangement:"
-                        model: [
-                            { text: "Curved around you", value: "arc" },
-                            { text: "Flat wall", value: "flat" },
-                            { text: "Saved arrangement", value: "custom" }
-                        ]
-                        textRole: "text"
-                        valueRole: "value"
-                        currentIndex: lpage.layout.mode === "custom" ? 2 : (lpage.preset.kind === "flat" ? 1 : 0)
-                        onActivated: {
-                            if (currentValue === "custom") backend.setMode("custom")
-                            else backend.setPreset("kind", currentValue)
+                        Controls.ComboBox {
+                            model: lpage.choices
+                            textRole: "text"
+                            valueRole: "value"
+                            currentIndex: lpage.layout.mode !== "custom" ? (lpage.preset.kind === "flat" ? 1 : 0)
+                                        : lpage.named ? 2 + lpage.names.indexOf(lpage.layout.active)
+                                        : lpage.choices.length - 1
+                            onActivated: {
+                                if (currentValue === "custom") backend.setMode("custom")
+                                else if (currentValue.startsWith("layout:")) backend.useLayout(currentValue.slice(7))
+                                else backend.setPreset("kind", currentValue)
+                            }
+                        }
+                        Controls.ToolButton {
+                            visible: lpage.named
+                            icon.name: "edit-rename"
+                            text: "Rename…"
+                            display: Controls.AbstractButton.IconOnly
+                            Controls.ToolTip.text: text
+                            Controls.ToolTip.visible: hovered
+                            onClicked: nameDialog.openFor("rename", lpage.layout.active)
+                        }
+                        Controls.ToolButton {
+                            visible: lpage.named
+                            icon.name: "edit-delete"
+                            text: "Delete…"
+                            display: Controls.AbstractButton.IconOnly
+                            Controls.ToolTip.text: text
+                            Controls.ToolTip.visible: hovered
+                            onClicked: { deleteDialog.name = lpage.layout.active; deleteDialog.open() }
                         }
                     }
 
                     Controls.Label {
                         visible: lpage.layout.mode === "custom"
                         Kirigami.FormData.label: ""
-                        text: lpage.hasCustom ? "Where the screens were when you saved. Pick a preset to edit."
-                                              : "Nothing saved yet: place the screens by hand, then Save current arrangement."
+                        text: lpage.named ? "Where the screens were when you saved it. Arrange now puts them there. "
+                                            + "Save current arrangement updates it or saves a new one."
+                              : lpage.hasCustom ? "Where the screens were when you saved. Save current arrangement "
+                                                  + "names it. Pick a preset to edit."
+                              : "Nothing saved yet: place the screens by hand, then Save current arrangement."
                         opacity: 0.7
                         wrapMode: Text.Wrap
                         Layout.maximumWidth: Kirigami.Units.gridUnit * 20
@@ -677,10 +792,28 @@ Kirigami.ApplicationWindow {
                         }
                     }
 
-                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Screens on a wrist" }
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Pinned screens" }
 
+                    Repeater {
+                        model: backend.pins
+                        delegate: Controls.ComboBox {
+                            required property var modelData
+                            required property int index
+                            Kirigami.FormData.label: "Screen " + (index + 1) + ":"
+                            model: [
+                                { text: "In the room", value: "none" },
+                                { text: "On the left wrist", value: "left" },
+                                { text: "On the right wrist", value: "right" },
+                                { text: "On your head", value: "head" }
+                            ]
+                            textRole: "text"
+                            valueRole: "value"
+                            currentIndex: Math.max(0, ["none", "left", "right", "head"].indexOf(modelData))
+                            onActivated: backend.pin(String(index + 1), currentValue)
+                        }
+                    }
                     RowLayout {
-                        Kirigami.FormData.label: "Show while facing you within:"
+                        Kirigami.FormData.label: "Wrist screens show within:"
                         Controls.Slider {
                             id: wrist
                             from: 20; to: 120; stepSize: 1
@@ -695,17 +828,22 @@ Kirigami.ApplicationWindow {
                         Controls.Button {
                             text: "Pin to left wrist"
                             enabled: backend.desktopRunning
-                            onClicked: backend.pinAll("left")
+                            onClicked: backend.pin("all", "left")
                         }
                         Controls.Button {
                             text: "Pin to right wrist"
                             enabled: backend.desktopRunning
-                            onClicked: backend.pinAll("right")
+                            onClicked: backend.pin("all", "right")
+                        }
+                        Controls.Button {
+                            text: "Pin to head"
+                            enabled: backend.desktopRunning
+                            onClicked: backend.pin("all", "head")
                         }
                         Controls.Button {
                             text: "Unpin"
                             enabled: backend.desktopRunning
-                            onClicked: backend.unpinAll()
+                            onClicked: backend.pin("all", "none")
                         }
                     }
                 }
@@ -720,7 +858,10 @@ Kirigami.ApplicationWindow {
                           + "then let go: it rides on that wrist at that size and distance, however far away. To adjust a "
                           + "pinned screen, grab its bar, move it, and let go (it stays pinned); sweep across the ring to "
                           + "take it off. It shows while you see its front within the angle above, and fades out beyond "
-                          + "it. Save current arrangement (Layout) keeps pins."
+                          + "it.\n\nPin a screen to your head: choose On your head above. It rides on the headset where it "
+                          + "is now, like a HUD, and shows whenever the screens do. Grab its bar to move it; it stays on "
+                          + "your head where you let go. Choosing a pin above keeps the screen where it is now, so place "
+                          + "it first. Save current arrangement (Layout) keeps pins."
                 }
             }
         }
