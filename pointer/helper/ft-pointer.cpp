@@ -37,8 +37,12 @@
 // second kept SteamVR from going to standby.
 //
 // Last used wins: when a real controller moves (picked up), the pointer is released
-// at once (driver "hide", which also drops its hand role hint), so the controller gets
+// (driver "hide", which also drops its hand role hint), so the controller gets
 // its role and laser back. The next mouse input reconnects and claims the laser again.
+// Moving means faster than 0.35 m/s or 2 rad/s, both times POINTER_CONTROLLER_PICKUP,
+// for 100 ms in a row with the controller tracked normally: a single sample over the
+// limit was enough before, and controllers resting on a desk released the pointer on a
+// knock or a tracking jump.
 // SteamVR gives a contested hand role to the most recently used device, and a held
 // Frame controller counts as used (touch sensors). If our device hasn't got the hand
 // role within a second of waking, the pointer is released (no orphan white dot) and
@@ -190,7 +194,8 @@
 // POINTER_LEASH_DEG (10), POINTER_LEASH_DELAY (0.2 s), POINTER_LEASH_RETURN (0.2 s),
 // POINTER_FOLLOW_REACH (70 deg): head follow, above. POINTER_GAZE (0), POINTER_GAZE_RETAKE
 // (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_SHOW (1 s):
-// gaze mode, above.
+// gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
+// move to take the laser back, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -426,6 +431,7 @@ int main() {
     // Gaze mode (see the top); gazeConf is POINTER_GAZE as last read, like followConf.
     bool gazeOn = false, gazeConf = false;
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
+    double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     auto loadConfig = [&] {
         const auto conf = ReadConfig();
         freeDistance = std::clamp(ConfDouble(conf, "POINTER_DISTANCE", 1.5), 0.3, 10.0);
@@ -448,6 +454,7 @@ int main() {
         gazeShow = std::clamp(ConfDouble(conf, "POINTER_GAZE_SHOW", 1), 0.0, 30.0);
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
         if (wantGaze != gazeConf) gazeOn = gazeConf = wantGaze;
+        pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
     };
     loadConfig();
     const float laserWidth = float(ConfDouble(ReadConfig(), "POINTER_LASER_WIDTH", 0.8));
@@ -515,6 +522,8 @@ int main() {
     using Clock = std::chrono::steady_clock;
     Clock::time_point lastMouse{}, claimAt{}, claimRelease{}, wokeAt{}, noWakeUntil{};
     bool claimPending = false, claimHeld = false;
+    // Last used wins: since when each controller has been moving (zero: it isn't).
+    Clock::time_point movingSince[vr::k_unMaxTrackedDeviceCount] = {};
     // Tilt mode (see top of file).
     bool leftHeld = false, tilting = false, tiltStart = false, swallowedRight = false;
     double tiltYaw = 0, tiltPitch = 0;
@@ -952,8 +961,9 @@ int main() {
                 recenter = true;
             } else if (std::strncmp(buf, "reload", 6) == 0) {
                 loadConfig();
-                std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f, head follow %s, leash %.0f deg\n",
-                            freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg);
+                std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f, head follow %s, leash %.0f deg, "
+                            "controller pickup %.1fx\n",
+                            freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg, pickupScale);
                 std::fflush(stdout);
             } else if (std::strncmp(buf, "follow", 6) == 0) {
                 const char *arg = buf + 6;
@@ -1019,26 +1029,36 @@ int main() {
             std::fflush(stdout);
         }
 
-        // Last used wins: a real controller being moved releases the pointer.
+        // Last used wins: a real controller being moved releases the pointer (see the top).
         if (active && tnow - lastMouse > std::chrono::milliseconds(500)) {
             for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
-                if (i == ours || !all[i].bPoseIsValid) continue;
-                if (sys->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) continue;
+                if (i == ours || !all[i].bPoseIsValid || all[i].eTrackingResult != vr::TrackingResult_Running_OK ||
+                    sys->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) {
+                    movingSince[i] = {};
+                    continue;
+                }
                 const auto &v = all[i].vVelocity.v, &w = all[i].vAngularVelocity.v;
                 const double speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
                 const double spin = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
-                if (speed > 0.35 || spin > 2.0) {
+                if (speed <= 0.35 * pickupScale && spin <= 2.0 * pickupScale) {
+                    movingSince[i] = {};
+                    continue;
+                }
+                if (movingSince[i] == Clock::time_point{}) movingSince[i] = tnow;
+                if (tnow - movingSince[i] >= std::chrono::milliseconds(100)) {
                     active = false;
                     claimPending = claimHeld = false;
                     overlay->HideOverlay(cursor);
                     overlay->HideOverlay(marker);
                     SendTo(out, "ft_pointer", "btn a 0");
                     SendTo(out, "ft_pointer", "hide");
-                    std::printf("controller %u moved: pointer released\n", i);
+                    std::printf("controller %u moved (%.2f m/s, %.1f rad/s): pointer released\n", i, speed, spin);
                     std::fflush(stdout);
                     break;
                 }
             }
+        } else {
+            std::fill(std::begin(movingSince), std::end(movingSince), Clock::time_point{});
         }
         const auto &hm = hmd.mDeviceToAbsoluteTracking.m;
         const Vec3 eye{hm[0][3], hm[1][3], hm[2][3]};

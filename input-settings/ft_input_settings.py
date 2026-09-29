@@ -87,6 +87,7 @@ POINTER_SETTINGS = [
     ("POINTER_FOLLOW_REACH", "Head follow reach", 70, 20, 85, 1, "°"),
     ("POINTER_WAKE_COUNTS", "Movement to wake", 40, 5, 200, 5, "counts"),
     ("POINTER_IDLE", "Release after idle", 30, 5, 120, 5, "s"),
+    ("POINTER_CONTROLLER_PICKUP", "Controller movement to take over", 1.0, 0.5, 5.0, 0.1, "×"),
 ]
 
 
