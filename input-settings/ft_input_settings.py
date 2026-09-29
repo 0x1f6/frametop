@@ -13,6 +13,10 @@ to the input relay over its control socket (@frametop_relay):
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
     (gaze/ft-gazed, @ft_gazed: status, forget, reload).
   - Bluetooth: paired devices, and re-applying the Bluetooth LE fixes after pairing.
+  - A warning on every page when SteamVR won't load the ft_pointer driver (blocked after a
+    crash, disabled, or SteamVR in safe mode) or hasn't loaded it (@ft_pointer doesn't answer
+    while SteamVR runs): the cursor still moves, but no click lands. Checked at startup and
+    every 30 minutes.
 Rules go to ~/.config/frametop-input.json and pointer settings to
 ~/.config/frametop.conf; then the relay (and through it the helper) reloads.
 Launch with input-settings/ft-input-settings (host wrapper).
@@ -36,6 +40,10 @@ CONF_PATH = os.path.expanduser("~/.config/frametop.conf")
 RELAY = "\0frametop_relay"
 HELPER = "\0ft_pointer_helper"
 GAZED = "\0ft_gazed"
+DRIVER = "\0ft_pointer"  # the ft_pointer driver's control socket, bound while SteamVR has it loaded
+# SteamVR's settings; older installs keep them under Steam's config.
+VRSETTINGS_PATHS = [os.path.expanduser("~/.config/openvr/config/steamvr.vrsettings"),
+                    os.path.expanduser("~/.steam/steam/config/steamvr.vrsettings")]
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GAZE_PROBE = os.path.join(REPO, "gaze", "probe", "ft-gazeprobe")
 BTN_MISC = 0x100
@@ -157,6 +165,29 @@ def host(*cmd):
         return subprocess.CompletedProcess(cmd, 1, "", str(e))
 
 
+def driver_block():
+    """Why SteamVR won't load the ft_pointer driver: "blocked" (safe mode blocked it after a
+    crash), "disabled" (turned off in Manage Add-Ons), "safemode" (SteamVR in safe mode, every
+    add-on off) or "" (nothing stops it). SteamVR reads these at startup."""
+    for path in VRSETTINGS_PATHS:
+        if os.path.exists(path):
+            settings = read_json(path)
+            break
+    else:
+        return ""
+    section = lambda name: settings.get(name) if isinstance(settings.get(name), dict) else {}
+    if not isinstance(settings, dict):
+        return ""
+    driver = section("driver_ft_pointer")
+    if driver.get("blocked_by_safe_mode") is True:
+        return "blocked"
+    if driver.get("enable") is False:
+        return "disabled"
+    if section("steamvr").get("enableSafeMode") is True:
+        return "safemode"
+    return ""
+
+
 class Backend(QObject):
     devicesChanged = Signal()
     mappingsChanged = Signal()
@@ -164,6 +195,7 @@ class Backend(QObject):
     bluetoothChanged = Signal()
     controllersChanged = Signal()
     gazeChanged = Signal()
+    driverChanged = Signal()
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
     capturedController = Signal(str, str)  # button, label
@@ -184,6 +216,7 @@ class Backend(QObject):
         self._gaze_prev = None  # the status before, for rates
         self._gaze_at = 0.0
         self._gaze_mode = None  # the helper's gaze mode: True, False, None (no answer)
+        self._driver_block = ""  # set by _check_driver
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.sock.bind("")  # autobind an abstract address the relay can reply to
         self.sock.setblocking(False)
@@ -194,6 +227,11 @@ class Backend(QObject):
         self.rewatch = QTimer(interval=50000, timeout=lambda: self._send("watch 60"))
         self.rewatch.start()
         self.reload_timer = QTimer(singleShot=True, interval=400, timeout=lambda: self._send("reload"))
+        # The driver only changes with a SteamVR restart, so a rare check is enough. The first one
+        # waits a moment for the helper's vrstatus answer, which tells us SteamVR is up.
+        self.driver_timer = QTimer(interval=30 * 60 * 1000, timeout=self._check_driver)
+        self.driver_timer.start()
+        QTimer.singleShot(3000, self._check_driver)
         self._refresh()
         self._send("watch 60")
         self.refreshBluetooth()
@@ -224,6 +262,14 @@ class Backend(QObject):
         if self._gaze_mode is not None and now - self._gaze_at > 5:
             self._gaze_mode = None
             self.gazeChanged.emit()
+
+    def _check_driver(self):
+        block = driver_block()
+        if not block and self._vr and not self._send("ping", DRIVER):
+            block = "unloaded"  # SteamVR runs (the helper answers) without the driver
+        if block != self._driver_block:
+            self._driver_block = block
+            self.driverChanged.emit()
 
     def _read(self):
         while True:
@@ -269,6 +315,13 @@ class Backend(QObject):
                     code = int(msg["code"])
                     self._capture_id = ""
                     self.captured.emit(code, self.codeName(code))
+
+    # --- SteamVR driver ---
+    @Property(str, notify=driverChanged)
+    def driverBlock(self):
+        """driver_block(), or "unloaded": SteamVR runs without the driver (unblocked since it
+        started, or not installed)."""
+        return self._driver_block
 
     # --- devices ---
     @Property(bool, notify=devicesChanged)
