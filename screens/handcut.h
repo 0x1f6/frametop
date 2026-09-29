@@ -1,0 +1,112 @@
+// Hand cutouts: where a tracked hand is between an eye and a screen, that eye sees the
+// room (Room View) through the screen instead of the screen drawn over the hand.
+//
+// frame-hands' tracker (a separate project, ~/Desktop/Projects/frame-hands) publishes
+// the hands it sees with the headset's cameras to $XDG_RUNTIME_DIR/frame-hands/hands:
+// capsules (finger bones, palm, forearm) in the head frame at capture time. Hands turns
+// them into the room with the head pose at that time. Project() finds where each eye
+// sees them on a panel, and Renderer draws the panel's client buffer into a side-by-side
+// buffer (left eye | right eye) with those spots transparent. A panel shows that buffer,
+// with the overlay's SideBySide_Parallel flag, only while a hand is in front of it.
+#pragma once
+
+#include "vr.h"
+
+#include <openvr.h>
+
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <vector>
+
+namespace handcut {
+
+using Mat = vr::HmdMatrix34_t;
+
+struct Capsule {         // in the room (standing universe), metres
+    float a[3], b[3];
+    float ra, rb;
+};
+
+struct Capsule2D {       // on a panel's texture, pixels from the top left
+    float ax, ay, bx, by;
+    float ra, rb;
+};
+
+// A panel in the room: pose of its centre (+x right, +y up, +z out of its front),
+// size in metres, cylinder radius (0: flat), and its texture size in pixels.
+struct Panel {
+    Mat pose;
+    double width, height, curve;
+    int pxWidth, pxHeight;
+};
+
+class Hands {
+public:
+    // Once per tick: the head pose now, CLOCK_MONOTONIC ns. Re-reads the hands file when
+    // it changed. Returns true while fresh hands are known.
+    bool Update(const Mat &head, int64_t nowNs);
+    const std::vector<Capsule> &capsules() const { return world_; }
+
+private:
+    bool Read();
+    Mat HeadAt(int64_t ns) const;
+    struct Past { int64_t ns; Mat head; };
+    std::vector<Past> history_;   // the last second of head poses
+    std::vector<Capsule> world_;
+    int fd_ = -1;
+    const void *map_ = nullptr;
+    uint64_t seq_ = 0;
+    int64_t captureNs_ = 0, publishNs_ = 0, lastOpenTry_ = 0;
+};
+
+// Where each eye sees the capsules on the panel, for those in front of it. Eyes are
+// positions in the room. False if no capsule reaches the panel for either eye.
+bool Project(const Panel &p, const std::vector<Capsule> &caps, const double eyes[2][3],
+             std::vector<Capsule2D> out[2]);
+
+// The eye positions in the room for a head pose.
+void EyePositions(const Mat &head, double out[2][3]);
+
+// An output buffer: the dmabuf SteamVR imports (see vr.cpp), stable while it exists.
+struct Output {
+    ft_dmabuf buf{};
+    void *bo = nullptr;
+    unsigned fbo = 0, rb = 0;
+    void *image = nullptr;
+};
+
+class Renderer {
+public:
+    ~Renderer();
+    // modifiers: what SteamVR takes for DRM_FORMAT_ABGR8888, the outputs' format.
+    // released: an output is about to be freed (drop its SteamVR import).
+    bool Init(const std::vector<uint64_t> &modifiers, std::function<void(const Output *)> released);
+    // Draw client buffer `src` (identified by `key`) into the next output buffer of
+    // panel `panel`, both eyes, cutting out `eyes`. Returns that buffer, or null.
+    const Output *Composite(int panel, const void *key, const ft_dmabuf &src, const std::vector<Capsule2D> eyes[2]);
+    // A client buffer is going away.
+    void Forget(const void *key);
+    // A panel is gone: drop its outputs.
+    void DropPanel(int panel);
+    // How long the last Composite took, ms (it waits for the GPU).
+    double lastMs() const { return lastMs_; }
+
+private:
+    unsigned Texture(const void *key, const ft_dmabuf &src);
+    bool MakeOutput(Output &o, int w, int h);
+    void FreeOutput(Output &o);
+    bool ready_ = false;
+    int drm_ = -1;
+    void *gbm_ = nullptr, *dpy_ = nullptr, *ctx_ = nullptr;
+    unsigned copyProg_ = 0, cutProg_ = 0, vbo_ = 0;
+    std::vector<uint64_t> modifiers_;
+    std::function<void(const Output *)> released_;
+    struct Imported { void *image; unsigned tex; };
+    std::map<const void *, Imported> imported_;
+    struct Ring { Output out[3]; int next = 0; int w = 0, h = 0; };
+    std::map<int, Ring> rings_;
+    double lastMs_ = 0;
+};
+
+}  // namespace handcut

@@ -40,10 +40,17 @@
 //     own; also for flatscreen games, which aren't scene apps).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
+//   - hand cutouts (handcut.cpp): where frame-hands tracks a hand between an eye and a
+//     screen, that eye sees through the screen (to Room View). Only then is the screen
+//     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
+//     buffer is shown as is.
 // OpenVR has no overlay-relative transforms here (openvr v2.15.6), so the bar, button,
 // and handle are placed whenever their screen moves.
 #include "vr.h"
 
+#include "handcut.h"
+
+#include <drm_fourcc.h>
 #include <openvr.h>
 
 #include <fcntl.h>
@@ -233,6 +240,10 @@ struct Screen {
     vr::TrackedDeviceIndex_t pinTarget = kNone;  // moving: rides on this controller when let go
     vr::TrackedDeviceIndex_t onWrist = kNone;    // moving: the laser is in this controller's ring
     bool barLit = false;
+    const void *key = nullptr;    // the client buffer on it now, and its dmabuf (for cutouts)
+    ft_dmabuf buf{};
+    vr::SharedTextureHandle_t plain = 0;  // that buffer's SteamVR import
+    bool cutting = false;         // showing a cutout buffer (side by side) instead
     double chrome = 0.3;          // the bar's width; the other controls follow it (ChromeSize)
     double grip = 0.04;           // the corner tab's and the round buttons' size
     double heightMetres() const { return width > 0 ? metres * height / width : metres * 9 / 16; }
@@ -241,6 +252,13 @@ struct Screen {
 };
 std::map<int, Screen> g_screens;
 std::map<const void *, vr::SharedTextureHandle_t> g_imports;
+
+// Hand cutouts (see the top and handcut.h).
+bool g_cutouts = true;          // the cutouts command turns them off
+handcut::Hands g_hands;
+handcut::Renderer g_cutter;
+int g_cutterState = 0;          // 0 not tried, 1 ready, -1 unavailable
+std::map<const void *, vr::SharedTextureHandle_t> g_cutImports;
 
 // Visibility (see the top). g_manual is the hide/show switch: in the always mode it hides
 // the screens, in the others it shows them anyway.
@@ -1038,6 +1056,92 @@ const char *ModeName() {
     }
 }
 
+// ---------------------------------------------------------------- hand cutouts
+
+void SetScreenTexture(const Screen &s, vr::SharedTextureHandle_t handle) {
+    vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+    vr::VROverlay()->SetOverlayTexture(s.overlay, &tex);
+}
+
+// The cutout buffers' renderer, set up the first time a hand is in front of a screen.
+bool CutterReady() {
+    if (g_cutterState) return g_cutterState > 0;
+    uint64_t mods[64];
+    const int n = ft_vr_modifiers(DRM_FORMAT_ABGR8888, mods, 64);
+    const bool ok = g_cutter.Init(std::vector<uint64_t>(mods, mods + n), [](const handcut::Output *o) {
+        auto it = g_cutImports.find(o);
+        if (it == g_cutImports.end()) return;
+        vr::VRIPCResourceManager()->UnrefResource(it->second);
+        g_cutImports.erase(it);
+    });
+    g_cutterState = ok ? 1 : -1;
+    std::printf(ok ? "hand cutouts ready\n" : "hand cutouts unavailable (see above)\n");
+    return ok;
+}
+
+vr::SharedTextureHandle_t ImportCutout(const handcut::Output *o) {
+    auto it = g_cutImports.find(o);
+    if (it != g_cutImports.end()) return it->second;
+    vr::DmabufAttributes_t a{};
+    a.unWidth = uint32_t(o->buf.width);
+    a.unHeight = uint32_t(o->buf.height);
+    a.unDepth = a.unMipLevels = a.unArrayLayers = a.unSampleCount = 1;
+    a.unFormat = o->buf.format;
+    a.ulModifier = o->buf.modifier;
+    a.unPlaneCount = uint32_t(o->buf.n_planes);
+    for (int i = 0; i < o->buf.n_planes && i < int(vr::MaxDmabufPlaneCount); ++i) {
+        a.plane[i].unOffset = o->buf.offset[i];
+        a.plane[i].unStride = o->buf.stride[i];
+        a.plane[i].nFd = o->buf.fd[i];
+    }
+    vr::SharedTextureHandle_t h = 0;
+    if (!vr::VRIPCResourceManager()->ImportDmabuf(vr::VRApplication_Overlay, &a, &h)) {
+        std::fprintf(stderr, "openvr: ImportDmabuf failed for a cutout buffer\n");
+        h = 0;
+    }
+    g_cutImports.emplace(o, h);
+    return h;
+}
+
+void StopCutting(Screen &s) {
+    if (!s.cutting) return;
+    vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_SideBySide_Parallel, false);
+    vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_IgnoreTextureAlpha, true);
+    if (s.plain) SetScreenTexture(s, s.plain);
+    s.cutting = false;
+}
+
+// Each tick: for each visible screen with a hand in front of it (for either eye), draw its
+// client buffer with the hands cut out and show that; else show the client buffer.
+void UpdateCutouts() {
+    Mat head;
+    const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
+    const bool hands = g_cutouts && haveHead &&
+                       g_hands.Update(head, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                Clock::now().time_since_epoch()).count());
+    double eyes[2][3];
+    if (hands) handcut::EyePositions(head, eyes);
+    for (auto &[i, s] : g_screens) {
+        std::vector<handcut::Capsule2D> spots[2];
+        Mat p;
+        bool cut = hands && s.visible && s.key && s.width > 0 && ScreenPose(s, &p) &&
+                   handcut::Project({p, s.metres, s.heightMetres(), s.curve, s.width, s.height}, g_hands.capsules(),
+                                    eyes, spots);
+        const handcut::Output *out = cut && CutterReady() ? g_cutter.Composite(i, s.key, s.buf, spots) : nullptr;
+        const vr::SharedTextureHandle_t h = out ? ImportCutout(out) : 0;
+        if (!h) {
+            StopCutting(s);
+            continue;
+        }
+        if (!s.cutting) {
+            vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_IgnoreTextureAlpha, false);
+            vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_SideBySide_Parallel, true);
+            s.cutting = true;
+        }
+        SetScreenTexture(s, h);
+    }
+}
+
 }  // namespace
 
 extern "C" {
@@ -1058,6 +1162,8 @@ bool ft_vr_init(void) {
 }
 
 void ft_vr_shutdown(void) {
+    if (g_cutterState == 1)
+        for (auto &[i, s] : g_screens) g_cutter.DropPanel(i);  // drops their imports while SteamVR is up
     for (auto &[i, s] : g_screens)
         for (auto o : s.All()) vr::VROverlay()->DestroyOverlay(o);
     for (auto &[dev, g] : g_guides)
@@ -1123,6 +1229,7 @@ void ft_vr_screen_create(int index, double metres, int count) {
 void ft_vr_screen_destroy(int index) {
     auto it = g_screens.find(index);
     if (it == g_screens.end()) return;
+    if (g_cutterState == 1) g_cutter.DropPanel(index);
     for (auto o : it->second.All()) vr::VROverlay()->DestroyOverlay(o);
     g_screens.erase(it);
 }
@@ -1160,14 +1267,20 @@ bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *b)
         PlaceChrome(s);  // the height changed
         std::printf("screen %d: %dx%d\n", index + 1, s.width, s.height);
     }
-    vr::SharedTextureHandle_t handle = it->second;
-    vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
-    vr::VROverlay()->SetOverlayTexture(s.overlay, &tex);
+    s.key = key, s.buf = *b, s.plain = it->second;
+    if (!s.cutting) {  // otherwise the next tick draws the new buffer with the cutouts
+        vr::SharedTextureHandle_t handle = it->second;
+        vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+        vr::VROverlay()->SetOverlayTexture(s.overlay, &tex);
+    }
     s.shown = key;  // UpdateVisibility shows it on the next tick
     return true;
 }
 
 void ft_vr_forget(const void *key) {
+    if (g_cutterState == 1) g_cutter.Forget(key);
+    for (auto &[i, s] : g_screens)
+        if (s.key == key) s.key = nullptr;
     auto it = g_imports.find(key);
     if (it == g_imports.end()) return;
     vr::VRIPCResourceManager()->UnrefResource(it->second);
@@ -1276,6 +1389,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateLasers();
     UpdateControls();
     UpdateGuides();
+    UpdateCutouts();
 }
 
 // Control commands (datagrams on @ft_screens, replies to the sender):
@@ -1300,6 +1414,8 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //                             (hide), or stays as it is (visible)
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
 //                     <controllers> <game running 0|1> <ingames>"
+//   cutouts on|off|state      hand cutouts (see handcut.h) -> "ok <on|off> <ready|idle|unavailable>
+//                             <last composite ms>"
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
 // numbered from 1 here, like everywhere the user sees them.
 void ft_vr_command(const char *cmd, char *reply, int size) {
@@ -1429,6 +1545,12 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         else return (void)std::snprintf(reply, size, "error modes: always outside_games dashboard");
         UpdateLasers();
         std::snprintf(reply, size, "ok %s", LasersName());
+    } else if (std::sscanf(cmd, "cutouts %15s", word) == 1) {
+        if (!std::strcmp(word, "on")) g_cutouts = true;
+        else if (!std::strcmp(word, "off")) g_cutouts = false;
+        else if (std::strcmp(word, "state") != 0) return (void)std::snprintf(reply, size, "error cutouts on|off|state");
+        std::snprintf(reply, size, "ok %s %s %.2f ms", g_cutouts ? "on" : "off",
+                      g_cutterState > 0 ? "ready" : g_cutterState < 0 ? "unavailable" : "idle", g_cutter.lastMs());
     } else if (std::strncmp(cmd, "state", 5) == 0) {
         std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
                       g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,
