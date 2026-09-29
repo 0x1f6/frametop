@@ -29,6 +29,7 @@ constexpr size_t kHeader = 64, kHand = 272, kCapsule = 32, kMaxHands = 2, kMaxCa
 constexpr size_t kFileSize = kHeader + kMaxHands * kHand + kMaxCapsules * kCapsule;
 constexpr int64_t kStaleNs = 300'000'000;   // hands older than this are gone
 constexpr int64_t kHistoryNs = 1'000'000'000;
+constexpr double kNear = 0.12;   // metres: nothing closer to an eye than this is cut
 
 int64_t MonoNs() {
     timespec ts;
@@ -181,6 +182,15 @@ bool Project(const Panel &p, const std::vector<Capsule> &caps, const double eyes
             if (a[2] < eps || b[2] < eps) {
                 double *in = a[2] < eps ? b : a, *out3 = a[2] < eps ? a : b;
                 const double t = (in[2] - eps) / (in[2] - out3[2]);
+                for (int i = 0; i < 3; ++i) out3[i] = in[i] + t * (out3[i] - in[i]);
+            }
+            // and the part near the eye's plane: it would land far across the panel with a
+            // huge radius, so one bad hand estimate there tears a hole through the screen
+            const double zmax = eye[2] - kNear;
+            if (a[2] > zmax && b[2] > zmax) continue;
+            if (a[2] > zmax || b[2] > zmax) {
+                double *in = a[2] > zmax ? b : a, *out3 = a[2] > zmax ? a : b;
+                const double t = (zmax - in[2]) / (out3[2] - in[2]);
                 for (int i = 0; i < 3; ++i) out3[i] = in[i] + t * (out3[i] - in[i]);
             }
             double ax, ay, ga, bx, by, gb;
