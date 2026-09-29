@@ -30,6 +30,9 @@ constexpr size_t kFileSize = kHeader + kMaxHands * kHand + kMaxCapsules * kCapsu
 constexpr int64_t kStaleNs = 300'000'000;   // hands older than this are gone
 constexpr int64_t kHistoryNs = 1'000'000'000;
 constexpr double kNear = 0.12;   // metres: nothing closer to an eye than this is cut
+constexpr double kMaxSpeed = 2.5;     // m/s: faster is a tracking jump, not a hand
+constexpr double kStillSpeed = 0.05;  // m/s: below this, a hand's velocity is noise
+constexpr double kMaxAhead = 0.12;    // s: never predict further than this
 
 int64_t MonoNs() {
     timespec ts;
@@ -82,13 +85,61 @@ bool Hands::Read() {
     if (u64(16) != s1 || std::memcmp(copy, kMagic, 8) != 0) return false;
     seq_ = s1;
     uint64_t capture, publish;
-    uint32_t ncaps;
+    uint32_t nhands, ncaps;
     std::memcpy(&capture, copy + 24, 8);
     std::memcpy(&publish, copy + 32, 8);
+    std::memcpy(&nhands, copy + 40, 4);
     std::memcpy(&ncaps, copy + 44, 4);
     captureNs_ = int64_t(capture), publishNs_ = int64_t(publish);
     const Mat head = HeadAt(captureNs_);
-    world_.clear();
+
+    // each hand's palm in the room, and its velocity from the last time it was seen
+    ids_.clear();
+    std::vector<int> owners;   // the hand each capsule belongs to, in file order
+    for (uint32_t k = 0; k < std::min<uint32_t>(nhands, kMaxHands); ++k) {
+        const uint8_t *h = copy + kHeader + k * kHand;
+        uint32_t id, n;
+        float pts[21][3];
+        std::memcpy(&id, h, 4);
+        std::memcpy(pts, h + 16, sizeof pts);
+        std::memcpy(&n, h + 268, 4);
+        const int idx = int(ids_.size());
+        ids_.push_back(id);
+        owners.insert(owners.end(), std::min<uint32_t>(n, kMaxCapsules), idx);
+        double palm[3] = {0, 0, 0};
+        bool ok = true;
+        for (int j : {0, 5, 9, 13, 17}) {
+            float w[3];
+            ok = ok && std::isfinite(pts[j][0]) && std::isfinite(pts[j][1]) && std::isfinite(pts[j][2]);
+            Apply(head, pts[j], w);
+            for (int i = 0; i < 3; ++i) palm[i] += w[i] / 5;
+        }
+        Motion &m = motion_[id];
+        const double dt = (captureNs_ - m.ns) / 1e9;
+        if (!ok) {
+            m = Motion{};
+            continue;
+        }
+        if (m.ns && dt > 0.005 && dt < 0.2) {
+            double speed = 0;
+            for (int i = 0; i < 3; ++i) {
+                m.v[i] += 0.5 * ((palm[i] - m.palm[i]) / dt - m.v[i]);
+                speed += m.v[i] * m.v[i];
+            }
+            speed = std::sqrt(speed);
+            if (speed > kMaxSpeed)
+                for (double &v : m.v) v *= kMaxSpeed / speed;
+        } else {
+            m.v[0] = m.v[1] = m.v[2] = 0;
+        }
+        m.ns = captureNs_;
+        std::memcpy(m.palm, palm, sizeof palm);
+    }
+    for (auto it = motion_.begin(); it != motion_.end();)
+        it = captureNs_ - it->second.ns > kStaleNs ? motion_.erase(it) : std::next(it);
+    if (owners.size() != std::min<uint32_t>(ncaps, kMaxCapsules)) owners.assign(std::min<uint32_t>(ncaps, kMaxCapsules), -1);
+
+    base_.clear(), owner_.clear();
     for (uint32_t k = 0; k < std::min<uint32_t>(ncaps, kMaxCapsules); ++k) {
         float f[8];
         std::memcpy(f, copy + kHeader + kMaxHands * kHand + k * kCapsule, sizeof f);
@@ -99,9 +150,15 @@ bool Hands::Read() {
         Apply(head, f, c.a);
         Apply(head, f + 3, c.b);
         c.ra = f[6], c.rb = f[7];
-        world_.push_back(c);
+        base_.push_back(c);
+        owner_.push_back(owners[k]);
     }
     return true;
+}
+
+void Hands::SetPrediction(bool on, double leadMs) {
+    predict_ = on;
+    leadNs_ = int64_t(std::clamp(leadMs, 0.0, 100.0) * 1e6);
 }
 
 Mat Hands::HeadAt(int64_t ns) const {
@@ -115,7 +172,23 @@ bool Hands::Update(const Mat &head, int64_t nowNs) {
     history_.push_back({nowNs, head});
     while (!history_.empty() && nowNs - history_.front().ns > kHistoryNs) history_.erase(history_.begin());
     Read();
-    if (nowNs - publishNs_ > kStaleNs) world_.clear();
+    if (nowNs - publishNs_ > kStaleNs) base_.clear(), owner_.clear();
+    // move each hand ahead to when this frame will be on the displays; a slow hand's
+    // velocity is mostly tracking noise, so it fades out below kStillSpeed
+    const double ahead = std::clamp((nowNs + leadNs_ - captureNs_) / 1e9, 0.0, kMaxAhead);
+    world_ = base_;
+    for (size_t k = 0; predict_ && k < world_.size(); ++k) {
+        if (owner_[k] < 0) continue;
+        const auto m = motion_.find(ids_[owner_[k]]);
+        if (m == motion_.end()) continue;
+        const double *v = m->second.v;
+        const double speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        const double gain = std::clamp((speed - kStillSpeed) / kStillSpeed, 0.0, 1.0);
+        for (int i = 0; i < 3; ++i) {
+            world_[k].a[i] += float(v[i] * gain * ahead);
+            world_[k].b[i] += float(v[i] * gain * ahead);
+        }
+    }
     return !world_.empty();
 }
 

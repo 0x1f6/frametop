@@ -1415,7 +1415,9 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
 //                     <controllers> <game running 0|1> <ingames>"
 //   cutouts on|off|state      hand cutouts (see handcut.h) -> "ok <on|off> <ready|idle|unavailable>
-//                             <last composite ms>"
+//                             <last composite ms> ms, predict <on|off> lead <ms> ms"
+//   cutouts predict on|off    move the hands ahead along their velocity (on by default)
+//   cutouts lead <ms>         ...to this long after now: about when the frame is on the displays
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
 // numbered from 1 here, like everywhere the user sees them.
 void ft_vr_command(const char *cmd, char *reply, int size) {
@@ -1546,11 +1548,20 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         UpdateLasers();
         std::snprintf(reply, size, "ok %s", LasersName());
     } else if (std::sscanf(cmd, "cutouts %15s", word) == 1) {
+        char arg[16] = "";
+        double ms = 0;
         if (!std::strcmp(word, "on")) g_cutouts = true;
         else if (!std::strcmp(word, "off")) g_cutouts = false;
-        else if (std::strcmp(word, "state") != 0) return (void)std::snprintf(reply, size, "error cutouts on|off|state");
-        std::snprintf(reply, size, "ok %s %s %.2f ms", g_cutouts ? "on" : "off",
-                      g_cutterState > 0 ? "ready" : g_cutterState < 0 ? "unavailable" : "idle", g_cutter.lastMs());
+        else if (!std::strcmp(word, "predict") && std::sscanf(cmd, "cutouts predict %15s", arg) == 1 &&
+                 (!std::strcmp(arg, "on") || !std::strcmp(arg, "off")))
+            g_hands.SetPrediction(!std::strcmp(arg, "on"), g_hands.leadMs());
+        else if (!std::strcmp(word, "lead") && std::sscanf(cmd, "cutouts lead %lf", &ms) == 1)
+            g_hands.SetPrediction(g_hands.predicting(), ms);
+        else if (std::strcmp(word, "state") != 0)
+            return (void)std::snprintf(reply, size, "error cutouts on|off|state|predict on|off|lead <ms>");
+        std::snprintf(reply, size, "ok %s %s %.2f ms, predict %s lead %.0f ms", g_cutouts ? "on" : "off",
+                      g_cutterState > 0 ? "ready" : g_cutterState < 0 ? "unavailable" : "idle", g_cutter.lastMs(),
+                      g_hands.predicting() ? "on" : "off", g_hands.leadMs());
     } else if (std::strncmp(cmd, "state", 5) == 0) {
         std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
                       g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,

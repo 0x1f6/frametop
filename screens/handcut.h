@@ -8,6 +8,10 @@
 // sees them on a panel, and Renderer draws the panel's client buffer into a side-by-side
 // buffer (left eye | right eye) with those spots transparent. A panel shows that buffer,
 // with the overlay's SideBySide_Parallel flag, only while a hand is in front of it.
+//
+// The hands arrive some 30-60 ms after the cameras saw them, and show up on the displays
+// later still, so Hands moves each hand ahead along its velocity in the room to where it
+// will be when the frame reaches the eyes.
 #pragma once
 
 #include "vr.h"
@@ -46,14 +50,27 @@ public:
     // Once per tick: the head pose now, CLOCK_MONOTONIC ns. Re-reads the hands file when
     // it changed. Returns true while fresh hands are known.
     bool Update(const Mat &head, int64_t nowNs);
+    // Where the hands will be `lead` after now (see SetPrediction).
     const std::vector<Capsule> &capsules() const { return world_; }
+    // Predict the hands' motion (on by default) to now + leadMs: about how long a frame
+    // takes from here to the displays.
+    void SetPrediction(bool on, double leadMs);
+    bool predicting() const { return predict_; }
+    double leadMs() const { return leadNs_ / 1e6; }
 
 private:
     bool Read();
     Mat HeadAt(int64_t ns) const;
     struct Past { int64_t ns; Mat head; };
+    struct Motion { int64_t ns = 0; double palm[3]{}, v[3]{}; };   // a hand's palm, in the room
     std::vector<Past> history_;   // the last second of head poses
-    std::vector<Capsule> world_;
+    std::vector<Capsule> base_;   // the capsules at capture time, in the room
+    std::vector<int> owner_;      // each capsule's hand (index into ids_), or -1
+    std::vector<uint32_t> ids_;   // the hands in the file
+    std::map<uint32_t, Motion> motion_;
+    std::vector<Capsule> world_;  // base_, moved ahead
+    bool predict_ = true;
+    int64_t leadNs_ = 25'000'000;
     int fd_ = -1;
     const void *map_ = nullptr;
     uint64_t seq_ = 0;
