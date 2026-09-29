@@ -25,6 +25,30 @@ Kirigami.ApplicationWindow {
         ]
     }
 
+    // Why SteamVR has no ft_pointer driver, and how to get it back. Clicks, scrolling and mapped
+    // actions all go through that driver, so every page shows this as (part of) its header.
+    component DriverWarning: Kirigami.InlineMessage {
+        readonly property string fix: "SteamVR Settings > Startup / Shutdown > Manage Add-Ons"
+        readonly property string restart: ", then restart SteamVR (or reboot the headset)."
+        visible: backend.driverBlock !== ""
+        position: Kirigami.InlineMessage.Position.Header
+        type: backend.driverBlock === "unloaded" ? Kirigami.MessageType.Warning : Kirigami.MessageType.Error
+        text: ({
+            blocked: "SteamVR blocked the Frametop pointer driver (ft_pointer) after a crash, so mouse clicks "
+                     + "and scrolling do nothing (the cursor still moves). To fix it, open " + fix
+                     + ", press Unblock next to ft_pointer" + restart,
+            disabled: "The Frametop pointer driver (ft_pointer) is turned off in SteamVR, so mouse clicks and "
+                      + "scrolling do nothing (the cursor still moves). To fix it, open " + fix
+                      + ", turn ft_pointer on" + restart,
+            safemode: "SteamVR is in safe mode, so it loads no add-ons, the Frametop pointer driver (ft_pointer) "
+                      + "included: mouse clicks and scrolling do nothing (the cursor still moves). To fix it, turn "
+                      + "safe mode off in SteamVR and check " + fix + restart,
+            unloaded: "SteamVR is running without the Frametop pointer driver (ft_pointer), so mouse clicks and "
+                      + "scrolling do nothing. If you just unblocked it, restart SteamVR (or reboot the headset). "
+                      + "Otherwise check " + fix + ", or reinstall it with pointer/driver/install.sh."
+        })[backend.driverBlock] || ""
+    }
+
     function show(page) {
         pageStack.clear()
         pageStack.push(page)
@@ -47,13 +71,18 @@ Kirigami.ApplicationWindow {
         Kirigami.ScrollablePage {
             title: "Devices"
 
-            header: Kirigami.InlineMessage {
-                visible: !backend.relayRunning || !backend.pointerMode
-                position: Kirigami.InlineMessage.Position.Header
-                type: backend.relayRunning ? Kirigami.MessageType.Information : Kirigami.MessageType.Error
-                text: !backend.relayRunning
-                      ? "The input relay isn't running (frametop-input-relay.service)."
-                      : "Pointer mode is off (POINTER=0): pointer devices act as a plain mouse."
+            header: ColumnLayout {
+                spacing: 0
+                DriverWarning { Layout.fillWidth: true }
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: !backend.relayRunning || !backend.pointerMode
+                    position: Kirigami.InlineMessage.Position.Header
+                    type: backend.relayRunning ? Kirigami.MessageType.Information : Kirigami.MessageType.Error
+                    text: !backend.relayRunning
+                          ? "The input relay isn't running (frametop-input-relay.service)."
+                          : "Pointer mode is off (POINTER=0): pointer devices act as a plain mouse."
+                }
             }
 
             ListView {
@@ -171,6 +200,7 @@ Kirigami.ApplicationWindow {
         Kirigami.ScrollablePage {
             id: bpage
             title: "Buttons"
+            header: DriverWarning {}
             actions: [
                 Kirigami.Action {
                     text: "Remove all"
@@ -310,6 +340,7 @@ Kirigami.ApplicationWindow {
         Kirigami.ScrollablePage {
             id: cpage
             title: "Controllers"
+            header: DriverWarning {}
             actions: [
                 Kirigami.Action {
                     text: "Remove all"
@@ -478,6 +509,7 @@ Kirigami.ApplicationWindow {
         id: pointerPage
         Kirigami.ScrollablePage {
             title: "Pointer"
+            header: DriverWarning {}
             actions: [
                 Kirigami.Action {
                     text: "Recenter"
@@ -549,6 +581,7 @@ Kirigami.ApplicationWindow {
         Kirigami.ScrollablePage {
             id: gpage
             title: "Gaze"
+            header: DriverWarning {}
             property var status: backend.gazeStatus
             actions: [
                 Kirigami.Action {
@@ -703,6 +736,7 @@ Kirigami.ApplicationWindow {
         id: bluetoothPage
         Kirigami.ScrollablePage {
             title: "Bluetooth"
+            header: DriverWarning {}
             actions: [
                 Kirigami.Action { text: "Refresh"; icon.name: "view-refresh"; onTriggered: backend.refreshBluetooth() },
                 Kirigami.Action {
