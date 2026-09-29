@@ -116,6 +116,21 @@ mkdir -m 0700 "$runtime" "$runtime/pulse" "$runtime/bin"
 ln -s "$host_runtime/pulse/native" "$runtime/pulse/native"
 ln -s "$host_runtime"/pipewire* "$runtime/"
 
+# The file picker gives Flatpak apps paths in our document portal, $runtime/doc/ID/NAME.
+# Sandboxes only see the portal at /run/flatpak/doc, and their /run/user/UID is a
+# private folder ($runtime/.flatpak/APP/xdg-run). So a saved download or an upload
+# lands in an empty folder the app creates in there and never leaves the sandbox.
+# Link that path to the portal in each app's folder. xdg-desktop-portal after 1.22.1
+# returns /run/flatpak/doc paths itself (upstream commit 69ba5e1). Apps installed
+# while the desktop runs get the link at the next start.
+sandbox_runtime=/run/user/$(id -u)
+if [[ $runtime == "$sandbox_runtime"/* ]]; then
+  while read -r app; do
+    app_doc=$runtime/.flatpak/$app/xdg-run/${runtime#"$sandbox_runtime"/}/doc
+    (umask 077; mkdir -p "$(dirname "$app_doc")" && ln -sfn /run/flatpak/doc "$app_doc") || true
+  done < <(flatpak list --app --columns=application 2>/dev/null)
+fi
+
 # plasma-session starts KWin through kwin_wayland_wrapper. Shadow it to add our outputs.
 # With ft-screens the size is only the starting one: ft-screens sets each screen's own.
 cat > "$runtime/bin/kwin_wayland_wrapper" <<EOF
