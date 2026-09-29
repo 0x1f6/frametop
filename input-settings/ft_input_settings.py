@@ -10,6 +10,8 @@ to the input relay over its control socket (@frametop_relay):
     helper through SteamVR input (@ft_pointer_helper: vrstatus, vrglobal), and a mapped
     button is taken from games.
   - Pointer: speed, dot size, distance and the rest, applied live.
+  - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
+    one by one. The helper lists them (@ft_pointer_helper "overlays").
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
     (gaze/ft-gazed, @ft_gazed: status, forget, reload).
   - Bluetooth: paired devices, and re-applying the Bluetooth LE fixes after pairing.
@@ -21,6 +23,7 @@ Rules go to ~/.config/frametop-input.json and pointer settings to
 ~/.config/frametop.conf; then the relay (and through it the helper) reloads.
 Launch with input-settings/ft-input-settings (host wrapper).
 """
+import fnmatch
 import json
 import os
 import re
@@ -97,6 +100,13 @@ POINTER_SETTINGS = [
     ("POINTER_IDLE", "Release after idle", 30, 5, 120, 5, "s"),
     ("POINTER_CONTROLLER_PICKUP", "Controller movement to take over", 1.0, 0.5, 5.0, 0.1, "×"),
 ]
+# Overlay keys (shell patterns) the pointer passes through, comma-separated.
+IGNORE_KEY = "POINTER_IGNORE"
+
+
+def overlay_app(key):
+    """The app an overlay key belongs to, by the vendor.app.overlay convention."""
+    return ".".join(key.split(".")[:2])
 
 
 def code_names():
@@ -196,6 +206,7 @@ class Backend(QObject):
     controllersChanged = Signal()
     gazeChanged = Signal()
     driverChanged = Signal()
+    panelsChanged = Signal()
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
     capturedController = Signal(str, str)  # button, label
@@ -217,6 +228,7 @@ class Backend(QObject):
         self._gaze_at = 0.0
         self._gaze_mode = None  # the helper's gaze mode: True, False, None (no answer)
         self._driver_block = ""  # set by _check_driver
+        self._panels = None  # SteamVR's overlays, from the helper; None until it answers
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.sock.bind("")  # autobind an abstract address the relay can reply to
         self.sock.setblocking(False)
@@ -298,6 +310,11 @@ class Backend(QObject):
                 self._pointer_mode = bool(msg.get("pointer_mode"))
                 self._relay_ok = True
                 self.devicesChanged.emit()
+            elif t == "overlays":
+                panels = [o for o in msg.get("list", []) if isinstance(o, dict) and isinstance(o.get("key"), str)]
+                if panels != self._panels:
+                    self._panels = panels
+                    self.panelsChanged.emit()
             elif t == "vrstatus":
                 self._vr = msg
                 self._vr_at = time.monotonic()
@@ -505,6 +522,80 @@ class Backend(QObject):
     @Slot(result=bool)
     def recenter(self):
         return self._send("recenter", HELPER)
+
+    # --- ignored panels ---
+    @staticmethod
+    def _ignore_list():
+        return [p.strip() for p in read_conf().get(IGNORE_KEY, "").split(",") if p.strip()]
+
+    def _save_ignore(self, entries, text):
+        write_conf_value(IGNORE_KEY, ", ".join(entries))
+        # Only the helper reads it; the relay passes "reload" on only in pointer mode.
+        self._send("reload", HELPER)
+        self.panelsChanged.emit()
+        self.message.emit(text, False)
+
+    def _open_panels(self):
+        """The helper's overlays, minus Frametop's own: ignoring a screen would leave nothing
+        to click this app on with the mouse."""
+        return [o for o in self._panels or [] if not o["key"].startswith("frametop.")]
+
+    @Slot()
+    def refreshPanels(self):
+        """Ask the helper for the overlay list; it answers once it has listed them again."""
+        self._send("overlays", HELPER)
+
+    @Property(bool, notify=panelsChanged)
+    def panelsLoaded(self):
+        return self._panels is not None
+
+    @Property("QVariantList", notify=panelsChanged)
+    def panelGroups(self):
+        """Open overlays by app: {app, title, appIgnored, anyVisible, anyIgnored, panels: [{key,
+        name, visible, ignoredBy}]}. ignoredBy is the entry that ignores it ("" if none)."""
+        entries = self._ignore_list()
+        groups = {}
+        for o in self._open_panels():
+            key = o["key"]
+            app = overlay_app(key)
+            g = groups.setdefault(app, {"app": app, "title": app, "panels": []})
+            name = o.get("name") or key
+            if key == app:
+                g["title"] = name
+            g["panels"].append({"key": key, "name": name, "visible": bool(o.get("visible")),
+                                "ignoredBy": next((p for p in entries if fnmatch.fnmatchcase(key, p)), "")})
+        for g in groups.values():
+            g["appIgnored"] = g["app"] + "*" in entries
+            g["anyVisible"] = any(p["visible"] for p in g["panels"])
+            g["anyIgnored"] = any(p["ignoredBy"] for p in g["panels"])
+            g["panels"].sort(key=lambda p: (not p["visible"], p["key"]))
+        return sorted(groups.values(), key=lambda g: (not g["anyVisible"], g["title"].lower()))
+
+    @Property("QVariantList", notify=panelsChanged)
+    def ignoreOrphans(self):
+        """Entries that match no open overlay (the app isn't running), so they can be removed."""
+        keys = [o["key"] for o in self._open_panels()]
+        return [p for p in self._ignore_list() if not any(fnmatch.fnmatchcase(k, p) for k in keys)]
+
+    @Slot(str, bool)
+    def setPanelIgnored(self, key, on):
+        entries = [p for p in self._ignore_list() if p != key]
+        if on:
+            entries.append(key)
+        self._save_ignore(entries, f"{key}: " + ("the pointer passes through it" if on else "the pointer lands on it again"))
+
+    @Slot(str, bool)
+    def setAppIgnored(self, app, on):
+        pattern = app + "*"
+        entries = [p for p in self._ignore_list() if p != pattern]
+        if on:
+            entries.append(pattern)
+        self._save_ignore(entries, f"{app}: " + ("the pointer passes through all its panels" if on
+                                                 else "no longer ignored as a whole"))
+
+    @Slot(str)
+    def removeIgnore(self, pattern):
+        self._save_ignore([p for p in self._ignore_list() if p != pattern], f"{pattern}: no longer ignored")
 
     # --- controllers ---
     @Property("QVariantList", constant=True)

@@ -169,10 +169,17 @@
 // about 7 cm, so it isn't used. The result is measured again, and the move repeated up to
 // twice while it's more than 1.5 cm or 1 deg off.
 //
+// Ignored panels: overlays matching POINTER_IGNORE are left out of the collision, so the cursor
+// passes through them to what's behind. For display-only panels in the way, such as a
+// head-locked performance overlay, which ComputeOverlayIntersection hits like any other. The
+// laser starts just before the cursor point (see Looks), so a panel nearer to you doesn't
+// catch it either.
+//
 // Commands (datagrams on @ft_pointer_helper): show, hide, recenter, move <dyaw> <dpitch>,
 // follow on|off|toggle (head follow, until the next restart or a change to POINTER_FOLLOW),
 // gaze on|off|toggle|? (gaze mode, likewise with POINTER_GAZE; ? only asks), gz ... (the gaze, from ft-gazed),
 // reload (re-read the settings below), debug (toggle a twice-a-second state log),
+// overlays (replies with the overlay list as JSON, see OverlayList),
 // vrbind/vrglobal/vrstatus (Frame controller buttons, see vrbuttons.h),
 // and btn/scroll lines, which are forwarded to the driver unchanged. For layouts, with a
 // reply datagram to the sender's (abstract) address:
@@ -195,7 +202,7 @@
 // POINTER_FOLLOW_REACH (70 deg): head follow, above. POINTER_GAZE (0), POINTER_GAZE_RETAKE
 // (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_SHOW (1 s):
 // gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
-// move to take the laser back, above.
+// move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -217,6 +224,8 @@
 #include <vector>
 
 #include <climits>
+
+#include <fnmatch.h>
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -282,23 +291,40 @@ void SendTo(int fd, const char *name, const std::string &msg) {
     sendto(fd, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr *>(&addr), len);
 }
 
+// JSON string literal (names come from other apps).
+std::string JsonQuote(const std::string &s) {
+    std::string out = "\"";
+    for (const unsigned char c : s) {
+        if (c == '"' || c == '\\') out += '\\', out += char(c);
+        else if (c < 0x20) {
+            char esc[8];
+            std::snprintf(esc, sizeof esc, "\\u%04x", c);
+            out += esc;
+        } else out += char(c);
+    }
+    return out + "\"";
+}
+
 // Overlay keys, refreshed in the background from `vrcmd --overlays` (OpenVR has no
 // public call to enumerate other apps' overlays). Hidden ones are listed too: the
 // window controls under a floating panel only appear while something hovers the
 // panel, and the cursor has to find them the moment they do, not a second later.
 // Paused while the pointer is off: each vrcmd run connects to SteamVR as a new app, and a new
 // app every second kept SteamVR (and the headset's displays) from going to standby.
+// "overlays" requests (Frametop Input Settings' Ignored panels page) refresh the list even
+// while paused, and are answered from this thread once it's fresh.
 class OverlayList {
 public:
     void Start() {
+        out_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         thread_ = std::thread([this] {
             while (running_) {
-                if (!paused_) Refresh();
+                if (!paused_ || requested_) Refresh();
                 // Wait a second, or less when the pointer wakes (refresh right away then).
                 for (int i = 0; i < 10 && running_; ++i) {
                     const bool wasPaused = paused_;
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if (wasPaused && !paused_) break;
+                    if ((wasPaused && !paused_) || requested_) break;
                 }
             }
         });
@@ -310,14 +336,28 @@ public:
     }
     std::vector<std::string> Keys() {
         std::lock_guard<std::mutex> guard(lock_);
-        return keys_;
+        std::vector<std::string> keys;
+        for (const auto &e : entries_) keys.push_back(e.key);
+        return keys;
+    }
+    // Answer `to` with {"t":"overlays","list":[{"key","name","visible"}...]} after the next refresh.
+    void Request(const sockaddr_un &to, socklen_t len) {
+        if (len <= offsetof(sockaddr_un, sun_path)) return;
+        std::lock_guard<std::mutex> guard(lock_);
+        if (waiting_.size() < 8) waiting_.push_back({to, len});
+        requested_ = true;
     }
 
 private:
+    struct Entry {
+        std::string key, name;
+        bool visible;
+    };
     void Refresh() {
+        requested_ = false;
         FILE *p = popen("LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrcmd --overlays 2>/dev/null", "r");
         if (!p) return;
-        std::vector<std::string> keys;
+        std::vector<Entry> entries;
         char line[1024];
         while (std::fgets(line, sizeof line, p)) {
             // 'key' -- 'name', WxH visible VROverlayType_...
@@ -331,19 +371,61 @@ private:
                 key.rfind("frametop.pointer", 0) == 0 || key.rfind("frametop.guide", 0) == 0 ||
                 key == "system.HeadsetView" || key == "system.toast")
                 continue;
-            keys.push_back(key);
+            // The name can hold quotes; it ends at the last "', " (the size and state follow).
+            const auto nameAt = rest.find("-- '"), nameEnd = rest.rfind("', ");
+            const std::string name =
+                nameAt != std::string::npos && nameEnd > nameAt + 3 ? rest.substr(nameAt + 4, nameEnd - nameAt - 4) : key;
+            entries.push_back({key, name, rest.find(" not_visible ") == std::string::npos});
         }
         pclose(p);
-        std::lock_guard<std::mutex> guard(lock_);
-        keys_ = std::move(keys);
+        std::vector<std::pair<sockaddr_un, socklen_t>> waiting;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            entries_ = std::move(entries);
+            waiting.swap(waiting_);
+        }
+        if (waiting.empty()) return;
+        std::string msg = "{\"t\":\"overlays\",\"list\":[";
+        for (size_t i = 0; i < entries_.size(); ++i)
+            msg += std::string(i ? "," : "") + "{\"key\":" + JsonQuote(entries_[i].key) + ",\"name\":" +
+                   JsonQuote(entries_[i].name) + ",\"visible\":" + (entries_[i].visible ? "true" : "false") + "}";
+        msg += "]}";
+        for (const auto &[to, len] : waiting)
+            sendto(out_, msg.data(), msg.size(), MSG_DONTWAIT, reinterpret_cast<const sockaddr *>(&to), len);
     }
 
     std::thread thread_;
+    int out_ = -1;
     std::atomic<bool> paused_{false};
     std::atomic<bool> running_{true};
+    std::atomic<bool> requested_{false};
     std::mutex lock_;
-    std::vector<std::string> keys_;
+    std::vector<Entry> entries_;  // written only by the thread; the lock guards readers
+    std::vector<std::pair<sockaddr_un, socklen_t>> waiting_;
 };
+
+// POINTER_IGNORE: overlay keys the pointer passes through, as if they weren't there
+// (display-only panels such as a performance overlay). Comma-separated shell patterns
+// (fnmatch, no escapes), so "vendor.app*" covers an app's overlays.
+std::vector<std::string> ParseIgnore(const std::string &list) {
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at <= list.size()) {
+        const size_t comma = std::min(list.find(',', at), list.size());
+        std::string item = list.substr(at, comma - at);
+        item.erase(0, item.find_first_not_of(" \t"));
+        item.erase(item.find_last_not_of(" \t") + 1);
+        if (!item.empty()) out.push_back(item);
+        at = comma + 1;
+    }
+    return out;
+}
+
+bool Ignored(const std::vector<std::string> &patterns, const std::string &key) {
+    for (const auto &p : patterns)
+        if (fnmatch(p.c_str(), key.c_str(), FNM_NOESCAPE) == 0) return true;
+    return false;
+}
 
 vr::HmdMatrix34_t Billboard(Vec3 at, Vec3 eye) {
     // Overlay faces +Z; point +Z at the eye, keep +Y roughly up.
@@ -432,6 +514,7 @@ int main() {
     bool gazeOn = false, gazeConf = false;
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
+    std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
     auto loadConfig = [&] {
         const auto conf = ReadConfig();
         freeDistance = std::clamp(ConfDouble(conf, "POINTER_DISTANCE", 1.5), 0.3, 10.0);
@@ -455,6 +538,8 @@ int main() {
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
         if (wantGaze != gazeConf) gazeOn = gazeConf = wantGaze;
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
+        const auto ig = conf.find("POINTER_IGNORE");
+        ignore = ParseIgnore(ig == conf.end() ? "" : ig->second);
     };
     loadConfig();
     const float laserWidth = float(ConfDouble(ReadConfig(), "POINTER_LASER_WIDTH", 0.8));
@@ -863,6 +948,10 @@ int main() {
                 reply(controllerButtons.Status());
                 continue;
             }
+            if (std::strncmp(buf, "overlays", 8) == 0) {
+                overlays.Request(sender, senderLen);  // answered from the list's thread
+                continue;
+            }
             if (std::strncmp(buf, "gaze", 4) == 0) {
                 const char *arg = buf + 4;
                 while (*arg == ' ') ++arg;
@@ -961,9 +1050,11 @@ int main() {
                 recenter = true;
             } else if (std::strncmp(buf, "reload", 6) == 0) {
                 loadConfig();
+                lastSlow = Clock::now() - std::chrono::seconds(10);  // apply POINTER_IGNORE now
                 std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f, head follow %s, leash %.0f deg, "
-                            "controller pickup %.1fx\n",
-                            freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg, pickupScale);
+                            "controller pickup %.1fx, %zu ignored\n",
+                            freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg, pickupScale,
+                            ignore.size());
                 std::fflush(stdout);
             } else if (std::strncmp(buf, "follow", 6) == 0) {
                 const char *arg = buf + 6;
@@ -1148,6 +1239,7 @@ int main() {
             lastSlow = now;
             handles.clear();
             for (const auto &key : overlays.Keys()) {
+                if (Ignored(ignore, key)) continue;
                 vr::VROverlayHandle_t h;
                 if (overlay->FindOverlay(key.c_str(), &h) != vr::VROverlayError_None) continue;
                 handles[key] = h;
