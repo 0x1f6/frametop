@@ -53,12 +53,14 @@ In the last three modes the hotkey shows the screens anyway. Two more settings o
 
 Input from the lasers reaches KWin through ft-screens' own seat. Keys come from the input relay, from pass-through keyboards and any key a pointer device passes through. Typing follows your last click: after a click on a screen it goes to the desktop, even with the SteamVR dashboard open, and after a mouse click on any other panel (the dashboard, Steam, an app like Spotify) it goes there instead. While it goes to the desktop, the relay grabs pass-through keyboards so gamescope, which reads every keyboard itself, doesn't type them into the Steam app too. A program that watches every keyboard for a hotkey loses a grabbed one; with `SHARE_KEYS=1` in `~/.config/frametop.conf`, their keys also go to `@frametop_keys` for it. That's off by default, since any local process that binds the name first would get everything typed into the desktop. Hidden screens don't take typing.
 
+KWin's nested backend doesn't undo a screen's scale on pointer input, so ft-screens divides panel positions (in pixels) by it. `ft-layout` sends it each screen's scale as KWin reports it (`scale N s`) whenever it applies scales: at desktop start and from Frametop Display Settings. A scale changed only in Plasma's own display settings is put back to the Frametop layout's the next time `ft-layout` runs.
+
 ft-screens listens for datagrams on the abstract socket `@ft_screens` and replies to the sender:
 
 ```
 place N x y z yaw pitch roll     width N metres          curve N radius|on|off
 pin N|all left|right [matrix]    unpin N|all             size N w h
-get N    screens    head    state    key code value
+get N    screens    head    state    key code value    scale N s
 visibility always|dashboard|gesture|toggle    wrist degrees    gesture left|right degrees
 hide | show | toggle    controllers always|outside_games|dashboard    ingames hide|visible
 ```

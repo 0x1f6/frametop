@@ -645,6 +645,21 @@ def arrangement(count):
     return [[b["i"] for b in sorted(c, key=lambda b: -b["pitch"])] for c in columns] + [[i] for i in pinned]
 
 
+def send_scales(outs):
+    """KWin's scale for each screen, as it is now, to ft-screens: KWin's nested backend
+    doesn't undo its scale on pointer input, so ft-screens does (panel pixels / scale)."""
+    if backend() != "screens":
+        return
+    try:
+        sock = screens_socket()
+        for i, o in enumerate(outs):
+            reply = sock.ask(f"scale {i + 1} {float(o.get('scale', 1)):g}")
+            if not reply.startswith("ok"):
+                log(f"screen {i + 1}: scale: {reply}")
+    except RuntimeError as e:
+        log(f"scale: {e}")
+
+
 def apply_scales():
     """Per-screen scale and rotation, positions side by side, and the primary screen (the
     taskbar goes there) to KWin, which keeps them in the session's config."""
@@ -670,6 +685,7 @@ def apply_scales():
     # Laid out as you see the screens around you (arrangement), centred on one line, so
     # the pointer and dragged windows cross to the screen you see next to this one.
     outs = outputs(env)
+    send_scales(outs)
     # kscreen's "size" is in pixels (already turned for a rotation); positions are in
     # logical units, the pixels divided by the scale (KWin rounds up).
     sizes = [(math.ceil(o["size"]["width"] / float(o.get("scale", 1)) - 1e-6),

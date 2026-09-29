@@ -7,7 +7,10 @@
 //   - KWin renders into DMA-BUFs and hands them to us (linux-dmabuf). We draw nothing:
 //     each buffer goes to SteamVR as the panel's texture (vr.cpp, ImportDmabuf).
 //   - Pointer input from the panels (controller lasers, the 3D mouse) goes to KWin through
-//     our seat, as if we were a normal desktop.
+//     our seat, as if we were a normal desktop. KWin's nested backend adds our surface
+//     coordinates to its output's logical position without undoing its own scale, and its
+//     buffers are in pixels, so a panel position in pixels is divided by the screen's KWin
+//     scale first ("scale <screen> <s>", from ft-layout).
 //
 // Usage: ft-screens [--socket NAME] [--screen WxH@METRES]... [-- COMMAND ARGS...]
 //   --socket    Wayland socket name in $XDG_RUNTIME_DIR (default ft-screens-0)
@@ -86,6 +89,7 @@ struct server {
     struct wl_listener new_toplevel, new_decoration;
     struct screen *screens[MAX_SCREENS];
     struct config config[MAX_SCREENS];
+    double scale[MAX_SCREENS];  // KWin's scale for each screen (panel pixels per logical unit)
     int n_config, n_screens;
     struct wl_list buffers;  // tracked_buffer
     struct wl_event_source *tick;
@@ -243,14 +247,15 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
     struct screen *sc = s->screens[e->screen];
     struct wlr_surface *surface = sc->toplevel->base->surface;
     const uint32_t t = now_ms();
+    const double x = e->x / s->scale[e->screen], y = e->y / s->scale[e->screen];  // KWin's units
     switch (e->type) {
         case FT_MOTION:
         case FT_BUTTON:
             if (s->pointer_focus != sc) {
-                wlr_seat_pointer_notify_enter(s->seat, surface, e->x, e->y);
+                wlr_seat_pointer_notify_enter(s->seat, surface, x, y);
                 s->pointer_focus = sc;
             }
-            wlr_seat_pointer_notify_motion(s->seat, t, e->x, e->y);
+            wlr_seat_pointer_notify_motion(s->seat, t, x, y);
             if (e->type == FT_BUTTON) {
                 wlr_seat_pointer_notify_button(s->seat, t, e->button,
                                                e->pressed ? WL_POINTER_BUTTON_STATE_PRESSED
@@ -360,7 +365,8 @@ static void handle_key(struct server *s, uint32_t code, int value, char *reply, 
 }
 
 // Control socket: abstract datagram @ft_screens. Here: "size <screen> <w> <h>" (a new
-// resolution, live), "key <code> <value>", and "click <overlay key>" (from the pointer
+// resolution, live), "scale <screen> <s>" (KWin's scale for it, from ft-layout),
+// "key <code> <value>", and "click <overlay key>" (from the pointer
 // helper: a mouse click landed on that panel, "-" for none); the rest is in vr.cpp
 // (ft_vr_command).
 static int control_readable(int fd, uint32_t mask, void *data) {
@@ -373,6 +379,7 @@ static int control_readable(int fd, uint32_t mask, void *data) {
         buf[n] = 0;
         unsigned code;
         int value, index, w, h;
+        double scale;
         if (sscanf(buf, "size %d %d %d", &index, &w, &h) == 3) {
             // A new resolution for a screen, live: KWin resizes the screen to match.
             if (index < 1 || index > MAX_SCREENS || !s->screens[index - 1] || w < 320 || h < 200 || w > 16384 ||
@@ -381,6 +388,14 @@ static int control_readable(int fd, uint32_t mask, void *data) {
             } else {
                 if (index - 1 < s->n_config) s->config[index - 1].width = w, s->config[index - 1].height = h;
                 wlr_xdg_toplevel_set_size(s->screens[index - 1]->toplevel, w, h);
+                snprintf(reply, sizeof reply, "ok");
+            }
+        } else if (sscanf(buf, "scale %d %lf", &index, &scale) == 2) {
+            if (index < 1 || index > MAX_SCREENS || !(scale >= 0.25 && scale <= 8)) {
+                snprintf(reply, sizeof reply, "error bad screen or scale");
+            } else {
+                if (s->scale[index - 1] != scale) wlr_log(WLR_INFO, "screen %d: KWin scale %g", index, scale);
+                s->scale[index - 1] = scale;
                 snprintf(reply, sizeof reply, "ok");
             }
         } else if (sscanf(buf, "key %u %d", &code, &value) == 2) {
@@ -451,6 +466,7 @@ static bool setup_dmabuf(struct server *s) {
 
 int main(int argc, char **argv) {
     struct server s = {0};
+    for (int i = 0; i < MAX_SCREENS; ++i) s.scale[i] = 1;
     const char *socket_name = "ft-screens-0";
     char **command = NULL;
     for (int i = 1; i < argc; ++i) {
