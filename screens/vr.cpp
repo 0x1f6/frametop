@@ -23,6 +23,11 @@
 //     screen keeps it armed for its wrist: move it, let go, and it's re-pinned there
 //     (sweep across the ring to take it off). A pinned screen shows only while you see
 //     its front, within the wrist angle (and fades out over the last kFade degrees).
+//   - pin to your head (the pin command, from ft-layout and Frametop Display Settings): the
+//     screen rides on the headset as it is then, like a HUD, and shows whenever the
+//     screens do. Carrying it works like a wrist pin: let go and it's re-pinned to your
+//     head where you put it; sweep across a wrist ring to move it to that wrist, or twice
+//     to leave it in the room.
 //   - visibility modes: always (the hide hotkey toggles), only with the SteamVR dashboard
 //     open, while you look at a chosen controller (the wrist gesture), or toggle only
 //     (hidden until the hotkey shows them).
@@ -169,11 +174,14 @@ bool IsHandController(vr::TrackedDeviceIndex_t i) {
     vr::VRSystem()->GetStringTrackedDeviceProperty(i, vr::Prop_ControllerType_String, type, sizeof type);
     return std::strcmp(type, "ft_pointer") != 0;  // not the 3D mouse's virtual controller
 }
+// "left", "right", or "head" (the headset) -> the device to pin to.
 vr::TrackedDeviceIndex_t HandDevice(const char *hand) {
+    if (std::strcmp(hand, "head") == 0) return vr::k_unTrackedDeviceIndex_Hmd;
     return vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(
         std::strcmp(hand, "right") == 0 ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand);
 }
 const char *HandName(vr::TrackedDeviceIndex_t i) {
+    if (i == vr::k_unTrackedDeviceIndex_Hmd) return "head";
     switch (vr::VRSystem()->GetControllerRoleForTrackedDeviceIndex(i)) {
         case vr::TrackedControllerRole_LeftHand: return "left";
         case vr::TrackedControllerRole_RightHand: return "right";
@@ -658,7 +666,8 @@ void UpdateVisibility() {
         bool visible = s.shown && (shared || s.drag != Drag::None);
         float alpha = 1;
         Mat p;
-        if (visible && s.pinned != kNone && s.drag == Drag::None && haveHead && ScreenPose(s, &p)) {
+        if (visible && s.pinned != kNone && s.pinned != vr::k_unTrackedDeviceIndex_Hmd && s.drag == Drag::None &&
+            haveHead && ScreenPose(s, &p)) {
             // A pinned screen shows while you see its front: fully inside the wrist angle,
             // fading out over the last kFade degrees, gone beyond it (and from behind).
             const double a = FacingAngle(p, head);
@@ -896,7 +905,8 @@ void FinishDrag(Screen &s, int index) {
     ArrangeDesktopSoon();
     if (target != kNone && DevicePose(target, &c) && ScreenPose(s, &p)) {
         Pin(s, target, Mul(Inverse(c), p));
-        std::printf("screen %d: pinned to the %s controller\n", index + 1, HandName(target));
+        if (target == vr::k_unTrackedDeviceIndex_Hmd) std::printf("screen %d: pinned to the head\n", index + 1);
+        else std::printf("screen %d: pinned to the %s controller\n", index + 1, HandName(target));
     }
 }
 
@@ -1273,11 +1283,12 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //   width <screen> <metres>
 //   curve <screen> <radius>   cylinder radius in metres; 0 = flat
 //   curve <screen> on|off     on: the radius is the head's distance to it now -> "ok <radius>"
-//   pin <screen|all> <left|right> [12 numbers]   pin to that hand's controller: as it is now,
-//                             or at the given controller->screen transform (rows of a 3x4)
+//   pin <screen|all> <left|right|head> [12 numbers]   pin to that hand's controller or the
+//                             headset: as it is now, or at the given device->screen transform
+//                             (rows of a 3x4)
 //   unpin <screen|all>
-//   get <screen>  -> "ok x y z  xx xy xz  yx yy yz  zx zy zz  width height curve hand
-//                     [12 numbers: controller->screen, when pinned]"
+//   get <screen>  -> "ok x y z  xx xy xz  yx yy yz  zx zy zz  width height curve pin
+//                     [12 numbers: device->screen, when pinned]"   (pin: none|left|right|head)
 //   screens       -> "ok <count> <index>:<pixels w>x<h>:<metres> ..."
 //   head          -> "ok x y z yaw"
 //   visibility always|dashboard|gesture|toggle
@@ -1333,8 +1344,12 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
                                            &r[0], &r[1], &r[2], &r[3], &r[4], &r[5], &r[6], &r[7], &r[8], &r[9],
                                            &r[10], &r[11]);
                got >= 2) {
+        if (std::strcmp(hand, "left") && std::strcmp(hand, "right") && std::strcmp(hand, "head"))
+            return (void)std::snprintf(reply, size, "error pin to left, right, or head");
         const vr::TrackedDeviceIndex_t dev = HandDevice(hand);
         Mat c;
+        if (dev == vr::k_unTrackedDeviceIndex_Hmd && !DevicePose(dev, &c))
+            return (void)std::snprintf(reply, size, "error no head pose (headset off?)");
         if (dev == kNone || !DevicePose(dev, &c))
             return (void)std::snprintf(reply, size, "error no %s controller tracked", hand);
         Mat rel = Identity();

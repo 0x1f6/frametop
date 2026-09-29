@@ -10,10 +10,12 @@ the dev container:
     1920x1080 worth of pixels, rotation for portrait.)
   - Visibility (ft-screens): when the screens show (always, only with the SteamVR
     dashboard open, while you look at a controller, or only when toggled), the wrist
-    angle within which a pinned screen shows, and pin or unpin all screens.
-  - Layout: a preset (curved or flat, rows, distance, gap, height) or the arrangement
-    captured from where the screens are now, with a preview; arrange now; save the
-    current arrangement; arrange automatically when the desktop starts.
+    angle within which a pinned screen shows, and pinning each screen to a wrist or
+    your head.
+  - Layout: a preset (curved or flat, rows, distance, gap, height) or a named layout
+    saved from where the screens are, with a preview; arrange now; save the current
+    arrangement under a name; rename and delete; arrange automatically when the
+    desktop starts.
   - Power: how long the headset can go unused before ft-powerd turns its displays off
     (DISPLAY_OFF_MIN; the service's state comes from its control socket, @ft_powerd),
     and whether the Frame stays awake while plugged in, which is Steam's own setting
@@ -115,6 +117,7 @@ class Backend(QObject):
         self._steam_error = ""
         self._steam_busy = False
         self._steamDone.connect(self._steam_done, Qt.QueuedConnection)
+        self._pins = []     # each running screen's pin: none | left | right | head
         self.poll = QTimer(interval=3000, timeout=self._check_running)
         self.poll.start()
         self._check_running()
@@ -135,12 +138,23 @@ class Backend(QObject):
         # from the container, so ft_layout.nested_env() doesn't work here).
         running = os.path.exists(f"/run/user/{os.getuid()}/frametop/wayland-0")
         count = self._screens_running() if running and ft_layout.backend() == "screens" else 0
-        if running != self._running or count != self._running_count:
+        pins = self._read_pins(count)
+        if running != self._running or count != self._running_count or pins != self._pins:
+            if running != self._running or count != self._running_count:
+                self._started = self._conf() if running else {}
             self._running = running
             self._running_count = count
-            self._started = self._conf() if running else {}
+            self._pins = pins
             self.changed.emit()
         self._check_powerd()
+
+    def _read_pins(self, count):
+        pins = []
+        for i in range(count):
+            reply = self._ask_screens(f"get {i + 1}")
+            f = reply.split() if reply and reply.startswith("ok") else []
+            pins.append(f[16] if len(f) > 16 else "none")
+        return pins
 
     def _ask_screens(self, text):
         """Request/reply to ft-screens; None if it isn't running."""
@@ -391,20 +405,23 @@ class Backend(QObject):
             else:
                 self._ask_screens(f"gesture {v['gesture_hand']} {float(v['gesture_angle']):.1f}")
 
-    @Slot(str)
-    def pinAll(self, hand):
-        reply = self._ask_screens(f"pin all {hand}") if self._running else None
-        if reply and reply.startswith("ok"):
-            self.message.emit(f"All screens ride on your {hand} wrist now; grab a screen's bar to take it off. "
-                              "Save current arrangement keeps it.", False)
-        else:
-            self.message.emit(f"Couldn't pin: {reply or 'the desktop is not running'}", True)
+    @Property("QVariantList", notify=changed)
+    def pins(self):
+        return self._pins
 
-    @Slot()
-    def unpinAll(self):
-        reply = self._ask_screens("unpin all") if self._running else None
+    @Slot(str, str)
+    def pin(self, which, where):
+        """Pin screen `which` (1-based, or "all") to "left", "right", or "head" as it is
+        now, or take it off ("none")."""
+        cmd = f"unpin {which}" if where == "none" else f"pin {which} {where}"
+        reply = self._ask_screens(cmd) if self._running else None
         if not (reply and reply.startswith("ok")):
-            self.message.emit(f"Couldn't unpin: {reply or 'the desktop is not running'}", True)
+            self.message.emit(f"Couldn't {'unpin' if where == 'none' else 'pin'}: "
+                              f"{reply or 'the desktop is not running'}", True)
+        elif which == "all" and where != "none":
+            place = "on your head" if where == "head" else f"on your {where} wrist"
+            self.message.emit(f"All screens ride {place} now. Save current arrangement (Layout) keeps it.", False)
+        self._check_running()
 
     # --- power: ft-powerd and Steam's sleep setting ---
     def _check_powerd(self):
@@ -513,7 +530,44 @@ class Backend(QObject):
 
     @Slot(str)
     def setMode(self, mode):
-        self._edit_layout(lambda l: l.__setitem__("mode", mode))
+        def edit(layout):
+            layout["mode"] = mode
+            layout.pop("active", None)
+        self._edit_layout(edit)
+
+    @Property("QVariantList", notify=changed)
+    def layoutNames(self):
+        return ft_layout.layout_names(ft_layout.load_layout())
+
+    @Slot(str)
+    def useLayout(self, name):
+        """A named layout as the arrangement (Arrange now puts the screens there)."""
+        try:
+            self._edit_layout(lambda l: ft_layout.use_named(l, name))
+        except RuntimeError as e:
+            self.message.emit(str(e), True)
+
+    @Slot(str)
+    def saveLayout(self, name):
+        try:
+            ft_layout.check_name(name)
+        except RuntimeError as e:
+            return self.message.emit(str(e), True)
+        self._run(f"Saving the arrangement as {' '.join(name.split())}", "save", name)
+
+    @Slot(str, str)
+    def renameLayout(self, old, new):
+        try:
+            self._edit_layout(lambda l: ft_layout.rename_named(l, old, new))
+        except RuntimeError as e:
+            self.message.emit(str(e), True)
+
+    @Slot(str)
+    def deleteLayout(self, name):
+        try:
+            self._edit_layout(lambda l: ft_layout.delete_named(l, name))
+        except RuntimeError as e:
+            self.message.emit(str(e), True)
 
     @Slot(str, "QVariant")
     def setPreset(self, key, value):
