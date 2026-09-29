@@ -19,6 +19,7 @@ POINTER_LASER_WIDTH=0.8    # controller beam width (dashboard.laserRayWidthScale
 POINTER_ORIGIN_MARGIN=0.15   # the laser starts at least this far (m) in front of its target, so small floating controls stay hittable
 POINTER_SCENE_RADIUS=0.5   # texture-less dashboard overlays (dock, window controls): hit radius (m) around their origin
 POINTER_EDGE_REACH=0.3     # just off a panel, the cursor stays on its plane this far (m), to reach its resize edges and window controls
+POINTER_IGNORE=            # overlay keys the cursor passes through, comma-separated; vendor.app* covers an app (Frametop Input Settings > Ignored panels)
 POINTER_FOLLOW=0           # 1 = the cursor follows your head on a leash (a mouse button mapped to Head follow on/off toggles it)
 POINTER_LEASH_DEG=10       # head follow: how far (degrees) your head can turn before the cursor comes along; 0 locks it to your view
 POINTER_LEASH_DELAY=0.2    # head follow: how long (s) your head has to stay past the leash, so a glance doesn't move the cursor

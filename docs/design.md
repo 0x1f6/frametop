@@ -74,7 +74,7 @@ The driver starts disconnected, because holding the right-hand role while SteamV
 
 ### The cursor
 
-Mouse motion turns into yaw and pitch around an anchor, the head position at the last recenter. A ray from the anchor is tested against every visible overlay with `ComputeOverlayIntersection`. On a hit, the cursor sits on that surface; otherwise it floats at `POINTER_DISTANCE`. Since the anchor isn't your current eye position, a second test runs along your line of sight to the cursor point, and anything nearer wins, so the cursor always lands on what you see under it.
+Mouse motion turns into yaw and pitch around an anchor, the head position at the last recenter. A ray from the anchor is tested against every visible overlay with `ComputeOverlayIntersection`. On a hit, the cursor sits on that surface; otherwise it floats at `POINTER_DISTANCE`. Since the anchor isn't your current eye position, a second test runs along your line of sight to the cursor point, and anything nearer wins, so the cursor always lands on what you see under it. Overlays in `POINTER_IGNORE` are left out of both tests. A display-only panel, like a performance overlay locked to your view, has no input method, so SteamVR's laser passes through it, but `ComputeOverlayIntersection` still hits it, and the cursor stuck to it. The laser starts just before the cursor point, so an ignored panel nearer to you doesn't catch it either.
 
 OpenVR has no call to list other programs' overlays, so the helper runs `vrcmd --overlays` in the background. It includes hidden overlays, because a floating window's controls only appear while something hovers the window, and the cursor has to find them immediately.
 

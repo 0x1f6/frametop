@@ -20,6 +20,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: "Buttons"; icon.name: "input-keyboard"; onTriggered: root.show(buttonsPage) },
             Kirigami.Action { text: "Controllers"; icon.name: "input-gamepad"; onTriggered: root.show(controllersPage) },
             Kirigami.Action { text: "Pointer"; icon.name: "transform-move"; onTriggered: root.show(pointerPage) },
+            Kirigami.Action { text: "Ignored panels"; icon.name: "view-hidden"; onTriggered: root.show(ignorePage) },
             Kirigami.Action { text: "Gaze"; icon.name: "view-visible"; onTriggered: root.show(gazePage) },
             Kirigami.Action { text: "Bluetooth"; icon.name: "preferences-system-bluetooth"; onTriggered: root.show(bluetoothPage) }
         ]
@@ -54,9 +55,9 @@ Kirigami.ApplicationWindow {
         pageStack.push(page)
     }
 
-    // FT_INPUT_PAGE=buttons|controllers|pointer|gaze|bluetooth opens the app on that page.
-    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, pointer: pointerPage, gaze: gazePage,
-                              bluetooth: bluetoothPage })[startPage] || devicesPage
+    // FT_INPUT_PAGE=buttons|controllers|pointer|ignore|gaze|bluetooth opens the app on that page.
+    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, pointer: pointerPage,
+                              ignore: ignorePage, gaze: gazePage, bluetooth: bluetoothPage })[startPage] || devicesPage
 
     Connections {
         target: backend
@@ -571,6 +572,142 @@ Kirigami.ApplicationWindow {
                 opacity: 0.7
                 text: "Changes apply live. SteamVR dot shrink: how close to the target the pointer's laser starts; "
                       + "higher makes SteamVR's own blue dot smaller (max 0.98)."
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Ignored panels
+    Component {
+        id: ignorePage
+        Kirigami.ScrollablePage {
+            id: ipage
+            title: "Ignored panels"
+            header: DriverWarning {}
+
+            Timer {
+                // The helper lists SteamVR's panels again for each request.
+                running: true
+                repeat: true
+                triggeredOnStart: true
+                interval: 3000
+                onTriggered: backend.refreshPanels()
+            }
+
+            ColumnLayout {
+                spacing: Kirigami.Units.largeSpacing
+
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: !backend.controllerStatus.helper
+                    type: Kirigami.MessageType.Error
+                    text: "The pointer helper isn't answering (frametop-pointer.service, needs SteamVR). "
+                          + "It lists SteamVR's panels and does the ignoring."
+                }
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: "The mouse pointer passes through the panels ticked here to whatever is behind them, "
+                          + "as if they weren't there. Use it for panels you only look at, like a performance "
+                          + "overlay that follows your view. Ignore a whole app, or only some of its panels. "
+                          + "Controllers aren't affected."
+                }
+                Controls.Switch {
+                    id: showHidden
+                    text: "Also list panels that aren't showing now"
+                }
+                Controls.Label {
+                    visible: backend.controllerStatus.helper && !backend.panelsLoaded
+                    text: "Asking the pointer helper for SteamVR's panels…"
+                    opacity: 0.7
+                }
+
+                Repeater {
+                    model: backend.panelGroups
+                    delegate: ColumnLayout {
+                        id: grp
+                        required property var modelData
+                        Layout.fillWidth: true
+                        visible: showHidden.checked || modelData.anyVisible || modelData.anyIgnored
+                        spacing: 0
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Kirigami.Heading {
+                                level: 4
+                                text: grp.modelData.title
+                            }
+                            Controls.Label {
+                                text: grp.modelData.app
+                                opacity: 0.6
+                            }
+                            Item { Layout.fillWidth: true }
+                            Controls.CheckBox {
+                                text: "Ignore the whole app"
+                                checked: grp.modelData.appIgnored
+                                onToggled: backend.setAppIgnored(grp.modelData.app, checked)
+                            }
+                        }
+                        Repeater {
+                            model: grp.modelData.panels
+                            delegate: RowLayout {
+                                id: prow
+                                required property var modelData
+                                // Ignored by the whole app, or by a pattern written in frametop.conf.
+                                readonly property bool byOther: modelData.ignoredBy !== "" && modelData.ignoredBy !== modelData.key
+                                visible: showHidden.checked || modelData.visible || modelData.ignoredBy !== ""
+                                Layout.leftMargin: Kirigami.Units.gridUnit
+                                Controls.CheckBox {
+                                    text: prow.modelData.name
+                                    checked: prow.modelData.ignoredBy !== ""
+                                    enabled: !prow.byOther
+                                    onToggled: backend.setPanelIgnored(prow.modelData.key, checked)
+                                }
+                                Controls.Label {
+                                    text: prow.modelData.key
+                                    opacity: 0.6
+                                }
+                                Controls.Label {
+                                    text: (prow.modelData.visible ? "showing" : "hidden")
+                                          + (!prow.byOther ? ""
+                                             : prow.modelData.ignoredBy === grp.modelData.app + "*" ? ", whole app ignored"
+                                             : ", ignored by " + prow.modelData.ignoredBy)
+                                    opacity: 0.6
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Kirigami.Heading {
+                    visible: backend.ignoreOrphans.length > 0
+                    level: 3
+                    text: "Ignored, not open now"
+                }
+                Repeater {
+                    model: backend.ignoreOrphans
+                    delegate: RowLayout {
+                        id: orow
+                        required property string modelData
+                        Controls.Label {
+                            text: orow.modelData
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+                        }
+                        Controls.Button {
+                            text: "Remove"
+                            icon.name: "edit-delete-remove"
+                            onClicked: backend.removeIgnore(orow.modelData)
+                        }
+                    }
+                }
+            }
+
+            footer: Controls.Label {
+                padding: Kirigami.Units.largeSpacing
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: "Saved as POINTER_IGNORE in ~/.config/frametop.conf, and applied at once. A whole app is "
+                      + "its key followed by *, which also covers panels it opens later. Frametop's own screens "
+                      + "aren't listed."
             }
         }
     }
