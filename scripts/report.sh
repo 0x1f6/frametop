@@ -21,7 +21,7 @@ git -C "$repo" log -1 --format='Frametop %h (%cd)' --date=short 2>/dev/null || e
 podman container inspect -f 'dev container: running={{.State.Running}} image={{.ImageName}}' dev 2>/dev/null || echo "dev container: missing"
 
 section Services
-for u in frametop-input-relay frametop-pointer; do
+for u in frametop-input-relay frametop-pointer frametop-power; do
   echo "$u: $(systemctl --user is-enabled $u 2>/dev/null) / $(systemctl --user is-active $u 2>/dev/null)"
 done
 echo "desktop: $(pgrep -x ft-screens >/dev/null && echo running || echo 'not running'), plasmashell: $(pgrep -c plasmashell || true)"
@@ -42,6 +42,8 @@ section "Input relay (last 60 lines)"
 journalctl --user -u frametop-input-relay -n 60 --no-pager -o short 2>/dev/null
 section "Pointer helper (last 60 lines)"
 journalctl --user -u frametop-pointer -n 60 --no-pager -o short 2>/dev/null
+section "Power service (last 30 lines)"
+journalctl --user -u frametop-power -n 30 --no-pager -o short 2>/dev/null
 for f in /tmp/frametop-session.log /tmp/frametop-screens.log /tmp/frametop-layout.log; do
   section "$f (last 60 lines)"
   tail -n 60 "$f" 2>/dev/null || echo "missing"

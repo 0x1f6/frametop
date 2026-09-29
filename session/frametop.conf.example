@@ -31,5 +31,8 @@ POINTER_GAZE_HOLD=0.5      # gaze mode: a press held this long (s) without movin
 POINTER_GAZE_SHOW=1        # gaze mode: the dot shows this long (s) after the mouse moves it; also while a press is held, and a pulse per click
 META_DASHBOARD=0   # 1 = a Meta tap on a pass-through keyboard toggles the SteamVR dashboard (pointer mode only)
 SHARE_KEYS=0       # 1 = keys of keyboards grabbed for the desktop also go to @frametop_keys, for hotkey tools (any local process can listen)
+DISPLAY_OFF_MIN=0  # minutes without use before frametop-power turns the displays off, even if the headset seems worn (0 = never)
+DISPLAY_MOVE_MM=5  # displays off: the headset or a controller moving this far (mm) within 10 s counts as use
+DISPLAY_MOVE_DEG=0.5 # displays off: or turning this far (degrees) within 10 s
 LAYOUT_GRAB_OFFSET=0.075   # arranging screens: where the floating window's grab bar is, in metres below the screen
 LAYOUT_SLIDE_SPEED=0.5     # arranging screens: how fast the invisible controller slides a grabbed screen (m/s)

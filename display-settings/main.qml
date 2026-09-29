@@ -12,11 +12,13 @@ Kirigami.ApplicationWindow {
 
     // Pages as tabs across the top (a side drawer was easy to miss).
     readonly property var pages: backend.backend === "screens"
-        ? [{ text: "Screens", icon: "video-display", page: screensPage },
-           { text: "Layout", icon: "view-grid", page: layoutPage },
-           { text: "Visibility & wrist", icon: "view-visible", page: visibilityPage }]
-        : [{ text: "Screens", icon: "video-display", page: screensPage },
-           { text: "Layout", icon: "view-grid", page: layoutPage }]
+        ? [{ name: "screens", text: "Screens", icon: "video-display", page: screensPage },
+           { name: "layout", text: "Layout", icon: "view-grid", page: layoutPage },
+           { name: "visibility", text: "Visibility & wrist", icon: "view-visible", page: visibilityPage },
+           { name: "power", text: "Power", icon: "preferences-system-power-management", page: powerPage }]
+        : [{ name: "screens", text: "Screens", icon: "video-display", page: screensPage },
+           { name: "layout", text: "Layout", icon: "view-grid", page: layoutPage },
+           { name: "power", text: "Power", icon: "preferences-system-power-management", page: powerPage }]
 
     header: Controls.TabBar {
         id: tabs
@@ -29,7 +31,7 @@ Kirigami.ApplicationWindow {
                 onClicked: root.show(modelData.page)
             }
         }
-        Component.onCompleted: currentIndex = ({ layout: 1, visibility: 2 })[startPage] || 0
+        Component.onCompleted: currentIndex = Math.max(0, root.pages.findIndex(p => p.name === startPage))
     }
 
     function show(page) {
@@ -37,8 +39,16 @@ Kirigami.ApplicationWindow {
         pageStack.push(page)
     }
 
-    // FT_DISPLAY_PAGE=layout|visibility opens the app on that page.
-    pageStack.initialPage: ({ layout: layoutPage, visibility: visibilityPage })[startPage] || screensPage
+    // FT_DISPLAY_PAGE=layout|visibility|power opens the app on that page.
+    pageStack.initialPage: ({ layout: layoutPage, visibility: visibilityPage, power: powerPage })[startPage] || screensPage
+
+    // "1 hour", "15 minutes", "30 seconds".
+    function duration(seconds) {
+        const unit = (n, word) => n + " " + word + (n === 1 ? "" : "s")
+        if (seconds >= 3600 && seconds % 3600 === 0) return unit(seconds / 3600, "hour")
+        if (seconds >= 60 && seconds % 60 === 0) return unit(seconds / 60, "minute")
+        return unit(seconds, "second")
+    }
 
     Connections {
         target: backend
@@ -721,6 +731,122 @@ Kirigami.ApplicationWindow {
                           + "pinned screen, grab its bar, move it, and let go (it stays pinned); sweep across the ring to "
                           + "take it off. It shows while you see its front within the angle above, and fades out beyond "
                           + "it. Save current arrangement (Layout) keeps pins."
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Power
+    Component {
+        id: powerPage
+        Kirigami.ScrollablePage {
+            id: ppage
+            title: "Power"
+            property var p: backend.power
+            // The timeout choices, plus a value set by hand in frametop.conf.
+            property var offChoices: {
+                const list = [{ text: "Never", value: 0 }].concat([1, 2, 5, 10, 15, 30, 60].map(
+                    m => ({ text: root.duration(m * 60), value: m })))
+                if (!list.some(c => c.value === p.offMinutes))
+                    list.push({ text: root.duration(Math.round(p.offMinutes * 60)), value: p.offMinutes })
+                return list
+            }
+
+            Component.onCompleted: backend.refreshPower()
+
+            actions: [
+                Kirigami.Action {
+                    text: "Turn displays off now"
+                    icon.name: "system-suspend"
+                    tooltip: "To try it: they come back on when the headset moves or any input is used"
+                    enabled: ppage.p.service && ppage.p.state === "on"
+                    onTriggered: backend.displaysOffNow()
+                }
+            ]
+
+            header: Kirigami.InlineMessage {
+                position: Kirigami.InlineMessage.Position.Header
+                visible: !ppage.p.service
+                type: Kirigami.MessageType.Warning
+                text: "The power service (frametop-power) isn't running, so the displays won't turn off on their own. "
+                      + "It starts with SteamVR once it's installed: power/run.sh install, or run ./install.sh again."
+            }
+
+            ColumnLayout {
+                spacing: Kirigami.Units.largeSpacing
+
+                Kirigami.FormLayout {
+                    Layout.fillWidth: true
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Displays" }
+
+                    Controls.ComboBox {
+                        Kirigami.FormData.label: "Turn off when unused for:"
+                        model: ppage.offChoices
+                        textRole: "text"
+                        valueRole: "value"
+                        Component.onCompleted: currentIndex = Math.max(0, indexOfValue(ppage.p.offMinutes))
+                        onActivated: backend.setDisplayOffMinutes(currentValue)
+                    }
+                    Controls.Label {
+                        text: "Unused means the headset and controllers haven't moved and no mouse, keyboard, or button "
+                              + "was used. This works even when the headset seems to be worn, like on a display mount "
+                              + "that covers its proximity sensor. Moving the headset or using any input turns the "
+                              + "displays back on. Taking the headset off still turns them off within seconds."
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    }
+                    Controls.Label {
+                        Kirigami.FormData.label: "Now:"
+                        visible: ppage.p.service
+                        text: ppage.p.state === "off" ? "Off. Move the headset or use any input to turn them on."
+                              : ppage.p.state === "away" ? "Off. SteamVR turned them off because the headset isn't being worn."
+                              : ppage.p.offMinutes > 0
+                                ? "On, unused for " + (ppage.p.unused < 60 ? Math.floor(ppage.p.unused) + " s"
+                                    : Math.floor(ppage.p.unused / 60) + " min " + Math.floor(ppage.p.unused % 60) + " s")
+                                : "On"
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Sleep" }
+
+                    Controls.Switch {
+                        id: awake
+                        Kirigami.FormData.label: "While plugged in:"
+                        text: "Stay awake"
+                        checked: ppage.p.acSleep === 0
+                        enabled: ppage.p.steam && !ppage.p.steamBusy
+                        onToggled: {
+                            backend.setStayAwake(checked)
+                            checked = Qt.binding(() => ppage.p.acSleep === 0)  // follow what Steam has
+                        }
+                    }
+                    Controls.Label {
+                        text: !ppage.p.steam
+                              ? (ppage.p.steamBusy ? "Checking Steam's setting…" : "Couldn't reach Steam: " + ppage.p.steamError)
+                              : "Keeps the Frame awake and connected while it charges, for remote access, downloads, and "
+                                + "anything else running. This is Steam's own setting (Settings → Power → When Plugged In "
+                                + "and Idle), so the power button still puts the Frame to sleep. "
+                                + (ppage.p.acSleep > 0 ? "Now Steam puts it to sleep after " + root.duration(ppage.p.acSleep)
+                                                         + " without input, even while it charges. " : "")
+                                + "On battery, Steam's battery setting still applies ("
+                                + (ppage.p.batterySleep > 0 ? "sleep after " + root.duration(ppage.p.batterySleep) : "never sleep")
+                                + ")."
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    }
+                }
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                    text: "With the displays off, the headset keeps tracking and drawing, so it can wake the moment "
+                          + "it moves. It still uses most of its power, so leave it on a charger that keeps up with it "
+                          + "in use."
                 }
             }
         }

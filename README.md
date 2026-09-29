@@ -8,6 +8,8 @@ The mouse shows up as a small dot anchored in the room. It works on the SteamVR 
 
 It comes with two settings apps, Frametop Display Settings for the screens and Frametop Input Settings for mice, keyboards, and button mappings, plus fixes that let Bluetooth LE mice and keyboards like the Swiftpoint Z3 reconnect after they sleep.
 
+When you're not wearing the headset, Frametop can turn its displays off and keep it awake on the charger, so you can still reach it remotely. This works even on a stand or mount that makes the headset seem worn.
+
 Frametop is an independent project, not made by or affiliated with Valve.
 
 ## Install on the headset
@@ -28,7 +30,7 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
-If you work in the desktop for long stretches, stop Steam from putting the headset to sleep while it's plugged in: in Steam, open Settings → Power, and under When Plugged In and Idle set Sleep after to Never. By default Steam suspends the Frame after an hour without input, even while it charges. The displays still turn off a few seconds after you take the headset off.
+If you work in the desktop for long stretches, or leave the headset on a stand, open Frametop Display Settings → Power. Turn on Stay awake while plugged in: by default Steam puts the Frame to sleep after an hour without input, even while it charges. And choose when the displays turn off while the headset isn't used. SteamVR turns them off a few seconds after you take the headset off, but a stand or mount that covers the proximity sensor inside it makes the headset seem worn, and its displays stay on all night.
 
 ### Add a Bluetooth mouse or keyboard
 
@@ -51,11 +53,21 @@ If you work in the desktop for long stretches, stop Steam from putting the heads
 | While carrying a screen, sweep its laser across your other controller's ring, then let go | Pins it to that wrist, at its size and distance, as you hold it when you let go; it shows while you see its front. Grab its bar to adjust it (it stays pinned); sweep across the ring again to take it off |
 | Meta+Shift+R in the desktop | Puts the screens back in their layout (also in the menu as Reset Screen Layout, and mappable to a mouse button) |
 | Meta+Shift+H in the desktop | Hides or shows all screens (also in the menu as Hide/Show Screens, and mappable). The Visibility & wrist tab of Frametop Display Settings can instead show them only with the dashboard open, or while you look at your wrist |
+| Leave the headset on a stand | Its displays turn off once it has gone unused for the time set in Frametop Display Settings → Power, even if the stand covers its proximity sensor. Pick it up, or use any mouse, keyboard, or button, and they come back on |
 | Play a VR game | The screens hide and your controllers stay in the game. Open the SteamVR dashboard, or press Meta+Shift+H, to see and use them. To keep them visible over games, change During VR games on the Visibility & wrist tab; the controllers still stay in the game, and you use the screens with the mouse or the dashboard |
 
 You can map the mouse's extra buttons to actions such as Toggle SteamVR dashboard, Recenter pointer, or Head follow on/off on the Buttons page of Frametop Input Settings, and the Frame controllers' buttons on its Controllers page. Pointer speed, dot size, and the rest are on its Pointer page and take effect immediately. Head follow, which is experimental and off by default, makes the pointer come along when you turn your head: it stays put until your head turns past the leash angle, then glides back to its place in your view, and a leash of 0 keeps it fixed in your view. It's only lightly tested and not polished; tuning its settings, or improving how it feels, is open to anyone who wants to take it further.
 
 Restarting the desktop (Restart desktop in Frametop Display Settings) closes its windows, but background work you started in it, such as servers, tmux sessions, or builds, keeps running.
+
+### Leave the headset on a stand and reach it remotely
+
+To keep the Frame on and connected while you're not wearing it, for SSH, remote desktop, or anything else running on it, open the Power tab in Frametop Display Settings:
+
+- Turn off when unused for: how long the headset can go unused before its displays turn off (Never by default). Unused means the headset and controllers haven't moved and no mouse, keyboard, or button was used. SteamVR normally turns the displays off when its proximity sensor says the headset came off, but a stand or mount that covers the sensor makes the headset seem worn, so the displays stay on all night. This setting doesn't depend on the sensor. Pick the headset up or use any input, and the displays come back on.
+- Stay awake while plugged in: stops Steam from putting the Frame to sleep while it charges. By default Steam puts it to sleep after an hour without input, even on the charger, which ends remote sessions. This is Steam's own Settings → Power → When Plugged In and Idle setting, so the power button still puts the Frame to sleep, and Steam's battery setting still applies.
+
+With the displays off, the headset keeps tracking and rendering, so it uses about as much power as in use. Leave it on a charger that keeps up with that: a USB-C PD charger, not a 5 V one.
 
 ## Known limitations
 
@@ -69,6 +81,7 @@ This is an early release, tested on one Steam Frame (SteamOS 0.3.0 build 2026092
 - The screens don't draw a mouse cursor of their own. The 3D mouse's dot or SteamVR's laser shows where you're pointing.
 - On SteamVR's Settings page, the 3D mouse shows a laser beam and a larger hit dot, like a controller. SteamVR doesn't tell other programs where that page is (unlike Steam's pages, such as Library), so the mouse used to miss most of it: clicks went through to a desktop screen behind, and the dot disappeared. As a workaround, on that page only, the laser starts near your eye and SteamVR finds the page itself. See docs/design.md.
 - Remote desktop over VNC (`./desktops.sh remote on`) needs Tailscale on the Frame.
+- Turning the displays off on a stand only turns their backlight off. SteamVR has no way for other programs to put the headset in standby, so tracking and rendering keep running, and the headset draws nearly its full power.
 
 ## Reporting problems
 
@@ -92,6 +105,7 @@ cd ~/frametop && git pull && ./install.sh
 ./desktops.sh uninstall                # the launcher's Desktop entry goes back to the stock desktop
 ./desktops.sh relay uninstall
 pointer/helper/run.sh uninstall
+power/run.sh uninstall
 pointer/driver/install.sh uninstall    # then restart SteamVR
 input-settings/install.sh uninstall
 display-settings/install.sh uninstall
@@ -100,7 +114,7 @@ setup/bluetooth/install.sh uninstall   # if you installed the Bluetooth fixes
 
 ## How it works
 
-A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland compositor. KWin opens one window per screen, ft-screens sets each window's size, and each frame goes to SteamVR as an overlay without being copied. An input relay (`input/`) keeps Bluetooth mice working in SteamVR and feeds the mouse to the 3D pointer, which drives a virtual SteamVR controller (`pointer/`). [docs/reference.md](docs/reference.md) covers each piece, and [docs/design.md](docs/design.md) explains the design and what we learned about SteamVR on the Frame. [docs/hazards.md](docs/hazards.md) lists known ways the input handling can go wrong.
+A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland compositor. KWin opens one window per screen, ft-screens sets each window's size, and each frame goes to SteamVR as an overlay without being copied. An input relay (`input/`) keeps Bluetooth mice working in SteamVR and feeds the mouse to the 3D pointer, which drives a virtual SteamVR controller (`pointer/`). A power service (`power/`) turns the displays off while the headset isn't used. [docs/reference.md](docs/reference.md) covers each piece, and [docs/design.md](docs/design.md) explains the design and what we learned about SteamVR on the Frame. [docs/hazards.md](docs/hazards.md) lists known ways the input handling can go wrong.
 
 | Folder | What it is |
 | --- | --- |
@@ -111,6 +125,7 @@ A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland com
 | `layout/` | ft-layout: where the screens float, and their sizes. |
 | `input/` | The input relay (Bluetooth mice and keyboards, button maps). |
 | `pointer/` | The 3D mouse: SteamVR driver, helper service, and a probe tool. |
+| `power/` | ft-powerd: turns the displays off while the headset isn't used. |
 | `display-settings/`, `input-settings/` | The two settings apps (Kirigami, Python). |
 | `setup/` | The build container and the Bluetooth fixes. See [setup/README.md](setup/README.md). |
 | `scripts/` | Helpers the installers use. They run commands locally on the Frame, or over SSH from a PC. |

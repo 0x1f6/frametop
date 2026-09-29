@@ -121,11 +121,12 @@ When the desktop starts, its screens arrange themselves around where you're faci
 
 The desktop's own screen arrangement follows where the screens are around you, whatever their numbers: a screen you see to the left of another is to its left in Plasma too, so the pointer and dragged windows cross straight to it. Screens one above the other stack, and screens pinned to a wrist come last. It's updated at startup, after arranging or saving the layout, and half a second after you let go of a screen you moved. With the headset off there's no head pose to go by, and the arrangement stays as it was.
 
-Frametop Display Settings has three tabs:
+Frametop Display Settings has four tabs (three with the gamescope backend, which has no Visibility & wrist):
 
 - Screens: add and remove screens, and set each one's resolution (presets from 1080p to 4K, ultrawide, super ultrawide, portrait, or custom), its width in VR (0.5 to 6 m), its scale, whether it's curved, and whether it has the taskbar. Resolution, width, and curve apply at once. Adding or removing a screen takes a desktop restart, which the app offers.
 - Layout: a curve around you, with the screens hinged edge to edge like monitors on a desk and each turned to face you, or a flat wall. Both take rows, distance, gap, and height. Save current arrangement keeps the positions and sizes you set by hand instead. A preview shows the layout from above and from the front, and a switch turns auto-arrange at startup on or off.
 - Visibility & wrist: the visibility, game, and controller settings described above, the wrist angle, and buttons to pin all screens to a wrist or unpin them.
+- Power: when the displays turn off while the headset isn't used, their state now, Turn displays off now (to try it), and Stay awake while plugged in. See [Displays off and sleep](#displays-off-and-sleep).
 
 `layout/ft-layout` does the arranging. It's a Python script that uses only the standard library and runs on the host:
 
@@ -139,6 +140,27 @@ display-settings/install.sh # menu entries and the Meta+Shift+R and Meta+Shift+H
 ```
 
 The layout is stored relative to your head when it's applied. `/tmp/frametop-layout.log` has the run from the last desktop start.
+
+## Displays off and sleep
+
+SteamVR turns the displays off a few seconds after the headset's proximity sensor says it came off. A stand or display mount that covers the sensor makes the headset seem worn, so its displays stay on, and Steam, which then counts someone as present, never puts it to sleep either.
+
+`power/ft-powerd` goes by use instead. It runs in the `dev` container as `frametop-power.service` and starts with SteamVR. Once the headset has gone unused for `DISPLAY_OFF_MIN` minutes (0, the default, is never), it turns the displays' backlight off, and it turns it back on at the next use. Use is any of these:
+
+- The headset, a Frame controller, or the 3D mouse's virtual controller moving more than `DISPLAY_MOVE_MM` (5 mm) or turning more than `DISPLAY_MOVE_DEG` (0.5 degrees) within 10 seconds.
+- A key, button, or mouse motion on any input device on the host, including the headset's own buttons and the input relay's virtual mouse and keyboard.
+- The headset going back on after SteamVR's own standby, or something else turning the backlight back on.
+
+While SteamVR has the headset in standby, SteamVR owns the displays and ft-powerd waits. The backlight is `/sys/class/backlight/ae94000.dsi.0/brightness`, the same file SteamVR's driver writes for standby. With the backlight off, tracking and rendering keep running, which lets the displays wake the moment the headset moves, but the headset still uses most of its power. ft-powerd puts the backlight back when it stops, and if it was killed with the displays off, the next start does (the value is kept in `~/.cache/frametop/powerd-brightness` meanwhile).
+
+Stay awake while plugged in is Steam's own setting, When Plugged In and Idle → Sleep after (`system_idle_suspend_ac_sec`), set to Never. Frametop Display Settings changes it the way Steam's Settings → Power page does, through Steam's UI on its debugging port (`display-settings/steam_settings.py`), and keeps the value from before in `STEAM_SLEEP_AC_BEFORE` to put back when the switch goes off. The power button still puts the Frame to sleep, and Steam's battery setting still applies.
+
+```
+power/build.sh && power/run.sh install
+power/run.sh status        # "ok on|off|away <seconds unused> <timeout seconds>"
+power/run.sh off | on      # the displays off now, or back on
+power/run.sh log
+```
 
 ## Remote desktop over VNC
 

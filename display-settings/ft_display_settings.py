@@ -14,6 +14,10 @@ the dev container:
   - Layout: a preset (curved or flat, rows, distance, gap, height) or the arrangement
     captured from where the screens are now, with a preview; arrange now; save the
     current arrangement; arrange automatically when the desktop starts.
+  - Power: how long the headset can go unused before ft-powerd turns its displays off
+    (DISPLAY_OFF_MIN; the service's state comes from its control socket, @ft_powerd),
+    and whether the Frame stays awake while plugged in, which is Steam's own setting
+    (steam_settings.py; the value from before is kept as STEAM_SLEEP_AC_BEFORE).
 Settings go to ~/.config/frametop.conf and ~/.config/frametop-layout.json. Anything
 that touches SteamVR runs layout/ft-layout on the host.
 Launch with display-settings/ft-display-settings (host wrapper).
@@ -22,8 +26,9 @@ import os
 import shutil
 import socket
 import sys
+import threading
 
-from PySide6.QtCore import Property, QObject, QProcess, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -32,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LAYOUT_DIR = os.path.join(HERE, "..", "layout")
 sys.path.insert(0, LAYOUT_DIR)
 import ft_layout  # noqa: E402  (pure Python: the same geometry ft-layout uses)
+import steam_settings  # noqa: E402
 
 FT_LAYOUT = os.path.join(LAYOUT_DIR, "ft-layout")
 DESKTOPS = os.path.join(HERE, "..", "desktops.sh")
@@ -46,6 +52,10 @@ SCREEN_RESOLUTIONS = [(1920, 1080, ""), (2560, 1440, ""), (3840, 2160, "4K"), (2
                       (2560, 1600, "16:10"), (1080, 1920, "portrait"), (1440, 2560, "portrait"),
                       (2160, 3840, "portrait 4K")]
 FT_SCREENS = "\0ft_screens"
+FT_POWERD = "\0ft_powerd"
+# Steam's default for "When Plugged In and Idle -> Sleep after", to go back to when
+# nothing was saved.
+STEAM_SLEEP_AC_DEFAULT = 3600
 SCALES = [0.75, 1.0, 1.25, 4 / 3, 1.5, 1.75, 2.0]
 ROTATIONS = [("normal", "Landscape"), ("left", "Portrait"), ("right", "Portrait (flipped)")]
 
@@ -83,7 +93,9 @@ def host_command(*cmd):
 class Backend(QObject):
     changed = Signal()
     busyChanged = Signal()
+    powerChanged = Signal()
     message = Signal(str, bool)  # text, is error
+    _steamDone = Signal(object, object, str)  # Steam's sleep settings or None, error or None, what was done
 
     def __init__(self):
         super().__init__()
@@ -95,6 +107,14 @@ class Backend(QObject):
         self._sock.bind("")  # an abstract address ft-screens can reply to
         self._sock.settimeout(1.0)
         self._started = {}  # conf values the running desktop started with
+        self._psock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self._psock.bind("")  # for ft-powerd's replies
+        self._psock.settimeout(0.5)
+        self._powerd = None  # ft-powerd's status: (state, seconds unused, timeout seconds); None: not running
+        self._steam = None  # Steam's sleep settings: {"ac": seconds, "battery": seconds}
+        self._steam_error = ""
+        self._steam_busy = False
+        self._steamDone.connect(self._steam_done, Qt.QueuedConnection)
         self.poll = QTimer(interval=3000, timeout=self._check_running)
         self.poll.start()
         self._check_running()
@@ -120,6 +140,7 @@ class Backend(QObject):
             self._running_count = count
             self._started = self._conf() if running else {}
             self.changed.emit()
+        self._check_powerd()
 
     def _ask_screens(self, text):
         """Request/reply to ft-screens; None if it isn't running."""
@@ -384,6 +405,97 @@ class Backend(QObject):
         reply = self._ask_screens("unpin all") if self._running else None
         if not (reply and reply.startswith("ok")):
             self.message.emit(f"Couldn't unpin: {reply or 'the desktop is not running'}", True)
+
+    # --- power: ft-powerd and Steam's sleep setting ---
+    def _check_powerd(self):
+        try:
+            self._psock.sendto(b"status", FT_POWERD)
+            reply = self._psock.recv(256).decode().split()
+            status = (reply[1], float(reply[2]), float(reply[3])) if reply[:1] == ["ok"] else None
+        except (OSError, IndexError, ValueError):
+            status = None
+        if status != self._powerd:
+            self._powerd = status
+            self.powerChanged.emit()
+
+    @Property("QVariantMap", notify=powerChanged)
+    def power(self):
+        try:
+            off_min = float(ft_layout.read_conf().get("DISPLAY_OFF_MIN") or 0)
+        except ValueError:
+            off_min = 0.0
+        state, unused, _ = self._powerd or ("", 0, 0)
+        return {"offMinutes": off_min, "service": self._powerd is not None, "state": state, "unused": unused,
+                "steam": self._steam is not None, "steamBusy": self._steam_busy, "steamError": self._steam_error,
+                "acSleep": self._steam["ac"] if self._steam else -1,
+                "batterySleep": self._steam["battery"] if self._steam else -1}
+
+    @Slot(float)
+    def setDisplayOffMinutes(self, minutes):
+        """ft-powerd re-reads frametop.conf within 2 s."""
+        write_conf_value("DISPLAY_OFF_MIN", f"{max(0.0, minutes):g}")
+        self.powerChanged.emit()
+
+    @Slot()
+    def displaysOffNow(self):
+        try:
+            self._psock.sendto(b"off", FT_POWERD)
+            reply = self._psock.recv(256).decode()
+        except OSError:
+            reply = "error the power service isn't running"
+        if not reply.startswith("ok"):
+            self.message.emit(f"Couldn't turn the displays off: {reply.split(' ', 1)[-1]}", True)
+        self._check_powerd()
+
+    def _steam_call(self, what, fn):
+        """Runs fn, which talks to Steam (up to a few seconds), off the UI thread, then reads
+        Steam's sleep settings; _steam_done gets them on the UI thread."""
+        if self._steam_busy:
+            return
+        self._steam_busy = True
+        self.powerChanged.emit()
+
+        def work():
+            try:
+                fn()
+                self._steamDone.emit(steam_settings.sleep_settings(), None, what)
+            except (steam_settings.SteamUnreachable, OSError, ValueError) as e:
+                self._steamDone.emit(None, str(e), what)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _steam_done(self, settings, error, what):
+        self._steam_busy = False
+        if settings is not None:
+            self._steam, self._steam_error = settings, ""
+        else:
+            self._steam, self._steam_error = None, error
+            if what:
+                self.message.emit(f"Couldn't change Steam's sleep setting: {error}", True)
+        self.powerChanged.emit()
+
+    @Slot()
+    def refreshPower(self):
+        self._check_powerd()
+        self._steam_call("", lambda: None)
+
+    @Slot(bool)
+    def setStayAwake(self, on):
+        """Steam's "When Plugged In and Idle -> Sleep after" is Never while this is on. The value
+        from before is kept in frametop.conf and goes back when it's turned off."""
+        def change():
+            ac = steam_settings.sleep_settings()["ac"]
+            if on:
+                if ac > 0:
+                    write_conf_value("STEAM_SLEEP_AC_BEFORE", str(ac))
+                steam_settings.set_sleep_setting("system_idle_suspend_ac_sec", 0)
+            elif ac == 0:
+                try:
+                    before = int(ft_layout.read_conf().get("STEAM_SLEEP_AC_BEFORE") or STEAM_SLEEP_AC_DEFAULT)
+                except ValueError:
+                    before = STEAM_SLEEP_AC_DEFAULT
+                steam_settings.set_sleep_setting("system_idle_suspend_ac_sec", before if before > 0 else STEAM_SLEEP_AC_DEFAULT)
+        self._steam_call("stay awake" if on else "sleep", change)
 
     @Slot()
     def restartDesktop(self):

@@ -45,7 +45,7 @@ else
   "$root/scripts/sync.sh" >/dev/null
 fi
 
-step "1/7 distrobox (container tool, installed in your home folder)"
+step "1/8 distrobox (container tool, installed in your home folder)"
 if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 else
@@ -55,21 +55,25 @@ else
 cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
 
-step "2/7 build container (Fedora 44 'dev', about 1-2 GB the first time)"
+step "2/8 build container (Fedora 44 'dev', about 1-2 GB the first time)"
 "$root/setup/dev-container.sh"
 
-step "3/7 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
+step "3/8 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
 "$root/desktops.sh" relay install
 
-step "4/7 3D mouse: SteamVR driver"
+step "4/8 3D mouse: SteamVR driver"
 "$root/pointer/driver/build.sh"
 "$root/pointer/driver/install.sh" install 2>&1 | grep -v xdg-open
 
-step "5/7 3D mouse: pointer helper service"
+step "5/8 3D mouse: pointer helper service"
 "$root/pointer/helper/build.sh"
 "$root/pointer/helper/run.sh" install
 
-step "6/7 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
+step "6/8 power service (turns the displays off while the headset isn't used, even on a stand)"
+"$root/power/build.sh"
+"$root/power/run.sh" install
+
+step "7/8 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
 "$root/screens/build.sh"
 "$root/desktops.sh" install >/dev/null
 "$root/input-settings/install.sh"
@@ -77,7 +81,7 @@ step "6/7 multi-screen desktop (ft-screens), Frametop Input Settings, and Framet
 on_frame "sed -i 's/^POINTER=0/POINTER=1/' ~/.config/frametop.conf; grep -q '^POINTER=' ~/.config/frametop.conf || echo 'POINTER=1' >> ~/.config/frametop.conf"
 echo "the launcher's Desktop entry now opens the multi-screen desktop; 3D mouse on (POINTER=1 in ~/.config/frametop.conf)"
 
-step "7/7 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
+step "8/8 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
 if [ "$bluetooth" = 1 ] && ask "Install the Bluetooth fixes? They need your password (sudo)." n; then
   "$root/setup/bluetooth/install.sh" install
 else
@@ -90,9 +94,10 @@ SteamVR has to restart once, to load the 3D mouse driver and to start the input 
 before it. Restarting SteamVR closes everything open in VR, including this terminal if
 it's in a VR desktop. Rebooting the headset works too.
 
-Recommended: stop Steam from putting the headset to sleep while it's plugged in. In Steam,
-open Settings > Power, and under "When Plugged In and Idle" set "Sleep after" to Never.
-The displays still turn off when you take the headset off.
+Recommended: in Frametop Display Settings > Power, choose when the displays turn off
+while the headset isn't used (for a stand or mount that covers its proximity sensor), and
+turn on Stay awake while plugged in, so Steam doesn't put the headset to sleep while it
+charges. The displays still turn off when you take the headset off.
 EOF
 if ask "Restart SteamVR now?" n; then
   on_frame 'systemctl --user restart steamvr.service'

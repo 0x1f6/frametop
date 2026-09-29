@@ -117,7 +117,7 @@ The session is modeled on SteamOS's `steamos-nested-desktop` and runs beside it.
 
 The VR launcher starts the session from the Steam client, and the client's environment came along: `LD_LIBRARY_PATH` pointing at Steam's own runtime, whose `libavcodec` has no H.264 decoder, so VLC in the desktop couldn't play most videos, plus the client's overlay and launch settings. The session script drops the client's variables before it starts anything. SteamOS's global Mesa settings (`/usr/share/deckard/mesavars.sh`) stay, and the gamescope session's Vulkan layer (`ENABLE_GAMESCOPE_WSI`) is only kept for the gamescope backend.
 
-Steam, not systemd, suspends the Frame: after `system_idle_suspend_ac_sec` (an hour by default) without input on AC power, it logs `Switching to power state: k_ESystemPowerState_Sleep` and suspends, even while charging. It's a Steam setting (Settings → Power → When Plugged In and Idle → Sleep after), so the README recommends setting it to Never. SteamVR's standby, which turns the displays off when the headset comes off, is separate.
+Steam, not systemd, suspends the Frame: after `system_idle_suspend_ac_sec` (an hour by default) without input on AC power, it logs `Switching to power state: k_ESystemPowerState_Sleep` and suspends, even while charging. It's a Steam setting (Settings → Power → When Plugged In and Idle → Sleep after), which the Stay awake while plugged in switch in Frametop Display Settings sets to Never. SteamVR's standby, which turns the displays off when the headset comes off, is separate; see below.
 
 Flatpak apps need `XDG_DATA_DIRS` to include Flatpak's exports, or Plasma opens Discover instead of launching them, so the session sources `/etc/profile.d/flatpak.sh`.
 
@@ -126,6 +126,16 @@ The private runtime directory also moves the session's document portal to `$XDG_
 A podman container's monitor process (conmon) stays in the cgroup of whatever started the container, and `distrobox enter` starts it on demand. When a Frametop service happened to start the `dev` container, stopping that service stopped the container and everything in it, including the desktop's compositor. `scripts/container-up.sh` starts the container in a systemd scope of its own before anything enters it.
 
 Program names stay within 15 characters, because Linux truncates process names there and the scripts find programs with `pgrep -x` and `pkill -x`. That's why the prefix is `ft-`.
+
+## Displays off on a stand
+
+SteamVR decides the headset is off from its proximity sensor, which the driver reads through the DSP, and turns the displays off 5 seconds later. On a display mount that covered the sensor, that never happened: SteamVR kept the headset in use all night (no `entering standby` for device 0 in vrserver.txt, and XRService's user presence stayed at 1), and Steam didn't sleep either, because its idle count treats a present user as active. The battery went from 100% to 12% overnight on a 5 V, 3 A charger, with the headset drawing about 17 W.
+
+There's no client call that puts the headset in standby. The cv driver's `teststandby` debug request (`IVRDebug::DriverDebugRequest`) only answers "Standby unknown hmd" on the Frame. But what the driver does for the displays in standby is write `/sys/class/backlight/ae94000.dsi.0/brightness` ("cv: Set displays off" writes 0, "Set displays on" the old value), and the `video` group can write that file, from the container too. So `ft-powerd` goes by use instead of the sensor and turns the backlight off itself. Tracking and rendering keep running. Turning the backlight off moved the battery current by only about 75 mA (0.5 W), so they're most of the load, but they're also why the displays can wake the moment the headset moves.
+
+Movement is judged within 10-second windows. On the mount, the head pose jittered within 0.5 mm and 0.1 degrees over 20 seconds, and its position drifted 1.7 mm (0.16 degrees) in 4 minutes. Compared with a fixed reference, that drift would count as movement sooner or later and keep the displays on; within 10 seconds it never reaches the 5 mm and 0.5 degree thresholds, and anyone wearing the headset passes them now and then.
+
+Staying awake while charging uses Steam's own setting rather than a logind sleep inhibitor. Steam suspends with `dbus-send ... login1.Manager.Suspend boolean:true`, and a block inhibitor does stop that (`CanSuspend` answers "challenge" while one is held), but it stops the power button too. `system_idle_suspend_ac_sec` is field 24004 of Steam's CMsgClientSettings. In Steam's SharedJSContext, reachable over CDP on port 8080 because Steam runs with `-cef-enable-debugging`, `SteamClient.Settings.SetSetting` takes a change as a base64 protobuf, the way Steam's Power page sends it (0 is never), and `settingsStore.clientSettings` has the current values.
 
 ## Approaches we dropped
 
@@ -140,3 +150,4 @@ Program names stay within 15 characters, because Linux truncates process names t
 - Drawing KWin's cursor on the screens.
 - Plasma can lose its panels when the number of screens goes down, because they're saved against a screen that no longer exists. Removing `plasma-org.kde.plasma.desktop-appletsrc` and `plasmashellrc` from `~/.config/frametop` brings the default panels back.
 - Frame pacing and GPU cost with several busy screens haven't been measured.
+- Real standby on a stand, with rendering and tracking paused, not just the backlight off. SteamVR has no call for it, and its activity level follows the proximity sensor.

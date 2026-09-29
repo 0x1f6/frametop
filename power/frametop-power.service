@@ -1,0 +1,24 @@
+# Template: the installer replaces @REPO@ with the repo path on the Frame.
+[Unit]
+Description=Frametop power: turns the headset's displays off while nobody is using it
+Documentation=file://@REPO@/docs/reference.md
+# Needs SteamVR's IPC; it starts and stops with SteamVR.
+After=steamvr.service
+PartOf=steamvr.service
+
+[Service]
+# Runs in the dev container (built there against its libraries). Start the container in a
+# scope of its own first (see scripts/container-up.sh), and clean up the process explicitly
+# around distrobox enter.
+ExecStartPre=-@REPO@/scripts/container-up.sh
+ExecStartPre=-/usr/bin/pkill -x ft-powerd
+ExecStart=%h/.local/bin/distrobox enter dev -- @REPO@/power/build/ft-powerd
+# SIGTERM makes ft-powerd turn the displays back on before it exits.
+ExecStopPost=-/usr/bin/pkill -x ft-powerd
+Restart=on-failure
+RestartSec=3
+# The container session (conmon) ignores SIGTERM; don't wait 90 s for it.
+TimeoutStopSec=5
+
+[Install]
+WantedBy=steamvr.service
