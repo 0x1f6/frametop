@@ -558,6 +558,12 @@ Kirigami.ApplicationWindow {
                     onTriggered: backend.openGazeProbe()
                 },
                 Kirigami.Action {
+                    text: "Check headset fit…"
+                    icon.name: "view-visible"
+                    tooltip: "How well the eye tracker sees each eye, and where it loses one, while you adjust the headset"
+                    onTriggered: backend.openHeadsetFit()
+                },
+                Kirigami.Action {
                     text: "Reload calibration"
                     icon.name: "view-refresh"
                     enabled: backend.gazeServiceRunning
@@ -645,10 +651,23 @@ Kirigami.ApplicationWindow {
                           : Math.round(gpage.status.rate) + " samples/s"
                             + (gpage.status.one_eye_share > 0.5 ? " · only one eye tracked" : "")
                     color: gpage.status.one_eye_share > 0.5 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
-                    Controls.ToolTip.text: "Only one eye tracked: reseat the headset or check the lenses. It still works, "
-                                           + "probably less precisely."
+                    Controls.ToolTip.text: "Only one eye tracked: the gaze comes from the other eye, a little less "
+                                           + "precisely. Check headset fit… shows where the tracker loses it."
                     Controls.ToolTip.visible: gpage.status.one_eye_share > 0.5 && ghover.hovered
                     HoverHandler { id: ghover }
+                }
+                Controls.Label {
+                    // Share of the last second's samples where the tracker had lost each eye.
+                    property real lostL: gpage.status.lost_left_share || 0
+                    property real lostR: gpage.status.lost_right_share || 0
+                    visible: backend.gazeServiceRunning && gpage.status.lost_left !== undefined
+                    Kirigami.FormData.label: "Eyes:"
+                    text: lostL < 0.05 && lostR < 0.05 ? "both tracked"
+                          : (lostL >= 0.05 ? "left eye lost " + Math.round(lostL * 100) + "%" : "")
+                            + (lostL >= 0.05 && lostR >= 0.05 ? " · " : "")
+                            + (lostR >= 0.05 ? "right eye lost " + Math.round(lostR * 100) + "%" : "")
+                            + ((lostL >= 0.05) !== (lostR >= 0.05) ? " (the other eye stands in)" : "")
+                    color: lostL >= 0.05 || lostR >= 0.05 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
                 }
                 Controls.Label {
                     visible: backend.gazeServiceRunning

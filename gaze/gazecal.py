@@ -2,8 +2,8 @@
 
 The correction models (Correction: the calibration fitted from calibration dots;
 LiveCorrection: what clicks teach on the fly, on top of it), the smoothing filters, the
-blink and dropout filter for one look at a spot, and SteamEyeLog, which follows SteamVR's
-eye tracking log. Angles are head-relative degrees (yaw +left, pitch +up), as ft-gaze
+blink and dropout filter for one look at a spot, EyeFallback (the gaze from one eye while
+the tracker has lost the other), and SteamEyeLog, which follows SteamVR's eye tracking log. Angles are head-relative degrees (yaw +left, pitch +up), as ft-gaze
 reports them.
 """
 
@@ -391,6 +391,90 @@ class LiveCorrection:
         return self.cy[0], self.cp[0]
 
 
+# The tracker's variance for an eye's direction (ft-gaze's "unc"): 0.0005-0.002 while it
+# sees the eye, 0.015-0.03 once it's lost it, falling back through 0.008-0.002 in the 0.1 s
+# after it finds it again.
+EYE_LOST = 0.004
+EYE_FOUND = 0.0025
+
+
+class EyeFallback:
+    """The gaze from one eye, while the tracker has lost the other.
+
+    SteamVR's combined gaze (mmap set 1) keeps going with one eye lost, but badly: it holds
+    the lost eye's yaw where it was and gives it the other eye's pitch, so the gaze moves
+    half as far sideways as the eyes do (seen: the right eye swung 5 degrees, the combined
+    gaze 2.5). Set 2's eyes are each eye's own reading. While both are seen, this learns what
+    each eye reads against the combined gaze (an offset: half the angle between the eyes,
+    plus how differently the tracker reads each), in 10 degree cells of where that eye
+    looks, blended over the four nearest; while one is lost, the other eye plus its offset
+    stands in for the combined gaze. So the rest (fixation lock, calibration, lessons)
+    carries on as if nothing happened.
+
+    On a recording, one eye alone came out 1.1 degrees (median) from both eyes' gaze, 0.8
+    over a tenth of a second of a steady look, and a little more jittery (0.31-0.37 degrees
+    against 0.28). Carrying on the offset from just before a loss did no better: what's
+    left is fast noise, not something particular to that look.
+
+    `update` and `get` take head-relative degrees (yaw, pitch)."""
+
+    CELL = 10.0
+    GLOBAL_RATE = 0.01   # per sample: about a second at 90 Hz
+    CELL_RATE = 0.02     # the least a cell learns per sample, once it has CELL_FULL
+    CELL_FULL = 30       # samples before a cell counts fully
+    READY = 45           # samples of both eyes before an eye can stand in
+
+    def __init__(self):
+        self.glob = [None, None]      # per eye: [oy, op]
+        self.seen = [0, 0]
+        self.cells = [{}, {}]         # per eye: (i, j) -> [oy, op, n]
+
+    def ready(self, eye):
+        return self.seen[eye] >= self.READY
+
+    def update(self, eye, ey, ep, cy, cp):
+        oy, op = cy - ey, cp - ep
+        g = self.glob[eye]
+        if g is None:
+            self.glob[eye] = [oy, op]
+        else:
+            g[0] += self.GLOBAL_RATE * (oy - g[0])
+            g[1] += self.GLOBAL_RATE * (op - g[1])
+        self.seen[eye] += 1
+        key = (math.floor(ey / self.CELL), math.floor(ep / self.CELL))
+        c = self.cells[eye].setdefault(key, [oy, op, 0])
+        c[2] += 1
+        a = max(1.0 / c[2], self.CELL_RATE)
+        c[0] += a * (oy - c[0])
+        c[1] += a * (op - c[1])
+
+    def offset(self, eye, ey, ep):
+        g = self.glob[eye]
+        if g is None:
+            return None
+        # Bilinear over the four cells whose centres surround the point.
+        fy, fp = ey / self.CELL - 0.5, ep / self.CELL - 0.5
+        i0, j0 = math.floor(fy), math.floor(fp)
+        ty, tp = fy - i0, fp - j0
+        sy = sp = used = 0.0
+        for di, wi in ((0, 1 - ty), (1, ty)):
+            for dj, wj in ((0, 1 - tp), (1, tp)):
+                c = self.cells[eye].get((i0 + di, j0 + dj))
+                if c:
+                    w = wi * wj * min(1.0, c[2] / self.CELL_FULL)
+                    sy += w * c[0]
+                    sp += w * c[1]
+                    used += w
+        return sy + (1 - used) * g[0], sp + (1 - used) * g[1]
+
+    def get(self, eye, ey, ep):
+        """The combined gaze from this eye's reading, or None before it has learned enough."""
+        if not self.ready(eye):
+            return None
+        oy, op = self.offset(eye, ey, ep)
+        return ey + oy, ep + op
+
+
 class SteamEyeLog:
     """Follows SteamVR's eye tracking log (read only) for what moves the raw gaze under a
     calibration.
@@ -494,7 +578,8 @@ def cross_validate(points, mode):
 
 def steady_samples(samples, vergence_jump=1.5):
     """The samples of one look at one spot where the tracker had both eyes: none in a blink
-    (openness under half its median over the samples), and none where the angle between the eyes' directions (`lr`, the
+    (openness under half its median over the samples), none where it had lost an eye (its
+    variance over EYE_LOST), and none where the angle between the eyes' directions (`lr`, the
     vergence) is more than `vergence_jump` degrees from its median over the samples. The
     vergence itself depends on distance (about 2.8 degrees for a screen 1.3 m away, a
     fraction of one far off), so only a jump away from what it was during this look means
@@ -513,6 +598,7 @@ def steady_samples(samples, vergence_jump=1.5):
 
     def vergence(smp):
         return (smp["src"].get("mmap1") or {}).get("lr", (smp["src"].get("mmap2") or {}).get("lr"))
+    opened = [smp for smp in opened if max((smp["src"].get("mmap1") or {}).get("unc") or [0]) <= EYE_LOST]
     have = [v for v in map(vergence, opened) if v is not None]
     if len(have) < 5:
         return opened

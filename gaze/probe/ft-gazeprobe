@@ -2,8 +2,8 @@
 """ft-gazeprobe: a playground for eye tracking as pointer input on the Frametop desktop.
 
 Opens fullscreen on one Frametop screen and shows where the headset's eye tracker says
-you're looking, from the three sources ft-gaze reads (SteamVR's eye tracking action and
-the two gaze sets in eye-server.mmap). Three modes:
+you're looking, from the sources ft-gaze reads (SteamVR's eye tracking action, the two
+gaze sets in eye-server.mmap, and each eye alone). The modes:
 
   Free look       the gaze dot; the trigger calibrates wherever you are looking.
   Accuracy test   look at each target and tap the trigger; measures every source's error
@@ -15,6 +15,11 @@ the two gaze sets in eye-server.mmap). Three modes:
                   it; if it's the wrong one, hold, then glance toward the right one or
                   move the mouse, and let go on it. Each click teaches the click
                   corrections (LiveCorrection).
+  Headset fit     how well the tracker sees each eye (fitcheck.py): live per eye, whether
+                  it's tracked, how open it is, and the tracker's confidence, and maps of
+                  where you looked and where each eye got lost, with hints. Enter runs a
+                  guided check (dots around the screen, then down, up, left and right),
+                  R starts over. Adjust the headset while you watch it.
 
 Run calibration: the initial calibration, after Apple Vision Pro's eye setup. One dot,
 then six in a circle, in three rounds that go from a dark to a bright screen (pupil size
@@ -22,8 +27,8 @@ changes with brightness, and the tracker's error with it). Look at each highligh
 and press the trigger. At the end, each source's calibration is fitted from all 21 dots;
 freeze and look refines it on demand after that.
 
-Trigger: Enter, Space, or a mouse button. Tab shows and hides the panel, F11 toggles
-fullscreen, Esc quits.
+Trigger: Enter, Space, or a mouse button. Tab shows and hides the panel, C collapses it to
+its title bar (or its arrow button does), F11 toggles fullscreen, Esc quits.
 
 Freeze and look (the default trigger): the press freezes the dot where the tracker says
 you're looking. Look at the frozen dot. After a moment to settle, the probe averages where
@@ -72,9 +77,13 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
 STATE = Path.home() / ".local" / "state" / "frametop" / "gaze"
-SOURCES = ["action", "mmap1", "mmap2"]
-SOURCE_NAMES = {"action": "SteamVR action", "mmap1": "mmap set 1", "mmap2": "mmap set 2"}
-SOURCE_COLORS = {"action": (0.2, 0.8, 1.0), "mmap1": (1.0, 0.6, 0.1), "mmap2": (0.9, 0.3, 0.9)}
+# left and right: each eye alone (set 2's own reading of that eye), calibrated and tested
+# like the rest, to see what one eye is worth against both.
+SOURCES = ["action", "mmap1", "mmap2", "left", "right"]
+SOURCE_NAMES = {"action": "SteamVR action", "mmap1": "mmap set 1", "mmap2": "mmap set 2", "left": "Left eye",
+                "right": "Right eye"}
+SOURCE_COLORS = {"action": (0.2, 0.8, 1.0), "mmap1": (1.0, 0.6, 0.1), "mmap2": (0.9, 0.3, 0.9),
+                 "left": (0.4, 1.0, 0.6), "right": (1.0, 1.0, 0.4)}
 TRIGGER_KEYS = {Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space}
 
 
@@ -82,6 +91,7 @@ TRIGGER_KEYS = {Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space}
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gazecal import (DEFAULT_MODEL, MODELS, Correction, Fixation, LiveCorrection, OneEuro,  # noqa: E402
                      SteamEyeLog, cross_validate, deg_from_px, px_from_deg, steady_samples)
+from fitcheck import FitCheck  # noqa: E402
 
 
 # --- Gaze from ft-gaze ----------------------------------------------------------------
@@ -414,6 +424,7 @@ class Probe(Adw.ApplicationWindow):
         self.pointer = None
         self.practice = None   # click practice: the press being held (see practice_press)
         self.recent = deque(maxlen=60)  # the last samples, for where you looked at a press
+        self.fitcheck = FitCheck()      # Headset fit: how well the tracker sees each eye
 
         self.models = {s: Correction() for s in SOURCES}
         self.live = {s: LiveCorrection() for s in SOURCES}
@@ -471,8 +482,8 @@ class Probe(Adw.ApplicationWindow):
 
     # --- The context menu (right-click, the Menu key, or Shift+F10) ---
 
-    MODE_KEYS = ["free", "test", "practice", "snap"]
-    MODE_NAMES = ["Free look", "Accuracy test", "Click practice", "Snap practice"]
+    MODE_KEYS = ["free", "test", "practice", "snap", "fit"]
+    MODE_NAMES = ["Free look", "Accuracy test", "Click practice", "Snap practice", "Headset fit"]
 
     def build_menu(self):
         def action(name, fn, state=None):
@@ -501,6 +512,8 @@ class Probe(Adw.ApplicationWindow):
         self.mode_action.connect("activate", lambda a, v: self.set_mode(v.get_string()))
         self.add_action(self.mode_action)
         self.panel_action = action("panel", self.on_panel_toggle, GLib.Variant("b", True))
+        self.collapse_action = action("collapse", lambda a, v: self.set_collapsed(v.get_boolean()),
+                                      GLib.Variant("b", False))
         self.full_action = action("fullscreen", lambda a, v: self.toggle_fullscreen(), GLib.Variant("b", True))
         action("quit", lambda *_: self.close())
 
@@ -527,6 +540,7 @@ class Probe(Adw.ApplicationWindow):
         menu.append_submenu("Correction model", models)
         view = Gio.Menu()
         view.append("Panel", "win.panel")
+        view.append("Collapse panel", "win.collapse")
         view.append("Fullscreen", "win.fullscreen")
         view.append("Quit", "win.quit")
         menu.append_section(None, view)
@@ -655,16 +669,29 @@ class Probe(Adw.ApplicationWindow):
         return s
 
     def build_panel(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.START,
-                      valign=Gtk.Align.START, margin_start=40, margin_top=40)
-        box.add_css_class("probe-panel")
-        box.set_size_request(460, -1)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.START,
+                        valign=Gtk.Align.START, margin_start=40, margin_top=40)
+        panel.add_css_class("probe-panel")
 
-        title = Gtk.Label(label="Gaze probe", xalign=0)
+        # The title bar stays when the panel is collapsed, so the gaze dot isn't lost behind it.
+        head = Gtk.Box(spacing=12)
+        title = Gtk.Label(label="Gaze probe", xalign=0, hexpand=True)
         title.add_css_class("title-2")
-        box.append(title)
-        hint = Gtk.Label(label="Trigger: Enter, Space, or click. Right-click for the menu. Tab hides this panel, Esc quits. "
-                                     "Click the window once so the keys reach it.", xalign=0, wrap=True)
+        head.append(title)
+        self.w_collapse = Gtk.Button(icon_name="pan-up-symbolic", tooltip_text="Collapse the panel (C)")
+        self.w_collapse.connect("clicked", lambda *_: self.set_collapsed(not self.collapsed))
+        head.append(self.w_collapse)
+        panel.append(head)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
+        box.set_size_request(460, -1)
+        self.panel_body = box
+        panel.append(box)
+        # Wrapped labels ask for their whole text on one line, which made the panel as wide
+        # as the screen; max_width_chars keeps it to about the grid's width.
+        hint = Gtk.Label(label="Trigger: Enter, Space, or click. Right-click for the menu. Tab hides this panel, "
+                               "C collapses it, Esc quits. Click the window once so the keys reach it.",
+                         xalign=0, wrap=True, max_width_chars=45)
         hint.add_css_class("dim-label")
         box.append(hint)
 
@@ -740,10 +767,31 @@ class Probe(Adw.ApplicationWindow):
             buttons.append(b)
         box.append(buttons)
 
-        self.w_stats = Gtk.Label(xalign=0, yalign=0, wrap=True, selectable=False)
+        self.w_stats = Gtk.Label(xalign=0, yalign=0, wrap=True, selectable=False, max_width_chars=50)
         self.w_stats.add_css_class("probe-stats")
         box.append(self.w_stats)
-        return box
+        return panel
+
+    @property
+    def collapsed(self):
+        return not self.panel_body.get_visible()
+
+    def set_collapsed(self, collapsed):
+        self.panel_body.set_visible(not collapsed)
+        self.w_collapse.set_icon_name("pan-down-symbolic" if collapsed else "pan-up-symbolic")
+        self.w_collapse.set_tooltip_text("Expand the panel (C)" if collapsed else "Collapse the panel (C)")
+        self.collapse_action.set_state(GLib.Variant("b", collapsed))
+
+    def under_panel(self, x0, y0, x1, y1, margin=20):
+        """Whether a box on the canvas overlaps the panel, collapsed or not."""
+        if not self.panel.get_visible():
+            return False
+        # Collapsed: the title bar. Before the first layout: about the full panel.
+        px, py, pw, ph = (40, 40, 240, 70) if self.collapsed else (40, 40, 520, 960)
+        ok, r = self.panel.compute_bounds(self.area)
+        if ok and r.get_width() > 0:
+            px, py, pw, ph = r.get_x(), r.get_y(), r.get_width(), r.get_height()
+        return x0 < px + pw + margin and px - margin < x1 and y0 < py + ph + margin and py - margin < y1
 
     def place(self):
         """Find the Frametop screens and go fullscreen on the chosen one."""
@@ -843,6 +891,9 @@ class Probe(Adw.ApplicationWindow):
             self.snap = None
         elif not self.snap:
             self.snap_layout()
+        if self.mode == "fit" and getattr(self, "last_mode", None) != "fit" and hasattr(self, "collapse_action"):
+            self.set_collapsed(True)  # the fit check needs the room
+        self.last_mode = self.mode
         if hasattr(self, "mode_action"):
             self.mode_action.set_state(GLib.Variant("s", self.mode))
         self.update_stats()
@@ -860,8 +911,16 @@ class Probe(Adw.ApplicationWindow):
         if keyval == Gdk.KEY_Tab:
             self.panel.set_visible(not self.panel.get_visible())
             return True
+        if keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            self.panel.set_visible(True)
+            self.set_collapsed(not self.collapsed)
+            return True
         if keyval == Gdk.KEY_F11:
             self.toggle_fullscreen()
+            return True
+        if keyval in (Gdk.KEY_r, Gdk.KEY_R) and self.mode == "fit":
+            self.fitcheck.reset()
+            self.area.queue_draw()
             return True
         if keyval == Gdk.KEY_BackSpace and self.mode == "snap":
             self.snap_undo()
@@ -916,6 +975,7 @@ class Probe(Adw.ApplicationWindow):
     def on_sample(self, s):
         self.sample = s
         self.recent.append(s)
+        self.fitcheck.feed(s, time.monotonic())
         self.rate_count += 1
         self.last_arrival = time.monotonic()
         t = s["t"]
@@ -1103,6 +1163,10 @@ class Probe(Adw.ApplicationWindow):
         if self.mode == "practice":
             self.practice_press()
             return
+        if self.mode == "fit":
+            self.fitcheck.toggle_guide(time.monotonic())
+            self.area.queue_draw()
+            return
         if self.action == "freeze":
             if not self.capture:
                 self.start_capture()
@@ -1131,7 +1195,7 @@ class Probe(Adw.ApplicationWindow):
         return self.cursor
 
     def on_release(self):
-        if self.mode == "test":
+        if self.mode in ("test", "fit"):
             return
         if self.mode == "snap":
             self.snap_release()
@@ -1286,8 +1350,8 @@ class Probe(Adw.ApplicationWindow):
         last = self.targets[0] if self.targets else None
         for _ in range(50):
             x, y = random.uniform(margin, w - margin), random.uniform(margin, h - margin)
-            if self.panel.get_visible() and x < 560 and y < 1000:
-                continue  # not under the panel
+            if self.under_panel(x - r, y - r, x + r, y + r):
+                continue
             if not last or math.hypot(x - last[0], y - last[1]) > min(w, h) * 0.25:
                 break
         self.targets = [(x, y, r)]
@@ -1368,8 +1432,8 @@ class Probe(Adw.ApplicationWindow):
                 corners = [(ox, oy), (ox + gw, oy), (ox, oy + gh), (ox + gw, oy + gh)]
                 if any(math.hypot(x - cx, y - cy) > radius * 1.05 for x, y in corners):
                     continue
-                if self.panel.get_visible() and ox < 560 and oy < 1000:
-                    continue  # not under the panel
+                if self.under_panel(ox, oy, ox + gw, oy + gh):
+                    continue
                 if any(ox < b[2] + margin and b[0] < ox + gw + margin and oy < b[3] + margin and b[1] < oy + gh + margin
                        for b in boxes):
                     continue
@@ -2281,9 +2345,13 @@ class Probe(Adw.ApplicationWindow):
         if self.w_cells.get_active() and r and r[5]:
             self.degree_grid(cr, w, h, 1 / r[5])
 
+        if self.mode == "fit":
+            self.fitcheck.draw(cr, w, h, self.text, time.monotonic())
+            if self.fitcheck.guide_step(time.monotonic()):
+                GLib.idle_add(self.area.queue_draw)
         if self.test:
             self.draw_test(cr)
-        if self.results and not self.test and not self.snap:
+        if self.results and not self.test and not self.snap and self.mode != "fit":
             self.draw_results(cr)
         if self.snap:
             self.draw_snap(cr)
@@ -2534,12 +2602,15 @@ def region_errors(targets, source, key="cerr_deg"):
 def main():
     ap = argparse.ArgumentParser(description="Eye tracking playground for the Frametop desktop")
     ap.add_argument("--screen", type=int, default=0, help="Frametop screen to open on (default: where it opens)")
+    ap.add_argument("--mode", choices=Probe.MODE_KEYS, help="start in this mode (fit: Headset fit)")
     args, rest = ap.parse_known_args()
     app = Adw.Application(application_id="dev.frametop.GazeProbe", flags=Gio.ApplicationFlags.NON_UNIQUE)
     windows = []
 
     def activate(a):
         win = Probe(a, args.screen)
+        if args.mode:
+            win.set_mode(args.mode)
         windows.append(win)
         win.present()
 

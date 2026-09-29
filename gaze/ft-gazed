@@ -3,13 +3,20 @@
 
 Runs ft-gaze (in the dev container), and for every eye tracker sample (90 Hz):
 
-  1. drops blinks: both eyes' openness under half its running median (each eye its own).
-     With the default source, mmap set 1, that's all: set 1 is SteamVR's combined gaze,
-     which keeps going when the tracker loses one eye (its two directions stay together).
-     Set 2's combined direction is the mean of the eyes' own, so with one eye lost it's
-     off by half of whatever that eye reads (9 to 14 degrees apart were seen): with set 2,
-     samples with an eye under its floor, or the angle between the eyes jumping more than
-     1.5 degrees from its median, are dropped too;
+  1. drops blinks: both eyes' openness under half its running median (each eye its own),
+     or both lost (the tracker's variance for them, ft-gaze's "unc", over EYE_LOST). With
+     one eye lost or closed, the gaze comes from the other (EyeFallback: that eye's own
+     reading from set 2, plus what it usually reads against the combined gaze, learned
+     while both are seen). SteamVR's combined gaze (set 1) keeps going on one eye too, but
+     holds the lost eye's yaw, so it moves half as far sideways as the eyes do. Before the
+     fallback has learned an eye, set 1 is used as it is; set 2's combined direction is
+     the mean of the eyes' own (off by half of whatever the lost eye reads), so with set 2
+     that sample is dropped, as is one where the angle between the eyes jumps more than
+     1.5 degrees from its median;
+     Looks down past the screens (pitch under KEYBOARD_PITCH, on no Frametop screen: at the
+     keyboard, through the gap by the nose) aren't sent, so the pointer stays where it was
+     instead of following you down; the tracker often loses an eye there (the lids come
+     down), and that isn't counted as a lost eye either;
   2. smooths it with a fixation lock (the running mean of the current fixation, 1 degree);
   3. corrects it: the calibration from ft-gazeprobe (calibration.json, reloaded when the
      probe changes it) plus what the pointer's corrections have taught since (LiveCorrection,
@@ -56,7 +63,8 @@ from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gazecal import DEFAULT_MODEL, MODELS, STATE, Correction, Fixation, LiveCorrection, SteamEyeLog  # noqa: E402
+from gazecal import (DEFAULT_MODEL, EYE_FOUND, EYE_LOST, MODELS, STATE, Correction, EyeFallback,  # noqa: E402
+                     Fixation, LiveCorrection, SteamEyeLog)
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
@@ -67,6 +75,8 @@ LESSONS = STATE / "pointer-lessons.json"
 LESSON_LOG = STATE / "pointer-lessons.jsonl"
 LESSON_MAX = 8.0  # degrees past the correction
 RETRY = 3.0       # seconds before starting ft-gaze again
+SETTLE = 0.3      # seconds after an eye is found again before the fallback learns from it
+KEYBOARD_PITCH = -20.0  # degrees: gaze under this, on no screen, is a look at the keyboard
 
 
 class PointerLessons(LiveCorrection):
@@ -103,7 +113,11 @@ class Service:
         self.fix = Fixation(radius=1.0)
         self.opens = (deque(maxlen=90), deque(maxlen=90))  # left, right
         self.vergence = deque(maxlen=90)
-        self.counts = {"samples": 0, "sent": 0, "blinks": 0, "one_eye": 0, "dropped": 0, "lessons_taken": 0, "refused": 0}
+        self.fallback = EyeFallback()
+        self.lost = [False, False]
+        self.bad_at = [0.0, 0.0]    # sample time an eye was last lost or closed
+        self.counts = {"samples": 0, "sent": 0, "blinks": 0, "one_eye": 0, "one_eye_used": 0, "lost_left": 0,
+                       "lost_right": 0, "looking_down": 0, "dropped": 0, "lessons_taken": 0, "refused": 0}
         self.last_sample = 0.0
         self.last = None
 
@@ -261,21 +275,54 @@ class Service:
                 floor = max(0.12, 0.5 * statistics.median(good)) if len(good) >= 30 else 0.12
                 low[k] = o[k] < floor
                 hist.append(o[k])
-        if all(low):
+        unc = m1.get("unc")
+        down = src["hp"] < KEYBOARD_PITCH and not src.get("hit")
+        if unc and len(unc) == 2:
+            for k in (0, 1):
+                self.lost[k] = unc[k] > (EYE_FOUND if self.lost[k] else EYE_LOST)
+            if not down:
+                self.counts["lost_left"] += self.lost[0]
+                self.counts["lost_right"] += self.lost[1]
+        if down:
+            self.counts["looking_down"] += 1
+            for k in (0, 1):
+                self.bad_at[k] = s["t"]  # the fallback doesn't learn from these either
+            return
+        bad = [low[k] or self.lost[k] for k in (0, 1)]
+        if all(bad):
             self.counts["blinks"] += 1
             return
-        if any(low):
+        hy, hp = src["hy"], src["hp"]
+        eyes = (s["src"].get("mmap2") or {}).get("eyes")
+        for k in (0, 1):
+            if bad[k]:
+                self.bad_at[k] = s["t"]
+        if any(bad):
             self.counts["one_eye"] += 1
-        if self.source == "mmap2":
-            jump = (lr is not None and len(self.vergence) >= 30
-                    and abs(lr - statistics.median(self.vergence)) > 1.5)
-            if lr is not None and not any(low):
-                self.vergence.append(lr)
-            if any(low) or jump:
+            seen = 1 if bad[0] else 0
+            est = self.fallback.get(seen, eyes[seen][0], eyes[seen][1]) if eyes else None
+            if est:
+                hy, hp = est
+                self.counts["one_eye_used"] += 1
+            elif self.source == "mmap2":
                 self.counts["dropped"] += 1
                 return
+        else:
+            if self.source == "mmap2":
+                jump = (lr is not None and len(self.vergence) >= 30
+                        and abs(lr - statistics.median(self.vergence)) > 1.5)
+                if lr is not None:
+                    self.vergence.append(lr)
+                if jump:
+                    self.counts["dropped"] += 1
+                    return
+            # Learn only once both have been seen for a moment: the tracker's filter starts
+            # an eye over when it finds it again.
+            if eyes and s["t"] - max(self.bad_at) > SETTLE:
+                for k in (0, 1):
+                    self.fallback.update(k, eyes[k][0], eyes[k][1], hy, hp)
         # The fixation lock works in degrees here (1 degree per "pixel").
-        fy, fp = self.fix(src["hy"], src["hp"], s["t"], 1.0)
+        fy, fp = self.fix(hy, hp, s["t"], 1.0)
         cy, cp = self.correction(fy, fp)
         self.last = (fy + cy, fp + cp, fy, fp)
         try:
@@ -327,7 +374,8 @@ class Service:
                 "lessons": len(self.live.samples), "lesson_offset": [round(ly, 3), round(lp, 3)],
                 "ft_gaze": self.proc is not None, "sample_age_s": round(time.monotonic() - self.last_sample, 2)
                 if self.last_sample else None, "headset_on": self.steam.wearing(), "headset_on_since": self.steam.worn(),
-                "last": [round(v, 2) for v in self.last] if self.last else None, **self.counts}
+                "last": [round(v, 2) for v in self.last] if self.last else None,
+                "eyes_lost": self.lost, "fallback_ready": [self.fallback.ready(0), self.fallback.ready(1)], **self.counts}
 
     def periodic(self):
         if self.steam.poll() or self.steam.worn() != self.live.wear_time:

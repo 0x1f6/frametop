@@ -541,9 +541,12 @@ class Backend(QObject):
             n = status["samples"] - prev[1]["samples"]
             status["rate"] = n / (now - prev[0])
             status["one_eye_share"] = (status["one_eye"] - prev[1]["one_eye"]) / n if n else 0.0
+            for key in ("lost_left", "lost_right"):
+                if key in status and key in prev[1]:
+                    status[key + "_share"] = (status[key] - prev[1][key]) / n if n else 0.0
         elif self._gaze:
-            status.setdefault("rate", self._gaze.get("rate"))
-            status.setdefault("one_eye_share", self._gaze.get("one_eye_share"))
+            for key in ("rate", "one_eye_share", "lost_left_share", "lost_right_share"):
+                status.setdefault(key, self._gaze.get(key))
         if not prev or now - prev[0] > 0.5:
             self._gaze_prev = (now, status)
         self._gaze = status
@@ -604,13 +607,21 @@ class Backend(QObject):
     @Slot()
     def openGazeProbe(self):
         """Calibrate in ft-gazeprobe (a GTK app on the host, fullscreen on a Frametop screen)."""
+        self._open_probe([], "Opening the gaze probe: calibrate there, then close it")
+
+    @Slot()
+    def openHeadsetFit(self):
+        """The probe's Headset fit mode: how well the tracker sees each eye, as you adjust."""
+        self._open_probe(["--mode", "fit"], "Opening the headset fit check in the gaze probe")
+
+    def _open_probe(self, args, done):
         runner = ["distrobox-host-exec"] if shutil.which("distrobox-host-exec") else []
         env = [f"{k}={os.environ[k]}" for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")
                if os.environ.get(k)]
         try:
-            subprocess.Popen(runner + ["env"] + env + [GAZE_PROBE], stdin=subprocess.DEVNULL,
+            subprocess.Popen(runner + ["env"] + env + [GAZE_PROBE] + args, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            self.message.emit("Opening the gaze probe: calibrate there, then close it", False)
+            self.message.emit(done, False)
         except OSError as e:
             self.message.emit(f"Couldn't open the gaze probe: {e}", True)
 

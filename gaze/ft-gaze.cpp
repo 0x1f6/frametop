@@ -8,13 +8,24 @@
 //
 //   {"t":<sample time, CLOCK_MONOTONIC_RAW s>,"age":<ms old when read>,"n":<sample counter>,
 //    "head":{"yaw":..,"pitch":..,"hit":HIT},          head forward ray (for head nudging)
-//    "src":{"action":SRC,"mmap1":SRC,"mmap2":SRC}}
+//    "src":{"action":SRC,"mmap1":SRC,"mmap2":SRC,"left":SRC,"right":SRC},"eye":EYE}
 //   SRC = {"hy":..,"hp":..,"hit":HIT} or {"ok":0}    hy/hp: gaze direction relative to the
 //                                                     head, degrees (yaw +left, pitch +up)
 //         mmap1 adds "open":[l,r] (probably eye openness, 0 in a blink) and "dist" (vergence
 //         distance, m); both mmap sets add "lr", the angle between the eyes (deg), which
 //         jumps when the tracker loses an eye, and "eyes":[[hy,hp],[hy,hp]], each eye's own
-//         direction (left, right), for calibrating the eyes separately.
+//         direction (left, right), for calibrating the eyes separately, and "unc":[l,r],
+//         the tracker's uncertainty about each eye's direction (its filter's variance):
+//         about 0.0005-0.002 while it sees the eye, 0.015-0.03 once it's lost it.
+//    "left":SRC,"right":SRC                           each eye's own direction from set 2
+//         (set 1's eyes always share one pitch, and while it's lost an eye it keeps that
+//         eye's yaw where it was: set 2 is each eye's own reading). From the head's origin,
+//         not the eye's.
+//   EYE = {"q":[l,r],"m":[[x,y],[x,y]],"new":[l,r]}  the tracker's latest measurement of
+//         each eye before filtering: "m" (camera-relative, undocumented units), "q" its
+//         variance (about 2e-5 on a clear view of the eye, rising as the lid or lashes get
+//         in the way), "new" whether it changed since the last sample (it freezes while the
+//         tracker can't see that eye, and in blinks). "eye" is null without the mmap.
 //   HIT = {"s":<screen>,"x":..,"y":..,"j":[dx/dhy,dy/dhy,dx/dhp,dy/dhp],"dpp":<deg per px>}
 //         or null. x, y are pixels on that screen; j is pixels per degree of head-relative
 //         yaw and pitch there, so a correction in degrees can be turned into pixels and back.
@@ -78,7 +89,13 @@ constexpr size_t kLeft1 = 0x15f, kRight1 = 0x16b;  // set 1: unit vectors, head 
 constexpr size_t kFix1 = 0x18f;    // set 1 fixation point: length is the vergence distance (m)
 constexpr size_t kLeft2 = 0x19b, kRight2 = 0x1a7;  // set 2
 constexpr size_t kOpen = 0x1cb;    // two floats, 0..1: probably eye openness or confidence
-constexpr size_t kNeed = 0x1d3;
+// After each set's two directions, six floats: the left eye's variance (three), the
+// right's (three; the middle one of each is shared). They jump when an eye is lost.
+constexpr size_t kVar1 = 0x177, kVar2 = 0x1b3;
+// The measurements the filter is fed: left x, y, right x, y, then the variance of each (left
+// x, y, right x, y). An eye's pair stops changing while the tracker can't see it.
+constexpr size_t kMeas = 0x1d3;
+constexpr size_t kNeed = 0x1f3;
 
 struct EyeFile {
     const uint8_t *p = nullptr;
@@ -115,6 +132,7 @@ struct EyeSample {
     double t = 0;
     Vec3 left1, right1, fix1, left2, right2;
     float open[2] = {0, 0};
+    float var1[6] = {}, var2[6] = {}, meas[8] = {};
 };
 
 // A consistent copy: the writer has no seqlock we can use, so read until the counter and
@@ -127,6 +145,9 @@ bool ReadSample(const EyeFile &f, EyeSample &s) {
         s.left1 = f.V(kLeft1), s.right1 = f.V(kRight1), s.fix1 = f.V(kFix1);
         s.left2 = f.V(kLeft2), s.right2 = f.V(kRight2);
         std::memcpy(s.open, f.p + kOpen, sizeof s.open);
+        std::memcpy(s.var1, f.p + kVar1, sizeof s.var1);
+        std::memcpy(s.var2, f.p + kVar2, sizeof s.var2);
+        std::memcpy(s.meas, f.p + kMeas, sizeof s.meas);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (f.Get<uint32_t>(kCounter) == n0 && f.Get<double>(kTime) == t0) {
             s.n = n0, s.t = t0;
@@ -377,6 +398,7 @@ int main(int argc, char **argv) {
     screens.Start();
     PoseHistory history;
     uint32_t lastN = 0;
+    float lastMeas[8] = {};
     double lastEmit = 0;
     int actionErrors = 0;
     vr::EVRInputError lastActionError = vr::VRInputError_None;
@@ -423,7 +445,7 @@ int main(int argc, char **argv) {
                 lastActionError = ae;
             }
 
-            std::string m1 = "{\"ok\":0}", m2 = m1;
+            std::string m1 = "{\"ok\":0}", m2 = m1, left = m1, right = m1, eye = "null";
             if (haveMmap) {
                 // lr: the angle between the two eyes' directions. It's a fraction of a degree
                 // normally; when the tracker loses one eye (or during a blink) it jumps.
@@ -438,12 +460,26 @@ int main(int argc, char **argv) {
                     std::snprintf(b, sizeof b, "\"eyes\":[[%.4f,%.4f],[%.4f,%.4f]],", ly, lp, ry, rp);
                     return std::string(b);
                 };
-                char extra[128];
+                auto unc = [](const float *v) {
+                    char b[64];
+                    std::snprintf(b, sizeof b, "\"unc\":[%.5f,%.5f],", std::max(v[0], v[2]), std::max(v[3], v[5]));
+                    return std::string(b);
+                };
+                char extra[256];
                 std::snprintf(extra, sizeof extra, "\"dist\":%.3f,\"open\":[%.3f,%.3f],\"lr\":%.3f,", Length(s.fix1),
                               s.open[0], s.open[1], lr(s.left1, s.right1));
-                m1 = SrcJson(list, headThen, s.left1 + s.right1, extra + eyes(s.left1, s.right1));
+                m1 = SrcJson(list, headThen, s.left1 + s.right1, extra + eyes(s.left1, s.right1) + unc(s.var1));
                 std::snprintf(extra, sizeof extra, "\"lr\":%.3f,", lr(s.left2, s.right2));
-                m2 = SrcJson(list, headThen, s.left2 + s.right2, extra + eyes(s.left2, s.right2));
+                m2 = SrcJson(list, headThen, s.left2 + s.right2, extra + eyes(s.left2, s.right2) + unc(s.var2));
+                left = SrcJson(list, headThen, s.left2);
+                right = SrcJson(list, headThen, s.right2);
+                const float *m = s.meas;
+                const bool newL = m[0] != lastMeas[0] || m[1] != lastMeas[1];
+                const bool newR = m[2] != lastMeas[2] || m[3] != lastMeas[3];
+                std::memcpy(lastMeas, m, sizeof lastMeas);
+                std::snprintf(extra, sizeof extra, "{\"q\":[%.3g,%.3g],\"m\":[[%.4f,%.4f],[%.4f,%.4f]],\"new\":[%d,%d]}",
+                              (m[4] + m[5]) / 2, (m[6] + m[7]) / 2, m[0], m[1], m[2], m[3], int(newL), int(newR));
+                eye = extra;
             }
 
             double yaw, pitch;
@@ -451,9 +487,9 @@ int main(int argc, char **argv) {
             yaw = std::atan2(-f.x, -f.z) * 180 / M_PI;
             pitch = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
             std::printf("{\"t\":%.5f,\"age\":%.1f,\"n\":%u,\"head\":{\"yaw\":%.4f,\"pitch\":%.4f,\"hit\":%s},"
-                        "\"src\":{\"action\":%s,\"mmap1\":%s,\"mmap2\":%s}}\n",
+                        "\"src\":{\"action\":%s,\"mmap1\":%s,\"mmap2\":%s,\"left\":%s,\"right\":%s},\"eye\":%s}\n",
                         s.t, (now - s.t) * 1000, s.n, yaw, pitch, HitJson(list, headNow, 0, 0).c_str(), action.c_str(),
-                        m1.c_str(), m2.c_str());
+                        m1.c_str(), m2.c_str(), left.c_str(), right.c_str(), eye.c_str());
             if (std::fflush(stdout) != 0) break;  // the reader went away
         }
 
