@@ -18,6 +18,7 @@ ft-screens drops keys while no screen has focus or the SteamVR dashboard is open
 
 - **A release that never arrives leaves the key held in the desktop.** KWin repeats held keys itself, so a stuck letter repeats and a stuck modifier changes every later key (Ctrl+Alt held turns T into Konsole). Pressing and releasing the key again clears it.
 - **A keyboard that disconnects mid-press is one way to get there.** The relay forgets the held key without telling ft-screens. The same goes for the relay restarting while a key is down.
+- **To see where a key went,** run `scripts/keys-report.py` and reproduce the problem while it records. It logs the modifiers, Tab, and Esc (no other keys) as the relay reads them and as its virtual keyboard sends them on, with the device roles and grabs, which programs have each keyboard open, and the relay's and desktop's logs.
 - **Switching where typing goes waits for keys to come up.** The relay changes a keyboard's grab only while none of its keys are down, so a press and its release go to the same side. A key held for a long time delays the switch until it's let go.
 
 ## Typing and grabbed keyboards
