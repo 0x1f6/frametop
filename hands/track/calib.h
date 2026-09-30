@@ -1,4 +1,4 @@
-// Tracking-camera calibration from the headset's factory files (see tracker/calib.py
+// Tracking-camera calibration from the headset's factory files (see tools/calib.py
 // for the conventions): Kannala-Brandt fisheye intrinsics, and each camera's pose in the
 // head frame (OpenVR's: +x right, +y up, -z forward), metres.
 #pragma once
@@ -27,8 +27,8 @@ struct Camera {
 // name: slam_left, slam_right, upper_left, upper_right.
 bool load_calibration(std::map<std::string, Camera> &out, std::string &err);
 
-// The Arcturus color cameras (tracker/calib.py load_color has the conventions), for
-// fh-camd --with-color's images: luma at 1/scale size, recorded as color_video<N>. They're
+// The Arcturus color cameras (tools/calib.py load_color has the conventions), for
+// ft-camd --with-color's images: luma at 1/scale size, recorded as color_video<N>. They're
 // keyed by those recorded names: left_node is passthrough_left, right_node
 // passthrough_right. crop_subtract: image x = sensor x - the calibration's cropRegion.x.
 // tools/check_color.py tells which node is which and which crop reading fits.

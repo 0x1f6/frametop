@@ -2,6 +2,7 @@
 #include "calib.h"
 
 #include <json/json.h>
+#include <unistd.h>
 
 #include <algorithm>
 
@@ -91,10 +92,13 @@ V2 Camera::project(V3 head, double *depth) const {
 
 double Camera::off_axis(V2 uv) const { return std::acos(std::clamp(unproject(uv)[2], -1.0, 1.0)) * 180 / M_PI; }
 
-// Off the Frame (frame-job on the 7i), the /persist files are copies under FRAME_JOB_DEVICE_ROOT.
+// A headset file such as /persist/xrservice.json. In the dev container the host's / is at
+// /run/host (distrobox doesn't mount /persist); off the Frame, FRAME_JOB_DEVICE_ROOT can
+// point at a folder with copies of them.
 static std::string device_path(const char *path) {
-    const char *root = std::getenv("FRAME_JOB_DEVICE_ROOT");
-    return root ? std::string(root) + path : std::string(path);
+    if (const char *root = std::getenv("FRAME_JOB_DEVICE_ROOT")) return std::string(root) + path;
+    const std::string host = std::string("/run/host") + path;
+    return access(path, R_OK) != 0 && access(host.c_str(), R_OK) == 0 ? host : path;
 }
 
 bool load_calibration(std::map<std::string, Camera> &out, std::string &err) {

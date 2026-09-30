@@ -1,7 +1,7 @@
-// fh-replay: run a recording (fh-tracker --record) through the tracker offline, with the
+// ft-handreplay: run a recording (ft-hands --record) through the tracker offline, with the
 // live scheduling, and report how well it kept the hands.
 //
-//   fh-replay DIR [--oracle N] [--slow F] [--timeline FILE] [--threads N] [--models DIR]
+//   ft-handreplay DIR [--oracle N] [--slow F] [--timeline FILE] [--threads N] [--models DIR]
 //             [--from S] [--to S] [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch)
 //
 // --oracle N: every N-th set, also search every tile of every camera (slow), to see
@@ -13,14 +13,14 @@
 // --timeline: per processed set, a line per hand (time, id, side, views, wrist) and per view
 //             (hand, camera, presence, next crop, set index).
 // --keep-presence P: landmark presence a tracked view needs to stay (default 0.5, as new ones).
-// --pinch-begin M, --pinch-end M, --pinch-triangulated: the pinch detector (trackd/pinch.h);
+// --pinch-begin M, --pinch-end M, --pinch-triangulated: the pinch detector (track/pinch.h);
 //             the timeline gets its begin/end/lost events and both distance measures per set.
 // --cams mono|color|all: which cameras to track with (default mono). color and all need a
-//             recording made with fh-camd --with-color; --color-left NODE (color_video0 or
+//             recording made with ft-camd --with-color; --color-left NODE (color_video0 or
 //             color_video3) and --color-crop subtract|none say how its calibration maps
 //             (tools/check_color.py).
 // --contrast: how the palm search's and the landmark model's crops are equalized
-//             (default clahe:2/none, as fh-tracker).
+//             (default clahe:2/none, as ft-hands).
 // --depth FILE: per processed set, a line per hand for tools/depth_report.py: its views'
 //             cameras, triangulation residual, hand scale, measured and published palm, and
 //             each view's one-view palm (Tracker::single_view at the hand's scale). The
@@ -66,11 +66,11 @@ int main(int argc, char **argv) {
     int oracle = 0, threads = 2;
     double slow = 1.0, from = 0, to = 1e9;
     bool cost = false;
-    Contrast palm_contrast, hand_contrast{Contrast::None};   // as fh-tracker's
+    Contrast palm_contrast, hand_contrast{Contrast::None};   // as ft-hands's
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
     PinchParams pinch_params;
     std::string use = "mono", color_left = "color_video0", color_crop = "subtract";
-    std::string timeline, depth, models =std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
+    std::string timeline, depth, models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         const bool more = i + 1 < argc;
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
         std::vector<std::string> nodes;
         for (auto &c : cams)
             if (std::string(c.name).rfind("color_video", 0) == 0) nodes.push_back(c.name);
-        if (nodes.size() != 2) return std::fprintf(stderr, "%s: no color cameras (fh-camd --with-color)\n", dir.c_str()), 1;
+        if (nodes.size() != 2) return std::fprintf(stderr, "%s: no color cameras (ft-camd --with-color)\n", dir.c_str()), 1;
         const std::string right = nodes[0] == color_left ? nodes[1] : nodes[0];
         if (!load_color_calibration(calib, color_left, right, color_crop == "subtract", 2, err))
             return std::fprintf(stderr, "%s\n", err.c_str()), 1;

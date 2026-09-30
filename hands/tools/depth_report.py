@@ -2,13 +2,13 @@
 
 usage: python3 tools/depth_report.py DEPTH [DEPTH...] [--still M/S]
 
-DEPTH comes from `trackd/fh-replay DIR --depth DEPTH`. Every measure is split by how the
+DEPTH comes from `hands/build/ft-handreplay DIR --depth DEPTH`. Every measure is split by how the
 hand was seen: by the two lower cameras ("lower pair"), by a lower and an upper camera on
 one side ("lower+upper"), or by one camera. Distances are from the head (between the eyes).
 
 1. How the hands were seen: the share of hand updates in each way, by distance.
 2. Noise along the line of sight against across it. Each update's palm is compared with a
-   straight line through the two updates before it (fh-replay's jitter measure), and the
+   straight line through the two updates before it (ft-handreplay's jitter measure), and the
    miss is split along the line from the hand's cameras to the palm and across it. Given
    as a robust sigma per axis, measured (as triangulated) and published (after the One Euro
    filter), on updates where the published palm moved slower than --still (default 0.15
@@ -20,7 +20,7 @@ one side ("lower+upper"), or by one camera. Distances are from the head (between
    distance from that camera.
 4. A camera lost: from two-camera updates, what the tracker would have had if one of the
    two cameras dropped out there. It keeps the last distance and moves a share of the way
-   to the one-view guess each update (0.1 now, kMonoDepthGain in trackd/tracker.cpp);
+   to the one-view guess each update (0.1 now, kMonoDepthGain in track/tracker.cpp);
    also shown with other shares, 0 (keep the distance) and 1 (take each guess), and with
    the guess first scaled by how far off it was while both cameras saw the hand. Compared with the
    triangulated distance from that camera, 0.1-2 s after the loss.

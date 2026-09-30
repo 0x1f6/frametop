@@ -1,5 +1,4 @@
-// MediaPipe's palm detector and hand landmark model on ncnn (see tracker/models.py for
-// the conventions). A crop is a square region of a camera image: centre and size in
+// MediaPipe's palm detector and hand landmark model on ncnn. A crop is a square region of a camera image: centre and size in
 // pixels, and a rotation that turns the crop's "up" toward the image direction
 // (sin r, -cos r). Crops are contrast-equalized (CLAHE) before the models see them.
 // Everything here may run on several threads at once.

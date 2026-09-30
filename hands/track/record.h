@@ -1,5 +1,5 @@
 // Recordings of frame sets, for replaying live sessions through the tracker offline
-// (fh-replay). A recording is DIR/sets.bin: one record per frame set, each
+// (ft-handreplay). A recording is DIR/sets.bin: one record per frame set, each
 //   fh_set_hdr_t, then per camera fh_set_cam_t, then each camera's pixels (w x h, packed)
 // in the same camera order.
 #pragma once

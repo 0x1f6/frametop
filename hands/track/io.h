@@ -1,4 +1,4 @@
-// Frames in from fh-camd's ring (camd/fhring.h), hands out to the hands file
+// Frames in from ft-camd's ring (camd/fhring.h), hands out to the hands file
 // (include/fh_hands.h, read by Frametop's ft-screens).
 #pragma once
 
@@ -44,3 +44,8 @@ private:
 
 uint64_t mono_ns();
 int64_t raw_minus_mono_ns();   // camera timestamps are CLOCK_MONOTONIC_RAW
+
+// /run/user/UID/frametop, created private to the user if it's missing: where ft-camd's ring
+// (FH_RING_NAME) and the hands and gestures files live. Not $XDG_RUNTIME_DIR: a terminal in
+// the Frametop desktop has a private one of its own.
+std::string run_dir();

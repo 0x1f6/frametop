@@ -434,7 +434,7 @@ static bool scan_xr_fds(pid_t pid, char *err, size_t errn)
         } else if (strncmp(target, "/dev/video", 10) == 0) {
 
             ent.kind = FD_VIDEO;
-            snprintf(ent.path, sizeof(ent.path), "%s", target);
+            snprintf(ent.path, sizeof(ent.path), "%.63s", target);
 
         } else if (strncmp(target, "/dev/v4l-subdev", 15) == 0) {
 

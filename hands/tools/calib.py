@@ -13,6 +13,7 @@ the image.
 Everything here returns metres in the head frame.
 """
 import json
+import os
 
 import numpy as np
 
@@ -91,11 +92,23 @@ class Camera:
         return np.degrees(np.arccos(np.clip(self.unproject(uv)[:, 2], -1, 1)))
 
 
+def device_path(path):
+    """A headset file such as /persist/xrservice.json. In the dev container the host's / is
+    at /run/host (distrobox doesn't mount /persist); off the Frame, FRAME_JOB_DEVICE_ROOT can
+    point at a folder with copies of them."""
+    root = os.environ.get('FRAME_JOB_DEVICE_ROOT')
+    if root:
+        return root + path
+    if not os.access(path, os.R_OK) and os.access('/run/host' + path, os.R_OK):
+        return '/run/host' + path
+    return path
+
+
 def load(xrservice=XRSERVICE_JSON, device=DEVICE_JSON):
     """{calibration name: Camera} for the tracking cameras, posed in the head frame."""
-    with open(xrservice) as f:
+    with open(device_path(xrservice)) as f:
         rig = json.load(f)
-    with open(device) as f:
+    with open(device_path(device)) as f:
         dev = json.load(f)
     cad_from_cam0 = _pose(dev['cv']['cad_from_cal'])
     head_from_cad = np.linalg.inv(_pose(dev['head']))
@@ -110,18 +123,18 @@ def load(xrservice=XRSERVICE_JSON, device=DEVICE_JSON):
 
 def load_color(eeprom=ARCTURUS_EEPROM, device=DEVICE_JSON, scale=2, crop='subtract'):
     """{"passthrough_left"/"passthrough_right": Camera} for the Arcturus color cameras, posed in
-    the head frame, for fh-camd --with-color's images (luma at 1/scale size).
+    the head frame, for ft-camd --with-color's images (luma at 1/scale size).
 
     Their calibration is in the CAD frame (mm) with pixel coordinates on the full 2464x2464
     sensor; each camera also has a cropRegion. crop says how that maps to the delivered
     image: 'subtract' (image x = sensor x - cropRegion.x) or 'none'. tools/check_color.py
     tells which fits.
     """
-    with open(eeprom, 'rb') as f:
+    with open(device_path(eeprom), 'rb') as f:
         raw = f.read()
     i = raw.rfind(b'{', 0, raw.find(b'"alignment_method"'))
     rig, _ = json.JSONDecoder().raw_decode(raw[i:].decode('latin1'))
-    with open(device) as f:
+    with open(device_path(device)) as f:
         dev = json.load(f)
     head_from_cad = np.linalg.inv(_pose(dev['head']))
     cams = {}

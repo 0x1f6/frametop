@@ -1,13 +1,13 @@
 """Check that the side cameras' images carry the right names (slam_left vs slam_right).
 
 usage: python tools/check_sides.py REC_DIR [--sets N]
-       python tools/check_sides.py --ring [--sets N]    (live, from fh-camd's ring)
+       python tools/check_sides.py --ring [--sets N]    (live, from ft-camd's ring)
 
-With --ring it exits 0 when the names are right, 3 when they're swapped (run fh-tracker
+With --ring it exits 0 when the names are right, 3 when they're swapped (run ft-hands
 with --swap-sides), and 2 when it can't tell (too little texture in view, or the headset
 isn't worn).
 
-fh-camd tells the two side cameras' buffers apart by the order XRService allocated them,
+ft-camd tells the two side cameras' buffers apart by the order XRService allocated them,
 and after some XRService restarts that order puts each camera's images under the other's
 name. The tracker then sees every hand in one camera only, at the wrong depth. This
 matches features between the two images and measures how close each pair's rays pass
@@ -23,15 +23,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from tools.show_set import index, read_set  # noqa: E402
-from tracker import calib  # noqa: E402
+from tools import calib  # noqa: E402
 
 
-PIPES = {'msm_vfe3_video0': 'slam_left', 'msm_vfe4_video0': 'slam_right'}   # as fh-tracker maps them
+PIPES = {'msm_vfe3_video0': 'slam_left', 'msm_vfe4_video0': 'slam_right'}   # as ft-hands maps them
 
 
 def load_cams():
-    root = os.environ.get('FRAME_JOB_DEVICE_ROOT', '')   # frame-job's copy of /persist off the Frame
-    return calib.load(root + calib.XRSERVICE_JSON, root + calib.DEVICE_JSON)
+    return calib.load()
 
 
 def matches(a, b):
@@ -80,12 +79,12 @@ def recorded_pairs(rec, count):
 
 
 def live_pairs(count):
-    """(label, slam_left image, slam_right image) from fh-camd's ring, half a second apart."""
+    """(label, slam_left image, slam_right image) from ft-camd's ring, half a second apart."""
     import time
-    from tracker.ring import Ring
+    from tools.ring import Ring
     ring = Ring()
     if not ring.alive():
-        sys.exit('fh-camd isn\'t running (no heartbeat)')
+        sys.exit('ft-camd isn\'t running (no heartbeat)')
     cams = {}
     for c in ring.cams:
         name = PIPES.get(open('/sys/class/video4linux/video%d/name' % c.node).read().strip())

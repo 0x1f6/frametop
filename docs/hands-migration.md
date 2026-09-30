@@ -4,6 +4,21 @@ Hand tracking from the headset's own cameras has been built as a separate projec
 
 Builds from this worktree must sync to their own folder on the Frame, never `~/dev/frametop`: run every script with `FRAME_REPO=/home/steamos/dev/frametop-hands`.
 
+## Status (2026-09-30)
+
+Steps 1-5 are done:
+
+- frame-hands' pending work was committed there (6c63c9e).
+- Its filtered history was merged under `hands/` (1a76d15), then laid out (`trackd/` to `track/`).
+- The renames, the Frametop paths, and ft-camd's file capabilities are done. So are `hands/Makefile`, `build.sh`, `run.sh`, the two units, the README, the settings, the installer step, and ft-screens on the shared header.
+- Built in the dev container on the Frame, and on the 7i.
+- Checked without the headset:
+  - `ft-handreplay` against frame-hands' `fh-replay`, both x86 with `--cost`, on the whole dim recording and the first 60 s of the bright one: identical summaries and byte-identical depth dumps. The Makefile's own ncnn build is included in that.
+  - `ft-ringplay` into `ft-hands` on the 7i tracked, pinched, and wrote `/run/user/UID/frametop/{hands,gestures}`.
+  - On the Frame, ft-hands in the container finds the calibration through `/run/host/persist`, and ft-camd without its capabilities refuses with a clear message.
+
+Next is step 6, with the user: `hands/run.sh install` (sudo setcap), then a desktop restart from this branch so ft-screens reads the new path.
+
 ## What frame-hands is today
 
 | Part | What it is | Size |
@@ -34,9 +49,10 @@ hands/
   frametop-hands.service
   include/                  # fhring.h, fh_hands.h, fh_gestures.h: shared with screens/ and pointer/
   camd/                     # ft-camd: camd.c tp.c xrcams.c, LICENSE.FrameEyeCameraFeed
-  track/                    # ft-hands: tracker, nets, calib, pinch, publish, record
+  track/                    # ft-hands: tracker, nets, calib, pinch, publish, record; replay.cpp
+                            #   (ft-handreplay) and ringplay.cpp (ft-ringplay) for recordings
   models/                   # the ncnn models, with NOTICE (Apache-2.0, MediaPipe / OpenCV Zoo)
-  tools/                    # ft-handreplay, ft-ringplay, the Python checks, watch_gestures
+  tools/                    # the Python checks, watch_gestures, depth_report, calib.py, ring.py
 ```
 
 Left behind in frame-hands, which stays as the lab: the recordings, the Python prototype (the tools that need `calib.py` or `models.py` get a trimmed copy in `hands/tools/`), `probes/`, `notes/`, `re/`, `shim/`, `camprobe`, and `vendor/`. The reverse-engineering notes don't belong in a public repo, and recordings are images of the user's hands and room, so they never go into git.
@@ -59,7 +75,7 @@ The source keeps its `fh_` identifiers and header names (`fh_hands.h`, `fh_gestu
 
 - `hands/build.sh` builds in the dev container through `scripts/frame.sh --build`, into `hands/build/`, like the other components. `FRAME_BUILDER=pc` can take the ncnn build.
 - ncnn: fetched at a pinned tag (20260526, as now) into `hands/build/ncnn` and built once, the way `screens/build.sh` fetches the OpenVR header, with frame-hands' options so results match. `NCNN=` points the build at an existing install instead. Every net runs single-threaded (`num_threads = 1`), with the tracker spreading nets over its own pinned threads, so OpenMP could go later.
-- ft-hands runs in the dev container like ft-pointer and ft-powerd (`distrobox enter dev --`, after `scripts/container-up.sh`). Today's fh-tracker runs on the host and works only because the host happens to have the same `libjsoncpp.so.25` and libgomp as the container. The calibration moves from `/persist` to `/run/host/persist` inside the container. calib.cpp already takes a prefix for this (`FRAME_JOB_DEVICE_ROOT`, to be renamed).
+- ft-hands runs in the dev container like ft-pointer and ft-powerd (`distrobox enter dev --`, after `scripts/container-up.sh`). Today's fh-tracker runs on the host and works only because the host happens to have the same `libjsoncpp.so.25` and libgomp as the container. Inside the container the calibration is at `/run/host/persist`, and calib.cpp (and `tools/calib.py`) fall back to it when `/persist` isn't there.
 - ft-camd has to run on the host (below), so it's linked statically (only libc and libm; `glibc-static` goes into `setup/dev-container.sh`). The host has an older glibc than the container.
 
 ## Running it
@@ -73,9 +89,9 @@ Either way the password is needed once at install, through the same `sudo -S` pa
 
 **ft-hands** is a user unit, `frametop-hands.service`: after `frametop-camd.service`, `PartOf=steamvr.service`, nice 5, model threads on CPUs 5-7 (measured best on 2026-09-29).
 
-**Settings** in `~/.config/frametop.conf`: `HANDS=0|1` (off by default until it's ready for others), `HANDS_CPUS=5,6,7`, `HANDS_COLOR=0`. Later, a switch in Frametop Display Settings.
+**Settings** in `~/.config/frametop.conf`: `HANDS_SWAP_SIDES=1` and `HANDS_CPUS=5,6,7`, read by ft-hands. It's on while its services are installed (`hands/run.sh install`, `uninstall`), so there's no `HANDS` switch. There's no setting for colour yet. Later, a switch in Frametop Display Settings.
 
-**Installer:** a step in `install.sh` that asks first, because it needs sudo.
+**Installer:** an optional last step in `install.sh`, off by default, which asks first because it needs sudo.
 
 ## Interfaces
 

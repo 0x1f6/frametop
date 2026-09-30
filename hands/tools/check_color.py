@@ -1,8 +1,8 @@
-"""Which color camera is which, and how their calibration maps onto fh-camd's images.
+"""Which color camera is which, and how their calibration maps onto ft-camd's images.
 
 usage: python tools/check_color.py REC_DIR [--sets N]
 
-A recording made with fh-camd --with-color holds color_video<N> frames with each set.
+A recording made with ft-camd --with-color holds color_video<N> frames with each set.
 This matches features between the two color images and scores every reading of the
 calibration: which video node is passthrough_left, and whether the calibration's
 cropRegion is subtracted from x ('subtract') or not ('none'). Only the right reading
@@ -19,12 +19,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from tools.check_sides import load_cams, matches, score  # noqa: E402
 from tools.show_set import index, read_set  # noqa: E402
-from tracker import calib  # noqa: E402
+from tools import calib  # noqa: E402
 
 
 def load_color(crop):
-    root = os.environ.get('FRAME_JOB_DEVICE_ROOT', '')   # frame-job's copy of the device files
-    return calib.load_color(root + calib.ARCTURUS_EEPROM, root + calib.DEVICE_JSON, crop=crop)
+    return calib.load_color(crop=crop)
 
 
 def main():
@@ -37,7 +36,7 @@ def main():
     sets = [read_set(path, offs[n]) for n in np.linspace(0, len(offs) - 1, a.sets).astype(int)]
     nodes = sorted(k for k in sets[0] if k.startswith('color_video'))
     if len(nodes) != 2:
-        sys.exit('need two color_video<N> cameras in the recording (fh-camd --with-color); found %s' % nodes)
+        sys.exit('need two color_video<N> cameras in the recording (ft-camd --with-color); found %s' % nodes)
     pairs = [matches(s[nodes[0]][0], s[nodes[1]][0]) for s in sets]
     print('%d sets, %d matches between %s and %s' % (len(sets), sum(len(p[0]) for p in pairs), *nodes))
 

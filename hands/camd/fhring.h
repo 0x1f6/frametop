@@ -1,7 +1,8 @@
 /*
- * fhring - the shared-memory frame ring fh-camd writes and trackers read.
+ * fhring - the shared-memory frame ring ft-camd writes and trackers read.
  *
- * One file (FH_RING_PATH) holds a header, then for each camera
+ * One file, /run/user/UID/frametop/cam-ring (FH_RING_NAME in the user's runtime
+ * folder; the folder is private to the user), holds a header, then for each camera
  * a few slots, each a slot header followed by the image rows packed tightly
  * (stride == width for 8-bit mono). Only complete, bright frames are published.
  *
@@ -12,7 +13,7 @@
  *   changed the copy is torn, retry with the new latest.
  *
  * All multi-byte fields are little-endian; offsets are fixed so Python can read
- * them with struct (tracker/ring.py mirrors this file).
+ * them with struct (tools/ring.py mirrors this file).
  */
 
 #pragma once
@@ -24,8 +25,7 @@
 #define FH_RING_VERSION   1
 #define FH_RING_MAX_CAMS  8
 #define FH_RING_SLOTS     4
-#define FH_RING_DIR       "/run/frame-hands"
-#define FH_RING_PATH      FH_RING_DIR "/ir-ring"
+#define FH_RING_NAME      "frametop/cam-ring"    /* in /run/user/UID */
 
 enum {
     FH_FMT_GREY8 = 0,
@@ -33,9 +33,9 @@ enum {
 
 enum {
     FH_CAM_DARK = 1u << 0,          /* the near-black exposures between this node's */
-                                    /* normal frames (fh-camd --with-dark)          */
+                                    /* normal frames (ft-camd --with-dark)          */
     FH_CAM_COLOR = 1u << 1,         /* an Arcturus color camera's luma, downscaled  */
-                                    /* (fh-camd --with-color). Not synced with the  */
+                                    /* (ft-camd --with-color). Not synced with the  */
                                     /* mono cameras, and capture_ns is on its own   */
                                     /* clock: line it up with them by dqbuf_ns      */
 };

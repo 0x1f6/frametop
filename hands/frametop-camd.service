@@ -1,0 +1,19 @@
+# Template: the installer replaces @REPO@ with the repo path on the Frame.
+[Unit]
+Description=Frametop camera broker: the headset cameras' frames, for hand tracking
+Documentation=file://@REPO@/hands/README.md
+# It borrows XRService's camera buffers, so it comes and goes with SteamVR.
+After=steamvr.service
+PartOf=steamvr.service
+
+[Service]
+# On the host: the dev container can't reach XRService. Its file capabilities (set by
+# hands/run.sh install) let it borrow the buffers; it drops them once set up. It exits when
+# XRService restarts, and comes back to attach to the new one.
+ExecStart=@REPO@/hands/build/ft-camd --status 60
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+
+[Install]
+WantedBy=steamvr.service

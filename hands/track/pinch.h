@@ -58,7 +58,7 @@ private:
     int64_t seen_ns_[2] = {0, 0};
 };
 
-// Writes $XDG_RUNTIME_DIR/frame-hands/gestures.
+// Writes /run/user/UID/frametop/gestures.
 class GesturePublisher {
 public:
     bool open(const Pinch &pinch, std::string &err);

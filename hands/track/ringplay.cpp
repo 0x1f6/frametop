@@ -1,11 +1,11 @@
-// fh-ringplay: play a recording (fh-tracker --record) into a frame ring in real time, the
-// way fh-camd publishes live cameras, so fh-tracker --ring PATH processes the same frames
-// run after run. For A/B tests of how the tracker runs (probes/core-ab.sh).
+// ft-ringplay: play a recording (ft-hands --record) into a frame ring in real time, the
+// way ft-camd publishes live cameras, so ft-hands --ring PATH processes the same frames
+// run after run. For A/B tests of how the tracker runs.
 //
-//   fh-ringplay DIR --ring PATH [--from S] [--to S] [--loop] [--cpus 0,1]
+//   ft-ringplay DIR --ring PATH [--from S] [--to S] [--loop] [--cpus 0,1]
 //
 // Frames are stamped as they're published, so the tracker's latency figures stay
-// meaningful. Cameras carry their calibration name and no device node (fh-tracker maps
+// meaningful. Cameras carry their calibration name and no device node (ft-hands maps
 // them by name), so a recording made with the right names needs no --swap-sides.
 // Dark frames (<name>_dk) are skipped. Needs no root: the ring is an ordinary file.
 #include "record.h"
@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
     while (have && set_time(cams) - rec0 < from && !g_stop) have = in.next(cams, px, want);
     if (!have) return std::fprintf(stderr, "%s: nothing after %.1f s\n", dir.c_str(), from), 1;
 
-    // the ring: the recording's bright cameras, as fh-camd lays them out
+    // the ring: the recording's bright cameras, as ft-camd lays them out
     std::vector<int> pub;   // set camera index of each ring camera
     for (size_t k = 0; k < cams.size() && pub.size() < FH_RING_MAX_CAMS; ++k)
         if (!is_dark(cams[k].name)) pub.push_back(int(k));
@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
     for (size_t r = 0; r < pub.size(); ++r) {
         const fh_set_cam_t &c = cams[pub[r]];
         fh_ring_cam_t &rc = hdr->cams[r];
-        std::snprintf(rc.sensor, sizeof rc.sensor, "fh-ringplay");
+        std::snprintf(rc.sensor, sizeof rc.sensor, "ft-ringplay");
         std::snprintf(rc.name, sizeof rc.name, "%s", c.name);
         rc.node = -1;
         rc.format = FH_FMT_GREY8;

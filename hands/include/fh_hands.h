@@ -1,12 +1,12 @@
 /*
- * fh_hands - the tracked-hands file frame-hands' tracker publishes
- * ($XDG_RUNTIME_DIR/frame-hands/hands, directory mode 0700), rewritten in place
+ * fh_hands - the tracked-hands file ft-hands publishes for ft-screens' hand cutouts
+ * (/run/user/UID/frametop/hands, directory mode 0700), rewritten in place
  * under a sequence lock: read seq, copy, read seq again; use the copy only if
  * both reads are the same even number.
  *
  * Positions are metres in the head frame at capture time, which is OpenVR's HMD
  * frame (+x right, +y up, -z forward). Turn them into the room with the HMD pose
- * at capture_ns (CLOCK_MONOTONIC). Writers: trackd (fh-tracker), tracker/publish.py.
+ * at capture_ns (CLOCK_MONOTONIC). Writer: ft-hands (hands/track/io.cpp).
  */
 
 #pragma once

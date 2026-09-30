@@ -39,7 +39,7 @@ bool Ring::open(const char *path, std::string &err) {
     map_ = static_cast<const uint8_t *>(m);
     hdr_ = reinterpret_cast<const fh_ring_hdr_t *>(map_);
     if (std::memcmp(hdr_->magic, FH_RING_MAGIC, 8) || hdr_->version != FH_RING_VERSION || hdr_->file_bytes > len_)
-        return err = std::string(path) + " is not an fh-camd ring", false;
+        return err = std::string(path) + " is not an ft-camd ring", false;
     return true;
 }
 
@@ -81,7 +81,7 @@ bool Ring::meta(int i, uint64_t n, fh_ring_slot_t *meta) const {
 
 namespace {
 
-// The hand's shape to cut out, as capsules (tracker/publish.py has the same model).
+// The hand's shape to cut out, as capsules.
 // Radii are a real hand's half-widths plus a small margin for tracking noise.
 const int kThumb[][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 4}};
 const int kFingers[][2] = {{5, 6}, {6, 7}, {7, 8}, {9, 10}, {10, 11}, {11, 12}, {13, 14}, {14, 15}, {15, 16},
@@ -113,12 +113,14 @@ void put(fh_capsule_t *caps, uint32_t &n, V3 a, V3 b, double ra, double rb) {
 
 }  // namespace
 
-bool Publisher::open(std::string &err) {
-    const char *run = std::getenv("XDG_RUNTIME_DIR");
-    const std::string dir = std::string(run ? run : "/run/user/" + std::to_string(getuid())) + "/frame-hands";
+std::string run_dir() {
+    const std::string dir = "/run/user/" + std::to_string(getuid()) + "/frametop";
     mkdir(dir.c_str(), 0700);
-    chmod(dir.c_str(), 0700);
-    const std::string path = dir + "/hands";
+    return dir;
+}
+
+bool Publisher::open(std::string &err) {
+    const std::string path = run_dir() + "/hands";
     const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0 || ftruncate(fd, sizeof(fh_hands_t)) < 0) return err = path + ": " + std::strerror(errno), false;
     void *m = mmap(nullptr, sizeof(fh_hands_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

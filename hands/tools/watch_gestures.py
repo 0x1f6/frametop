@@ -1,4 +1,4 @@
-"""Watch the pinch gestures fh-tracker publishes, live: begins, ends, and drags.
+"""Watch the pinch gestures ft-hands publishes, live: begins, ends, and drags.
 
 usage: python3 tools/watch_gestures.py [--every S] [--distance]
 
@@ -22,8 +22,7 @@ SIDES = ('left ', 'right')
 
 
 def path():
-    run = os.environ.get('XDG_RUNTIME_DIR', '/run/user/%d' % os.getuid())
-    return os.path.join(run, 'frame-hands', 'gestures')
+    return '/run/user/%d/frametop/gestures' % os.getuid()
 
 
 def read(m):
@@ -48,7 +47,7 @@ def main():
         m = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
     first = read(m)
     if first is None or first[0][0] != b'FHGEST01':
-        raise SystemExit('%s is not an fh-tracker gestures file' % path())
+        raise SystemExit('%s is not an ft-hands gestures file' % path())
     h, p = first
     print('thresholds: pinch begins under %.3f m, ends over %.3f m' % (h[6], h[7]))
     seen = [(q[2], q[3]) for q in p]   # begins, ends

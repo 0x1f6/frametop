@@ -1,12 +1,12 @@
-"""Draw frame sets from a recording (fh-tracker --record) with what the tracker saw.
+"""Draw frame sets from a recording (ft-hands --record) with what the tracker saw.
 
 usage: python tools/show_set.py REC_DIR SET [SET...] [--timeline TL] [--out DIR]
 
-SET is a set index (fh-replay's timeline gives them). With --timeline (fh-replay
+SET is a set index (ft-handreplay's timeline gives them). With --timeline (ft-handreplay
 --timeline), each camera shows the tracker's views at that set: the crop for the next
-frame, labelled with the hand and presence. Recordings made with fh-camd --with-dark get
+frame, labelled with the hand and presence. Recordings made with ft-camd --with-dark get
 a second row: each camera's latest dark frame (<name>_dk), stretched to be visible and
-labelled with its mean brightness. Recordings made with fh-camd --with-color get a row of
+labelled with its mean brightness. Recordings made with ft-camd --with-color get a row of
 the color cameras (color_video<N>). Writes OUT/set_<n>.jpg (default /tmp).
 """
 import argparse

@@ -18,6 +18,9 @@ packages=(
   mesa-libgbm-devel wayland-devel vulkan-loader-devel vulkan-headers plasma-wayland-protocols wlroots-devel
   # ft_pointer SteamVR driver: static C++ runtime (the host has an older glibc)
   libstdc++-static
+  # hand tracking: ft-hands reads the calibration with jsoncpp; ft-camd runs on the host, linked
+  # statically; the Python tools (hands/tools) need NumPy and OpenCV
+  jsoncpp-devel glibc-static python3-numpy python3-opencv
   # Frametop Input Settings app (Kirigami, PySide6)
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)

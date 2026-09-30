@@ -1,5 +1,5 @@
-// Multi-camera hand tracking (a port of tracker/hands.py; the scheduling is described
-// there and in tracker/README.md). All 3D is metres in the head frame.
+// Multi-camera hand tracking (a port of frame-hands' Python prototype; the scheduling is
+// described in hands/README.md). All 3D is metres in the head frame.
 #pragma once
 
 #include "calib.h"
@@ -84,7 +84,7 @@ public:
     size_t views() const { return views_.size(); }
     std::vector<Seen> views_now() const;
     // Every search tile in every camera, then landmarks on every palm: slow; for checking
-    // what the scheduler misses (fh-replay --oracle).
+    // what the scheduler misses (ft-handreplay --oracle).
     std::vector<Seen> exhaustive(const std::map<std::string, Image> &images);
     // Landmark presence a tracked view needs to stay (new views need min presence, 0.5). In
     // bright rooms the camera exposes for the room, the hands come out dim, and presence

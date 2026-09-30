@@ -1,9 +1,12 @@
-// fh-tracker: hands in 3D from fh-camd's ring, published for Frametop's ft-screens.
-// The C++ version of tracker/live.py: the same scheduling, with the models on a few
-// threads and no Python in the loop.
+// ft-hands: hands in 3D from ft-camd's ring, published for Frametop's ft-screens (the hand
+// cutouts), and pinches for the pointer. It started as a port of frame-hands' Python
+// prototype: the same scheduling, with the models on a few threads.
 //
-//   fh-tracker [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N]
-//              [--no-publish] [--record DIR] [--swap-sides] ... (--help lists them all)
+//   ft-hands [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N]
+//            [--no-publish] [--record DIR] [--swap-sides] ... (--help lists them all)
+//
+// Settings in ~/.config/frametop.conf (FT_<name> in the environment overrides them, and
+// options override both): HANDS_SWAP_SIDES (1: as --swap-sides), HANDS_CPUS (as --cpus).
 #include "io.h"
 #include "pinch.h"
 #include "record.h"
@@ -40,6 +43,45 @@ const char *camera_for_pipe(int node) {
     return nullptr;
 }
 
+// A setting from ~/.config/frametop.conf, or FT_<key> from the environment; "" if unset.
+std::string setting(const std::string &key) {
+    if (const char *v = std::getenv(("FT_" + key).c_str())) return v;
+    const char *home = std::getenv("HOME");
+    std::ifstream in(std::string(home ? home : "") + "/.config/frametop.conf");
+    std::string line, value;
+    auto trim = [](std::string s) {
+        s.erase(0, s.find_first_not_of(" \t\"'"));
+        s.erase(s.find_last_not_of(" \t\"'") + 1);
+        return s;
+    };
+    while (std::getline(in, line)) {
+        line = line.substr(0, line.find('#'));
+        const auto eq = line.find('=');
+        if (eq != std::string::npos && trim(line.substr(0, eq)) == key) value = trim(line.substr(eq + 1));
+    }
+    return value;
+}
+
+std::vector<int> parse_cpus(const char *p) {
+    std::vector<int> out;
+    while (*p) {
+        char *end;
+        const long c = std::strtol(p, &end, 10);
+        if (end == p) break;
+        out.push_back(int(c));
+        p = *end == ',' ? end + 1 : end;
+    }
+    return out;
+}
+
+// Where SIGUSR1 puts recordings: $XDG_DATA_HOME/frametop/hands (~/.local/share/...).
+std::string recordings_dir() {
+    const char *data = std::getenv("XDG_DATA_HOME"), *home = std::getenv("HOME");
+    std::string dir = data && *data ? data : std::string(home ? home : "") + "/.local/share";
+    for (const char *part : {"/frametop", "/hands"}) mkdir((dir += part).c_str(), 0700);
+    return dir;
+}
+
 double cpu_seconds() {
     rusage r;
     getrusage(RUSAGE_SELF, &r);
@@ -53,13 +95,15 @@ int main(int argc, char **argv) {
     int threads = 3, niceness = 5;
     bool int8 = false, publish = true, track = true, swap_sides = false;
     std::string models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
-    std::string record, ring_path = FH_RING_PATH;
+    std::string record, ring_path = "/run/user/" + std::to_string(getuid()) + "/" FH_RING_NAME;
     // SteamOS starts user processes on CPUs 0-4 and keeps 5-7 (two A720s and the X4) for
     // SteamVR's compositor, whose threads there run at real-time priority, so they always
-    // win. XRService pins its head tracking to 2-3. probes/core_ab.py (2026-09-29, headset
-    // on, 3 rounds): on 5-7 a step took 8.4 ms against 13.2 on 2-4, latency 9.6 against
-    // 14.1 ms, and the compositor's late frames and CPU/GPU time didn't change.
+    // win. XRService pins its head tracking to 2-3. frame-hands' probes/core_ab.py
+    // (2026-09-29, headset on, 3 rounds): on 5-7 a step took 8.4 ms against 13.2 on 2-4,
+    // latency 9.6 against 14.1 ms, and the compositor's late frames and CPU/GPU time didn't change.
     std::vector<int> cpus = {5, 6, 7};
+    if (const auto c = parse_cpus(setting("HANDS_CPUS").c_str()); !c.empty()) cpus = c;
+    swap_sides = setting("HANDS_SWAP_SIDES") == "1";
     // How crops are equalized. CLAHE helps the palm search find hands (about 10% more in the
     // dim recording), but makes the landmarks jitter, so they get plain crops.
     Contrast palm_contrast, hand_contrast{Contrast::None};
@@ -89,24 +133,20 @@ int main(int argc, char **argv) {
             if (!Contrast::parse_pair(argv[++i], palm_contrast, hand_contrast))
                 return std::fprintf(stderr, "--contrast MODE or PALM/HAND, each clahe[:CLIP]|none|stretch\n"), 1;
         } else if (a == "--cpus" && more) {
-            cpus.clear();
-            for (char *p = argv[++i]; *p;) {
-                cpus.push_back(int(std::strtol(p, &p, 10)));
-                if (*p == ',') ++p;
-                else if (*p) break;
-            }
+            cpus = parse_cpus(argv[++i]);
             if (cpus.empty()) cpus = {5, 6, 7};
         }
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
-                        "          [--keep-presence P] (0.5) [--ring PATH] (fh-camd's, or fh-ringplay's)\n"
+                        "          [--keep-presence P] (0.5) [--ring PATH] (ft-camd's, or ft-ringplay's)\n"
                         "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated]\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
-                        "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for fh-replay; SIGUSR1\n"
-                        "starts one in captures/rec-<time> next to trackd. --record-only records without tracking, so it\n"
-                        "can run beside a tracking fh-tracker. With fh-camd --with-dark, recordings also get each\n"
-                        "camera's newest dark frame, as <name>_dk; with --with-color, the color cameras' as color_video<N>.\n",
+                        "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for ft-handreplay; SIGUSR1\n"
+                        "starts one in ~/.local/share/frametop/hands/rec-<time>. --record-only records without tracking, so it\n"
+                        "can run beside a tracking ft-hands. With ft-camd --with-dark, recordings also get each\n"
+                        "camera's newest dark frame, as <name>_dk; with --with-color, the color cameras' as color_video<N>.\n"
+                        "Settings in ~/.config/frametop.conf: HANDS_SWAP_SIDES=1, HANDS_CPUS=5,6,7 (FT_<name> overrides).\n",
                         argv[0]);
             return a == "--help" ? 0 : 1;
         }
@@ -138,10 +178,10 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
-    if (!ring.alive()) return std::fprintf(stderr, "fh-camd isn't running (no heartbeat)\n"), 1;
+    if (!ring.alive()) return std::fprintf(stderr, "ft-camd isn't running (no heartbeat)\n"), 1;
 
     std::map<std::string, int> index;   // calibration name -> ring camera
-    // Recorded only, not tracked: "<name>_dk" (fh-camd --with-dark) and "color_video<N>"
+    // Recorded only, not tracked: "<name>_dk" (ft-camd --with-dark) and "color_video<N>"
     // (--with-color; which is left and right is up to tools/check_color.py). Recorded names
     // hold 15 characters, so "upper_right_dark" wouldn't fit.
     std::map<std::string, int> dark;
@@ -151,14 +191,14 @@ int main(int argc, char **argv) {
             dark["color_video" + std::to_string(ring.camera(i).node)] = i;
             continue;
         }
-        // fh-camd's cameras by capture pipe; fh-ringplay's (no device) by the name it gives
+        // ft-camd's cameras by capture pipe; ft-ringplay's (no device) by the name it gives
         const char *name = camera_for_pipe(ring.camera(i).node);
         if (!name && ring.camera(i).node < 0) name = ring.camera(i).name;
         if (!name || !calib.count(name)) continue;
         if (ring.camera(i).flags & FH_CAM_DARK) dark[std::string(name) + "_dk"] = i;
         else index[name] = i, used[name] = calib[name];
     }
-    // fh-camd tells the side cameras' buffers apart by XRService's allocation order, which
+    // ft-camd tells the side cameras' buffers apart by XRService's allocation order, which
     // some XRService restarts reverse; tools/check_sides.py --ring tells when.
     if (swap_sides && index.count("slam_left") && index.count("slam_right")) {
         std::swap(index["slam_left"], index["slam_right"]);
@@ -189,7 +229,7 @@ int main(int argc, char **argv) {
     int resid_n = 0, left_sets = 0, right_sets = 0, both_sets = 0;
 
     while (!g_stop && (seconds <= 0 || (mono_ns() - start) / 1e9 < seconds)) {
-        if (!ring.alive()) return std::fprintf(stderr, "fh-camd stopped\n"), 2;
+        if (!ring.alive()) return std::fprintf(stderr, "ft-camd stopped\n"), 2;
         // a new frame set: every camera has a newer frame, taken at the same moment
         std::map<std::string, uint64_t> latest;
         bool ready = true;
@@ -238,9 +278,7 @@ int main(int argc, char **argv) {
             char name[64];
             const std::time_t now = std::time(nullptr);
             std::strftime(name, sizeof name, "rec-%Y%m%d-%H%M%S", std::localtime(&now));
-            const std::string here = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1);
-            const std::string dir = here + "../captures";
-            mkdir(dir.c_str(), 0755);
+            const std::string dir = recordings_dir();
             std::string e;
             if (!start_recording(dir + "/" + name, e)) std::fprintf(stderr, "%s\n", e.c_str());
         }

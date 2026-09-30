@@ -1,21 +1,25 @@
 /*
- * fh-camd - publish the headset's IR camera frames to unprivileged trackers.
+ * ft-camd - publish the headset's IR camera frames to unprivileged trackers.
  *
- * Start it with sudo. As root it:
+ * Privileged only while it sets up:
  *   1. finds the mono tracking cameras and XRService's buffer queues (xrcams.c),
  *   2. borrows those buffers read-only with pidfd_getfd,
- *   3. opens the v4l2_dqbuf tracepoint (tp.c),
- *   4. creates the frame ring in /run/frame-hands (fhring.h), owned by the user.
- * Then it drops to that user for good. From then on it only learns which
- * buffer holds which V4L2 index (as fh-camprobe does), and copies each
- * complete bright frame into the ring. It exits when XRService exits or
- * reallocates its buffers; start it again (or let systemd) to re-attach.
+ *   3. opens the v4l2_dqbuf tracepoint (tp.c).
+ * Then it gives up its privileges for good, creates the frame ring in the
+ * user's runtime folder (/run/user/UID/frametop/cam-ring, fhring.h), learns
+ * which buffer holds which V4L2 index, and copies each complete bright frame
+ * into the ring. It exits when XRService exits or reallocates its buffers;
+ * start it again (or let systemd) to re-attach.
  *
- * XRService itself runs as the same user; root is needed only because
- * ptrace_scope=1 blocks pidfd_getfd and the tracepoints are root-only.
- * Nothing is read from the ring's readers.
+ * XRService itself runs as the same user. The privileges are needed only
+ * because ptrace_scope=1 limits pidfd_getfd to CAP_SYS_PTRACE, and the
+ * tracepoints need CAP_PERFMON and CAP_DAC_READ_SEARCH (their format files are
+ * root-only). They come from file capabilities (hands/run.sh install sets
+ * them, and ft-camd then runs as a user service), or from starting it with
+ * sudo (it then drops to the user who ran sudo). Nothing is read from the
+ * ring's readers.
  *
- * Build: make
+ * Build: hands/build.sh (it runs on the host: linked statically)
  */
 
 #define _GNU_SOURCE
@@ -27,10 +31,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <linux/dma-buf.h>
 #include <math.h>
 #include <poll.h>
-#include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,6 +56,10 @@
 #define SYS_pidfd_getfd 438
 #endif
 
+#ifndef CAP_PERFMON
+#define CAP_PERFMON 38
+#endif
+
 #define MAX_CAMS    FH_RING_MAX_CAMS
 #define MAX_SLOTS   64
 #define MAX_INDEX   32
@@ -59,8 +67,6 @@
 #define SEAM_LIMIT    2.0   /* seam_score above this: the frame carries the half-size copy */
 #define STALE_RELEARN 30    /* consecutive unchanged frames: the mapping changed      */
 #define MAX_RELEARNS  5     /* then assume XRService has new buffers, and exit        */
-#define RING_DIR   FH_RING_DIR
-#define RING_FILE  FH_RING_PATH
 
 typedef struct {
     xr_camera_t    *cam;
@@ -117,7 +123,6 @@ static tp_event_t  ev_dqbuf;
 static int         f_dq_minor, f_dq_index, f_dq_ts, f_dq_seq;
 
 static const char *opt_sensor = "";
-static const char *opt_user   = NULL;
 static double      opt_dark   = 0.4;
 static bool        opt_with_dark;       /* also publish the near-black frames */
 static bool        opt_with_color;      /* also publish the Arcturus color cameras */
@@ -561,7 +566,7 @@ static double decode_luma(const cam_t *c, const uint8_t *src, uint8_t *dst, unsi
  * The color module sometimes writes a warped half-size copy of the image into the
  * top-left quarter of its buffers. Its bottom edge is a seam between the middle rows
  * in the left half: this is ~1 for a clean frame and well above for one carrying the
- * copy (from fh-camprobe --seam).
+ * copy (measured with frame-hands' camera probe).
  */
 static double seam_score(const cam_t *c, const uint8_t *p)
 {
@@ -773,16 +778,21 @@ static int ring_layout(int cam_of[], bool dark_of[], int max)
     return n;
 }
 
-/* The ring lives in a root-owned directory, so nobody can plant a file or link there. */
-static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
+static char ring_dir[64], ring_file[96];
+
+/* Created once privileges are gone, as the user, in a folder only the user can write. */
+static uint8_t *ring_create(size_t *len_out)
 {
-    if (mkdir(RING_DIR, 0755) < 0 && errno != EEXIST)
-        die("mkdir %s: %s", RING_DIR, strerror(errno));
+    snprintf(ring_dir, sizeof(ring_dir), "/run/user/%d/frametop", (int)getuid());
+    snprintf(ring_file, sizeof(ring_file), "/run/user/%d/" FH_RING_NAME, (int)getuid());
+
+    if (mkdir(ring_dir, 0700) < 0 && errno != EEXIST)
+        die("mkdir %s: %s", ring_dir, strerror(errno));
 
     struct stat st;
 
-    if (lstat(RING_DIR, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & 022))
-        die("%s must be a directory owned by root and writable only by root", RING_DIR);
+    if (lstat(ring_dir, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 022))
+        die("%s must be a directory owned by uid %d and writable only by it", ring_dir, (int)getuid());
 
     size_t len = sizeof(fh_ring_hdr_t);
     int cam_of[FH_RING_MAX_CAMS];
@@ -795,22 +805,22 @@ static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
         len += FH_RING_SLOTS * ((slot + 63) & ~(size_t)63);
     }
 
-    if (unlink(RING_FILE) < 0 && errno != ENOENT)
-        die("unlink %s: %s", RING_FILE, strerror(errno));
+    if (unlink(ring_file) < 0 && errno != ENOENT)
+        die("unlink %s: %s", ring_file, strerror(errno));
 
-    int fd = open(RING_FILE, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int fd = open(ring_file, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 
     if (fd < 0)
-        die("create %s: %s", RING_FILE, strerror(errno));
+        die("create %s: %s", ring_file, strerror(errno));
 
-    if (fchown(fd, uid, gid) < 0 || ftruncate(fd, (off_t)len) < 0)
-        die("prepare %s: %s", RING_FILE, strerror(errno));
+    if (ftruncate(fd, (off_t)len) < 0)
+        die("prepare %s: %s", ring_file, strerror(errno));
 
     uint8_t *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
 
     if (m == MAP_FAILED)
-        die("mmap %s: %s", RING_FILE, strerror(errno));
+        die("mmap %s: %s", ring_file, strerror(errno));
 
     fh_ring_hdr_t *h = (fh_ring_hdr_t *)m;
     size_t off = sizeof(*h);
@@ -821,7 +831,7 @@ static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
         fh_ring_cam_t *rc = &h->cams[i];
         bool dark = dark_of[i];
 
-        snprintf(rc->sensor, sizeof(rc->sensor), "%s", c->cam->sensor);
+        snprintf(rc->sensor, sizeof(rc->sensor), "%.31s", c->cam->sensor);
         snprintf(rc->name, sizeof(rc->name), "%.26s%s", c->slug, dark ? "-dark" : "");
         rc->flags       = dark ? FH_CAM_DARK : c->color ? FH_CAM_COLOR : 0;
         rc->node        = c->cam->node;
@@ -857,21 +867,14 @@ static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
 
 static void target_user(uid_t *uid, gid_t *gid)
 {
-    if (opt_user) {
-        struct passwd *pw = getpwnam(opt_user);
-        if (!pw)
-            die("unknown user %s", opt_user);
-        *uid = pw->pw_uid;
-        *gid = pw->pw_gid;
-    } else if (getenv("SUDO_UID") && getenv("SUDO_GID")) {
-        *uid = (uid_t)atoi(getenv("SUDO_UID"));
-        *gid = (gid_t)atoi(getenv("SUDO_GID"));
-    } else {
-        die("run through sudo or pass --user NAME: fh-camd drops root once set up");
-    }
+    if (!getenv("SUDO_UID") || !getenv("SUDO_GID"))
+        die("started as root without sudo: ft-camd drops to the user who ran sudo once set up");
+
+    *uid = (uid_t)atoi(getenv("SUDO_UID"));
+    *gid = (gid_t)atoi(getenv("SUDO_GID"));
 
     if (*uid == 0)
-        die("refusing to keep running as root; pass --user NAME");
+        die("refusing to keep running as root: run it with sudo from your own account");
 }
 
 static void drop_root(uid_t uid, gid_t gid)
@@ -881,6 +884,39 @@ static void drop_root(uid_t uid, gid_t gid)
 
     if (setuid(0) == 0 || geteuid() == 0)
         die("dropping root failed");
+
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+}
+
+/* Started as the user with file capabilities (hands/run.sh install): are they all there? */
+static bool have_caps(void)
+{
+    struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 };
+    struct __user_cap_data_struct d[2];
+
+    if (syscall(SYS_capget, &h, d) < 0)
+        return false;
+
+    uint64_t eff = d[0].effective | (uint64_t)d[1].effective << 32;
+    uint64_t need = 1ull << CAP_SYS_PTRACE | 1ull << CAP_PERFMON | 1ull << CAP_DAC_READ_SEARCH;
+
+    return (eff & need) == need;
+}
+
+static void drop_caps(void)
+{
+    struct __user_cap_header_struct h = { _LINUX_CAPABILITY_VERSION_3, 0 };
+    struct __user_cap_data_struct d[2];
+
+    memset(d, 0, sizeof(d));
+
+    if (syscall(SYS_capset, &h, d) < 0)
+        die("dropping capabilities: %s", strerror(errno));
+
+    prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+
+    if (have_caps())
+        die("dropping capabilities failed");
 
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 }
@@ -922,8 +958,8 @@ static void on_signal(int sig)
 
 static void usage(const char *argv0)
 {
-    printf("Usage: sudo %s [options]\n"
-           "  --user NAME    user to run as after setup and to own the ring (default: $SUDO_USER)\n"
+    printf("Usage: %s [options]\n"
+           "It needs its file capabilities (hands/run.sh install sets them) or sudo.\n"
            "  --sensor S     only cameras whose sensor name contains S (default: all mono cameras)\n"
            "  --dark R       a frame dimmer than R x the camera's recent brightest is dark (default 0.4)\n"
            "  --with-dark    also publish the dark frames, as extra ring cameras flagged FH_CAM_DARK\n"
@@ -931,16 +967,14 @@ static void usage(const char *argv0)
            "  --color-scale N  ... at 1/N size (default 2: 986x1232)\n"
            "  --color-fps F  ... at most F frames a second (default 30; they run at 60)\n"
            "  --status S     print a status line every S seconds, 0 for never (default 10)\n"
-           "Frames go to " RING_FILE " (layout in fhring.h).\n", argv0);
+           "Frames go to /run/user/UID/" FH_RING_NAME " (layout in fhring.h).\n", argv0);
 }
 
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
 
-        if (!strcmp(argv[i], "--user") && i + 1 < argc)
-            opt_user = argv[++i];
-        else if (!strcmp(argv[i], "--sensor") && i + 1 < argc)
+        if (!strcmp(argv[i], "--sensor") && i + 1 < argc)
             opt_sensor = argv[++i];
         else if (!strcmp(argv[i], "--dark") && i + 1 < argc)
             opt_dark = atof(argv[++i]);
@@ -960,12 +994,15 @@ int main(int argc, char **argv)
         }
     }
 
-    if (geteuid() != 0)
-        die("run with sudo: borrowing XRService's buffers and reading tracepoints need root");
+    bool root = geteuid() == 0;
+    uid_t uid = getuid();
+    gid_t gid = getgid();
 
-    uid_t uid;
-    gid_t gid;
-    target_user(&uid, &gid);
+    if (root)
+        target_user(&uid, &gid);
+    else if (!have_caps())
+        die("no privileges to borrow XRService's buffers: run hands/run.sh install (it sets ft-camd's "
+            "capabilities; a rebuild clears them), or start it with sudo");
 
     char err[512];
 
@@ -1022,11 +1059,15 @@ int main(int argc, char **argv)
     if (!tp_open(&tp, evs, 1, err, sizeof(err)))
         die("%s", err);
 
-    size_t ring_len;
-    fh_ring_hdr_t *ring = (fh_ring_hdr_t *)ring_create(uid, gid, &ring_len);
+    if (root)
+        drop_root(uid, gid);
+    else
+        drop_caps();
 
-    drop_root(uid, gid);
-    printf("ring %s (%.1f MB), running as uid %d\n", RING_FILE, ring_len / 1e6, (int)getuid());
+    size_t ring_len;
+    fh_ring_hdr_t *ring = (fh_ring_hdr_t *)ring_create(&ring_len);
+
+    printf("ring %s (%.1f MB), running as uid %d without privileges\n", ring_file, ring_len / 1e6, (int)getuid());
     fflush(stdout);
 
     signal(SIGINT, on_signal);

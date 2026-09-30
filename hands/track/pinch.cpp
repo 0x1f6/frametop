@@ -99,11 +99,7 @@ bool Pinch::engaged() const {
 }
 
 bool GesturePublisher::open(const Pinch &pinch, std::string &err) {
-    const char *run = std::getenv("XDG_RUNTIME_DIR");
-    const std::string dir = std::string(run ? run : "/run/user/" + std::to_string(getuid())) + "/frame-hands";
-    mkdir(dir.c_str(), 0700);
-    chmod(dir.c_str(), 0700);
-    const std::string path = dir + "/gestures";
+    const std::string path = run_dir() + "/gestures";
     const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0 || ftruncate(fd, sizeof(fh_gestures_t)) < 0) return err = path + ": " + std::strerror(errno), false;
     void *m = mmap(nullptr, sizeof(fh_gestures_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

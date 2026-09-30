@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Install, start, stop, or inspect hand tracking on the Frame: ft-camd (the camera broker) and
+# ft-hands (the tracker), user services that start and stop with SteamVR.
+# Usage: hands/run.sh install|uninstall
+#        hands/run.sh caps      # give ft-camd its capabilities again (a rebuild clears them)
+#        hands/run.sh start|stop|restart|status|log [lines]
+# install and caps need the password (sudo setcap, once per build of ft-camd). On the Frame,
+# sudo asks in the terminal. From a PC (or with no terminal), the password comes from
+# steamos_root_pwd in the repo's .env and is sent to sudo -S on stdin, never on a command line.
+set -euo pipefail
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+. "$root/scripts/_env.sh"
+frame="$root/scripts/frame.sh"
+units="frametop-camd.service frametop-hands.service"
+# pidfd_getfd on XRService (ptrace_scope=1), system-wide tracepoints, and their root-only
+# format files. ft-camd drops them all once it has set up.
+caps=cap_sys_ptrace,cap_perfmon,cap_dac_read_search+ep
+
+sudo_run() {
+  if [ "$FRAME_LOCAL" = 1 ] && [ -t 0 ]; then
+    sudo bash -c "$1"  # asks for the password here
+    return
+  fi
+  local pw
+  pw=$(sed -n 's/^steamos_root_pwd=//p' "$root/.env" 2>/dev/null)
+  pw=${pw#[\"\']}; pw=${pw%[\"\']}  # .env values may be quoted
+  [ -n "$pw" ] || { echo "no terminal for sudo, and steamos_root_pwd is missing from $root/.env" >&2; exit 1; }
+  printf '%s\n' "$pw" | on_frame "sudo -S -p '' bash -c $(printf %q "$1")"
+}
+
+set_caps() {
+  local bin
+  bin=$(printf %q "$FRAME_REPO/hands/build/ft-camd")
+  sudo_run "setcap $caps $bin && getcap $bin"
+}
+
+states="for u in $units; do echo \"\$u: \$(systemctl --user is-active \$u)\"; done"
+
+case ${1:-status} in
+  install)
+    "$root/hands/build.sh"
+    set_caps
+    for u in $units; do
+      fill_template "$root/hands/$u" | on_frame "mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/$u"
+    done
+    "$frame" --host "set -e; systemctl --user daemon-reload; systemctl --user enable $units
+if systemctl --user -q is-active steamvr.service; then systemctl --user restart $units; sleep 5; fi
+$states" ;;
+  caps) set_caps ;;
+  uninstall) "$frame" --host "systemctl --user disable --now $units 2>/dev/null
+for u in $units; do rm -f ~/.config/systemd/user/\$u; done; systemctl --user daemon-reload; echo removed" ;;
+  start|stop|restart) "$frame" --host "systemctl --user $1 $units; $states" ;;
+  status) "$frame" --host "$states; journalctl --user -u frametop-hands.service --no-pager -o cat -n 4" || true ;;
+  log) "$frame" --host "journalctl --user -u frametop-camd.service -u frametop-hands.service --no-pager -o short -n ${2:-30}" ;;
+  *) echo "usage: $0 install|uninstall|caps|start|stop|restart|status|log [lines]" >&2; exit 2 ;;
+esac
