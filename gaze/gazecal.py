@@ -479,7 +479,7 @@ class EyeWeights:
     """How much each eye (0 left, 1 right) counts in the gaze, for ft-gazed's eye bias.
 
     Two eyes beat either one: their errors partly cancel. On 306 live clicks with our own
-    tracker (frame-eyes, 2026-09-29) the eyes' sideways errors were correlated -0.37, and
+    tracker (gaze/tracker, 2026-09-29) the eyes' sideways errors were correlated -0.37, and
     the mean of both was 0.65 degrees off (median), the left eye alone 0.96, the right 1.11.
     So a bias leans instead of choosing: "left" or "right" counts that eye LEAN times the
     other (on those clicks, 2:1 toward the better eye cost about 0.03 degrees, toward the

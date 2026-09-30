@@ -80,7 +80,7 @@ HELPER = REPO / "gaze" / "build" / "ft-gaze"
 STATE = Path.home() / ".local" / "state" / "frametop" / "gaze"
 # left and right: each eye alone (set 2's own reading of that eye), calibrated and tested
 # like the rest, to see what one eye is worth against both. own: our own tracker
-# (~/Desktop/Projects/frame-eyes, fe-trackd), when it's running; it has its own calibration.
+# (gaze/tracker/ft-eyes, which the gaze service runs); it has its own calibration.
 SOURCES = ["action", "mmap1", "mmap2", "left", "right", "own"]
 SOURCE_NAMES = {"action": "SteamVR action", "mmap1": "mmap set 1", "mmap2": "mmap set 2", "left": "Left eye",
                 "right": "Right eye", "own": "Own tracker"}
@@ -90,9 +90,11 @@ TRIGGER_KEYS = {Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space}
 
 
 class OwnTracker:
-    """Talks to our own tracker (frame-eyes fe-trackd) over its control socket (@frame_eyes).
+    """Talks to our own tracker (gaze/tracker/ft-eyes) over its control socket (@ft_eyes).
     It keeps its own calibration: the probe sends it calibration dots and clicks, each with
-    when you looked and where (head-relative degrees), and it learns from its own frames."""
+    when you looked and where (head-relative degrees), and it learns from its own frames.
+    The gaze service (ft-gazed) runs it: `lease` asks it to keep it running a while longer,
+    whatever the Eye tracker setting says."""
 
     def __init__(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -109,12 +111,21 @@ class OwnTracker:
             pass
         self.sock.settimeout(1.0)
         try:
-            self.sock.sendto(command.encode(), "\0frame_eyes")
+            self.sock.sendto(command.encode(), "\0ft_eyes")
             return self.sock.recv(4096).decode()
         except (ConnectionRefusedError, FileNotFoundError):
-            return "fail the Own tracker isn't running (frame-eyes: tools/fe-live)"
+            return "fail the Own tracker isn't running yet (the gaze service starts it)"
         except (socket.timeout, OSError) as e:
             return f"fail no answer from the Own tracker ({e})"
+
+    def lease(self, seconds=30):
+        """Ask the gaze service to keep the Own tracker running for `seconds` more. False if
+        the gaze service isn't running."""
+        try:
+            self.sock.sendto(f"eyes {seconds}".encode(), "\0ft_gazed")
+            return True
+        except OSError:
+            return False
 
 
 # The math, filters, correction models, and SteamVR log reader are shared with ft-gazed.
@@ -915,9 +926,14 @@ class Probe(Adw.ApplicationWindow):
         if own != (self.source == "own"):
             self.w_source.set_selected(SOURCES.index("own") if own else SOURCES.index("mmap2"))
         if own:
+            if not self.own.lease():
+                self.on_status("The gaze service isn't running, and it runs the Own tracker "
+                               "(frametop-gaze.service, gaze/run.sh install)")
+                return
+            self.lease_at = time.monotonic()
             reply = self.own.ask("status")
             if reply.startswith("fail"):
-                self.on_status(reply[5:])
+                self.on_status("Starting the Own tracker (a few seconds)…")
             else:
                 st = json.loads(reply)
                 self.on_status("Own tracker: " + ("calibrated " + st["calibration"].get("made", "")
@@ -1042,9 +1058,14 @@ class Probe(Adw.ApplicationWindow):
     def poll_own(self):
         """With the Own tracker: after the headset was off (or the tracker restarted), its
         next click starts each eye's shift over, and until then the first clicks can be
-        10-17 degrees off (frame-eyes, session 5). So ask for one look at a centre dot first,
-        as Varjo's headsets do each time they're put on."""
-        if self.source != "own" or self.calib or self.capture:
+        10-17 degrees off (gaze/tracker/findings.md, session 5). So ask for one look at a centre dot first,
+        as Varjo's headsets do each time they're put on. Also keeps the lease on the tracker."""
+        if self.source != "own":
+            return
+        if time.monotonic() - getattr(self, "lease_at", 0.0) > 10:
+            self.lease_at = time.monotonic()
+            self.own.lease()
+        if self.calib or self.capture:
             return
         reply = self.own.ask("status")
         if reply.startswith("fail"):
@@ -1535,7 +1556,7 @@ class Probe(Adw.ApplicationWindow):
     SNAP_LEARN_MAX = 6.0  # degrees: a lesson bigger than this (after the correction) is a wrong element
     # The Own tracker takes bigger ones: after the headset is taken off and put back on, its
     # first clicks were 11-17 degrees off, and a 6-degree limit kept them from teaching it
-    # (frame-eyes, session 5). It keeps the median of an eye's last 5 clicks, so one click
+    # (gaze/tracker/findings.md, session 5). It keeps the median of an eye's last 5 clicks, so one click
     # where you changed your mind does little harm.
     OWN_LEARN_MAX = 25.0
 
@@ -1897,7 +1918,7 @@ class Probe(Adw.ApplicationWindow):
         ring` degrees each way (as much as fits across and up the window), turned 20 degrees
         per round, and half the size in the middle round. Its fit is quadratic and goes
         wrong past its dots, and the ring (limited by the window's height) left the sides
-        out: in frame-eyes' practice2 the worst clicks were all past the ring."""
+        out: in practice2 (gaze/tracker/findings.md) the worst clicks were all past the ring."""
         w, h = self.canvas_size()
         cx, cy = w / 2, h / 2
         r = self.raw.get(self.source)
@@ -2836,7 +2857,7 @@ def main():
     ap.add_argument("--screen", type=int, default=0, help="Frametop screen to open on (default: where it opens)")
     ap.add_argument("--mode", choices=Probe.MODE_KEYS, help="start in this mode (fit: Headset fit)")
     ap.add_argument("--source", choices=SOURCES,
-                    help="gaze source to start with (default: own if frame-eyes' tracker is running, else mmap2)")
+                    help="gaze source to start with (default: own if our tracker is running, else mmap2)")
     args, rest = ap.parse_known_args()
     app = Adw.Application(application_id="dev.frametop.GazeProbe", flags=Gio.ApplicationFlags.NON_UNIQUE)
     windows = []

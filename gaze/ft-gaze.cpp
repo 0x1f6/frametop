@@ -21,8 +21,8 @@
 //         (set 1's eyes always share one pitch, and while it's lost an eye it keeps that
 //         eye's yaw where it was: set 2 is each eye's own reading). From the head's origin,
 //         not the eye's.
-//    "own":SRC                                        our own tracker (frame-eyes fe-trackd), from
-//         /dev/shm/frame-eyes-gaze; adds "age" (ms since its frame), "eyes":[[hy,hp],[hy,hp]]
+//    "own":SRC                                        our own tracker (gaze/tracker/ft-eyes), from
+//         /dev/shm/frametop-eyes-gaze; adds "age" (ms since its frame), "eyes":[[hy,hp],[hy,hp]]
 //         (left, right; null for an eye it doesn't see), "ehit":[HIT,HIT] where each of those
 //         lands, and "slip":[[x,y],[x,y]] (left, right: each eye's shift in its camera image
 //         since the calibration, pixels; null until a click has measured it). {"ok":0}
@@ -163,8 +163,8 @@ bool ReadSample(const EyeFile &f, EyeSample &s) {
     return false;
 }
 
-// --- Our own tracker: /dev/shm/frame-eyes-gaze, written by frame-eyes' fe-trackd ---
-// Layout (fe-trackd's docstring): u32 seq (odd while written), u32 version, f64 t, f32 yaw,
+// --- Our own tracker: /dev/shm/frametop-eyes-gaze, written by gaze/tracker/ft-eyes ---
+// Layout (ft-eyes' docstring): u32 seq (odd while written), u32 version, f64 t, f32 yaw,
 // pitch, u32 flags (bit 0 right eye, 1 left, 2 right slip known, 3 left), u32 n, then f32
 // right yaw, pitch, left yaw, pitch; slip right x, y, left x, y; pupils (unused here).
 struct OwnSample {
@@ -176,7 +176,7 @@ struct OwnSample {
 
 class OwnFile {
 public:
-    // Reopened when it appears or is replaced, since fe-trackd may start after us.
+    // Reopened when it appears or is replaced, since ft-eyes may start after us.
     bool Read(OwnSample &o) {
         const double now = NowRaw();
         if (!p_ || now - checked_ > 2.0) Reopen(now);
@@ -206,10 +206,10 @@ private:
     void Reopen(double now) {
         checked_ = now;
         struct stat st {};
-        if (stat("/dev/shm/frame-eyes-gaze", &st) != 0) return Close();
+        if (stat("/dev/shm/frametop-eyes-gaze", &st) != 0) return Close();
         if (p_ && st.st_ino == ino_) return;
         Close();
-        const int fd = open("/dev/shm/frame-eyes-gaze", O_RDONLY | O_CLOEXEC);
+        const int fd = open("/dev/shm/frametop-eyes-gaze", O_RDONLY | O_CLOEXEC);
         if (fd < 0) return;
         if (fstat(fd, &st) == 0 && size_t(st.st_size) >= kSize) {
             void *m = mmap(nullptr, kSize, PROT_READ, MAP_SHARED, fd, 0);

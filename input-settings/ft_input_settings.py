@@ -107,7 +107,7 @@ POINTER_ROLES = {"right": "Right hand", "left": "Left hand", "stylus": "Stylus (
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
 # The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
-GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker (frame-eyes)"}
+GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker"}
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [

@@ -36,7 +36,7 @@ POINTER_GAZE_MOUSE=precision # gaze mode: the left button holds back its press, 
 POINTER_PRECISION_GAIN=0.5  # gaze precision (a button mapped to gaze_precision): the pointer turns this times the controller's turn
 POINTER_PRECISION_DEADZONE=0.3 # gaze precision: degrees the controller turns before the pointer does (the press's own jolt)
 POINTER_GAZE_DRAG_GAIN=1   # gaze drag (gaze_drag): the pointer turns this times the controller's turn
-GAZE_TRACKER=steam         # gaze service: steam = SteamVR's eye tracker | own = our own (frame-eyes' fe-trackd, calibrated in the gaze probe with Own tracker)
+GAZE_TRACKER=steam         # gaze service: steam = SteamVR's eye tracker | own = our own (gaze/tracker: its frame grabber needs gaze/tracker/install.sh; calibrated in the gaze probe with Own tracker)
 GAZE_EYE=auto              # gaze service: eye bias. auto = each eye weighted by how far off it was at your recent nudges | left | right = that eye counts twice
 HANDS_SWAP_SIDES=0         # hand tracking (hands/run.sh install): 1 = the side cameras' names are swapped, which some SteamVR restarts cause (hands/tools/check_sides.py --ring tells)
 HANDS_CPUS=5,6,7           # hand tracking: the CPUs its model threads run on
