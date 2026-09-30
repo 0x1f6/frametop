@@ -458,6 +458,8 @@ class Probe(Adw.ApplicationWindow):
 
         self.models = {s: Correction() for s in SOURCES}
         self.own = OwnTracker()
+        self.reseat_check = False    # showing the one-dot check after the headset was off
+        self.reseat_skipped = False  # S skipped this one
         self.live = {s: LiveCorrection() for s in SOURCES}
         self.steam = SteamEyeLog()
         self.steam.poll()
@@ -988,6 +990,10 @@ class Probe(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and self.calib:
             self.calib_skip()
             return True
+        if keyval in (Gdk.KEY_s, Gdk.KEY_S) and self.reseat_check:
+            self.reseat_check, self.reseat_skipped = False, True
+            self.area.queue_draw()
+            return True
         if keyval == Gdk.KEY_Escape:
             if self.calib or self.test:
                 self.calib = self.test = None
@@ -1029,8 +1035,59 @@ class Probe(Adw.ApplicationWindow):
         if self.steam.poll():
             self.on_status("SteamVR's eye tracker just started again: its own calibration started over, "
                            "so the raw gaze may have moved")
+        self.poll_own()
         self.update_stats()
         return True
+
+    def poll_own(self):
+        """With the Own tracker: after the headset was off (or the tracker restarted), its
+        next click starts each eye's shift over, and until then the first clicks can be
+        10-17 degrees off (frame-eyes, session 5). So ask for one look at a centre dot first,
+        as Varjo's headsets do each time they're put on."""
+        if self.source != "own" or self.calib or self.capture:
+            return
+        reply = self.own.ask("status")
+        if reply.startswith("fail"):
+            return
+        st = json.loads(reply)
+        pending = bool(st.get("calibration")) and any(e.get("reseat") for e in st["eyes"].values())
+        if not pending:
+            self.reseat_skipped = False
+        check = pending and not self.reseat_skipped
+        if check != self.reseat_check:
+            self.reseat_check = check
+            self.area.queue_draw()
+
+    def reseat_press(self):
+        """The press on the check dot: a click there teaches both eyes' shifts at once."""
+        if not self.recent:
+            return
+        t_end = self.recent[-1]["t"]
+        w, h = self.canvas_size()
+        d = self.screen_direction([smp for smp in self.recent if smp["t"] >= t_end - 0.6], (w / 2, h / 2))
+        if d is None:
+            self.on_status("no gaze samples on this screen: look at the dot and press again")
+            return
+        reply = self.own.ask(f"click {t_end:.6f} {d[0]:.4f} {d[1]:.4f}")
+        if reply.startswith("ok"):
+            self.reseat_check = False
+            self.on_status("Own tracker: checked after the headset was off")
+        else:
+            self.on_status(reply[5:] if reply.startswith("fail") else reply)
+        self.area.queue_draw()
+
+    def draw_reseat(self, cr, w, h):
+        cx, cy = w / 2, h / 2
+        cr.set_source_rgb(1, 1, 1)
+        cr.arc(cx, cy, 10, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgb(0.1, 0.1, 0.1)
+        cr.arc(cx, cy, 3, 0, 2 * math.pi)
+        cr.fill()
+        ink = (0.9, 0.9, 0.9)
+        self.text(cr, 60, 70, "Own tracker: the headset was off, so it may sit differently now", ink, 26)
+        self.text(cr, 60, 108, self.status if self.status.startswith("no gaze") else
+                  "Look at the dot and press (Enter, Space, or click). S skips.", ink, 20)
 
     def on_sample(self, s):
         self.sample = s
@@ -1219,6 +1276,9 @@ class Probe(Adw.ApplicationWindow):
     def on_press(self):
         if self.calib:
             self.calib_press()
+            return
+        if self.reseat_check:
+            self.reseat_press()
             return
         if self.mode == "test":
             self.test_press()
@@ -1961,9 +2021,19 @@ class Probe(Adw.ApplicationWindow):
 
     def own_calib_point(self, samples, target):
         """Send one calibration dot to the Own tracker: the time you looked at it and its
-        direction. The direction comes from the screen geometry around it, through SteamVR's
-        nearby gaze and its pixels-per-degree there (only the geometry is used, not where
-        SteamVR thinks you looked). None if accepted, else why not."""
+        direction. None if accepted, else why not."""
+        d = self.screen_direction(samples, target)
+        if d is None or len(samples) < 2:
+            return "no gaze samples on this screen: look at the dot and press again"
+        reply = self.own.ask(f"calib-point {samples[0]['t']:.6f} {samples[-1]['t']:.6f} {d[0]:.4f} {d[1]:.4f}")
+        if reply.startswith("ok"):
+            return None
+        return reply[5:] + ": look at the dot and press again"
+
+    def screen_direction(self, samples, target):
+        """The head-relative direction (yaw, pitch) of a point on the canvas, from the screen
+        geometry around it: SteamVR's nearby gaze and its pixels-per-degree there (only the
+        geometry is used, not where SteamVR thinks you looked). None without samples."""
         pts = []
         ox, oy = self.origin or (0, 0)
         for smp in samples:
@@ -1973,18 +2043,13 @@ class Probe(Adw.ApplicationWindow):
                 if hit and hit["s"] == self.screen:
                     pts.append((hit["x"] - ox, hit["y"] - oy, hit["j"], src["hy"], src["hp"]))
                     break
-        if len(pts) < 5 or len(samples) < 2:
-            return "no gaze samples on this screen: look at the dot and press again"
+        if len(pts) < 5:
+            return None
         x = statistics.median(q[0] for q in pts)
         y = statistics.median(q[1] for q in pts)
         j = [statistics.fmean(q[2][k] for q in pts) for k in range(4)]
         oy_, op_ = deg_from_px(j, target[0] - x, target[1] - y)
-        yaw = statistics.median(q[3] for q in pts) + oy_
-        pitch = statistics.median(q[4] for q in pts) + op_
-        reply = self.own.ask(f"calib-point {samples[0]['t']:.6f} {samples[-1]['t']:.6f} {yaw:.4f} {pitch:.4f}")
-        if reply.startswith("ok"):
-            return None
-        return reply[5:] + ": look at the dot and press again"
+        return statistics.median(q[3] for q in pts) + oy_, statistics.median(q[4] for q in pts) + op_
 
     def other_dot(self, c, g):
         """Was the gaze on another dot of this round rather than the current one?
@@ -2487,6 +2552,9 @@ class Probe(Adw.ApplicationWindow):
         cr.paint()
         if self.calib:
             self.draw_calib(cr, w, h)
+            return
+        if self.reseat_check:
+            self.draw_reseat(cr, w, h)
             return
         m = self.monitors.get(self.screen)
         if m and self.is_fullscreen():
