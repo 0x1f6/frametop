@@ -1,6 +1,8 @@
 // Hand cutouts (see handcut.h).
 #include "handcut.h"
 
+#include "../hands/include/fh_hands.h"
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -23,10 +25,8 @@
 namespace handcut {
 namespace {
 
-// The hands file (frame-hands/include/fh_hands.h).
-constexpr char kMagic[8] = {'F', 'H', 'H', 'A', 'N', 'D', 'S', '1'};
-constexpr size_t kHeader = 64, kHand = 272, kCapsule = 32, kMaxHands = 2, kMaxCapsules = 64;
-constexpr size_t kFileSize = kHeader + kMaxHands * kHand + kMaxCapsules * kCapsule;
+// The hands file ft-hands publishes (hands/include/fh_hands.h).
+constexpr uint32_t kMaxHands = FH_HANDS_MAX_HANDS, kMaxCapsules = FH_HANDS_MAX_CAPSULES;
 constexpr int64_t kStaleNs = 300'000'000;   // hands older than this are gone
 constexpr int64_t kHistoryNs = 1'000'000'000;
 constexpr double kNear = 0.12;   // metres: nothing closer to an eye than this is cut
@@ -59,53 +59,44 @@ bool Hands::Read() {
         const int64_t now = MonoNs();
         if (now - lastOpenTry_ < 1'000'000'000) return false;
         lastOpenTry_ = now;
-        const char *run = std::getenv("XDG_RUNTIME_DIR");
-        const std::string path = std::string(run ? run : "/run/user/" + std::to_string(getuid())) + "/frame-hands/hands";
+        const std::string path = "/run/user/" + std::to_string(getuid()) + "/frametop-hands/hands";
         fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         if (fd_ < 0) return false;
         struct stat st;
-        if (fstat(fd_, &st) < 0 || st.st_uid != getuid() || size_t(st.st_size) < kFileSize) {
+        if (fstat(fd_, &st) < 0 || st.st_uid != getuid() || size_t(st.st_size) < sizeof(fh_hands_t)) {
             close(fd_), fd_ = -1;
             return false;
         }
-        void *m = mmap(nullptr, kFileSize, PROT_READ, MAP_SHARED, fd_, 0);
+        void *m = mmap(nullptr, sizeof(fh_hands_t), PROT_READ, MAP_SHARED, fd_, 0);
         if (m == MAP_FAILED) {
             close(fd_), fd_ = -1;
             return false;
         }
         map_ = m;
     }
-    const auto *p = static_cast<const volatile uint8_t *>(map_);
-    auto u64 = [&](size_t off) { uint64_t v; std::memcpy(&v, const_cast<const uint8_t *>(p) + off, 8); return v; };
-    const uint64_t s1 = __atomic_load_n(reinterpret_cast<const uint64_t *>(const_cast<const uint8_t *>(p) + 16), __ATOMIC_ACQUIRE);
+    const auto *file = static_cast<const fh_hands_t *>(map_);
+    const auto *seq = const_cast<const uint64_t *>(&file->seq);
+    const uint64_t s1 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
     if ((s1 & 1) || s1 == seq_) return false;
-    uint8_t copy[kFileSize];
-    std::memcpy(copy, const_cast<const uint8_t *>(p), kFileSize);
+    fh_hands_t copy;
+    std::memcpy(static_cast<void *>(&copy), map_, sizeof copy);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    if (u64(16) != s1 || std::memcmp(copy, kMagic, 8) != 0) return false;
+    if (__atomic_load_n(seq, __ATOMIC_RELAXED) != s1 || std::memcmp(copy.magic, FH_HANDS_MAGIC, 8) != 0) return false;
     seq_ = s1;
-    uint64_t capture, publish;
-    uint32_t nhands, ncaps;
-    std::memcpy(&capture, copy + 24, 8);
-    std::memcpy(&publish, copy + 32, 8);
-    std::memcpy(&nhands, copy + 40, 4);
-    std::memcpy(&ncaps, copy + 44, 4);
-    captureNs_ = int64_t(capture), publishNs_ = int64_t(publish);
+    const uint32_t nhands = std::min<uint32_t>(copy.nhands, kMaxHands), ncaps = std::min<uint32_t>(copy.ncapsules, kMaxCapsules);
+    captureNs_ = int64_t(copy.capture_ns), publishNs_ = int64_t(copy.publish_ns);
     const Mat head = HeadAt(captureNs_);
 
     // each hand's palm in the room, and its velocity from the last time it was seen
     ids_.clear();
     std::vector<int> owners;   // the hand each capsule belongs to, in file order
-    for (uint32_t k = 0; k < std::min<uint32_t>(nhands, kMaxHands); ++k) {
-        const uint8_t *h = copy + kHeader + k * kHand;
-        uint32_t id, n;
-        float pts[21][3];
-        std::memcpy(&id, h, 4);
-        std::memcpy(pts, h + 16, sizeof pts);
-        std::memcpy(&n, h + 268, 4);
+    for (uint32_t k = 0; k < nhands; ++k) {
+        const fh_hand_t &h = copy.hands[k];
+        const uint32_t id = h.id;
+        const auto &pts = h.pts;
         const int idx = int(ids_.size());
         ids_.push_back(id);
-        owners.insert(owners.end(), std::min<uint32_t>(n, kMaxCapsules), idx);
+        owners.insert(owners.end(), std::min<uint32_t>(h.ncapsules, kMaxCapsules), idx);
         double palm[3] = {0, 0, 0};
         bool ok = true;
         for (int j : {0, 5, 9, 13, 17}) {
@@ -137,19 +128,18 @@ bool Hands::Read() {
     }
     for (auto it = motion_.begin(); it != motion_.end();)
         it = captureNs_ - it->second.ns > kStaleNs ? motion_.erase(it) : std::next(it);
-    if (owners.size() != std::min<uint32_t>(ncaps, kMaxCapsules)) owners.assign(std::min<uint32_t>(ncaps, kMaxCapsules), -1);
+    if (owners.size() != ncaps) owners.assign(ncaps, -1);
 
     base_.clear(), owner_.clear();
-    for (uint32_t k = 0; k < std::min<uint32_t>(ncaps, kMaxCapsules); ++k) {
-        float f[8];
-        std::memcpy(f, copy + kHeader + kMaxHands * kHand + k * kCapsule, sizeof f);
+    for (uint32_t k = 0; k < ncaps; ++k) {
+        const fh_capsule_t &f = copy.capsules[k];
         bool ok = true;
-        for (float v : f) ok = ok && std::isfinite(v) && std::fabs(v) < 10;
-        if (!ok || f[6] <= 0 || f[7] <= 0) continue;
+        for (float v : {f.a[0], f.a[1], f.a[2], f.b[0], f.b[1], f.b[2], f.ra, f.rb}) ok = ok && std::isfinite(v) && std::fabs(v) < 10;
+        if (!ok || f.ra <= 0 || f.rb <= 0) continue;
         Capsule c;
-        Apply(head, f, c.a);
-        Apply(head, f + 3, c.b);
-        c.ra = f[6], c.rb = f[7];
+        Apply(head, f.a, c.a);
+        Apply(head, f.b, c.b);
+        c.ra = f.ra, c.rb = f.rb;
         base_.push_back(c);
         owner_.push_back(owners[k]);
     }
@@ -305,7 +295,7 @@ void main() {
 // The client's pixels, opaque (its alpha is ignored, as IgnoreTextureAlpha did).
 const char *kCopy = R"(
 #extension GL_OES_EGL_image_external : require
-precision mediump float;
+precision highp float;   // mediump (16-bit on Adreno) steps 1.7 texels across a 3440-pixel screen
 uniform samplerExternalOES tex;
 varying vec2 uv;
 void main() { gl_FragColor = vec4(texture2D(tex, uv).rgb, 1.0); })";

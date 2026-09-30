@@ -1,0 +1,3 @@
+# Model sources that tools/convert_models.py downloads; the converted ncnn models are kept
+models/onnx/
+models/*.task

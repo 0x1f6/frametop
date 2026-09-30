@@ -34,6 +34,8 @@ POINTER_GAZE_HOLD=0.5      # gaze mode: a press held this long (s) without movin
 POINTER_GAZE_SHOW=1        # gaze mode: the dot shows this long (s) after the mouse moves it; also while a press is held, and a pulse per click
 GAZE_TRACKER=steam         # gaze service: steam = SteamVR's eye tracker | own = our own (frame-eyes' fe-trackd, calibrated in the gaze probe with Own tracker)
 GAZE_EYE=auto              # gaze service: eye bias. auto = each eye weighted by how far off it was at your recent nudges | left | right = that eye counts twice
+HANDS_SWAP_SIDES=0         # hand tracking (hands/run.sh install): 1 = the side cameras' names are swapped, which some SteamVR restarts cause (hands/tools/check_sides.py --ring tells)
+HANDS_CPUS=5,6,7           # hand tracking: the CPUs its model threads run on
 META_DASHBOARD=0   # 1 = a Meta tap on a pass-through keyboard toggles the SteamVR dashboard (pointer mode only)
 SHARE_KEYS=0       # 1 = keys of keyboards grabbed for the desktop also go to @frametop_keys, for hotkey tools (any local process can listen)
 DISPLAY_OFF_MIN=0  # minutes without use before frametop-power turns the displays off, even if the headset seems worn (0 = never)

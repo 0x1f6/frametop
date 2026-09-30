@@ -172,6 +172,17 @@ power/run.sh off | on      # the displays off now, or back on
 power/run.sh log
 ```
 
+## Hand tracking (experimental)
+
+Your hands show over the screens: where a tracked hand is between an eye and a screen, ft-screens lets that eye see the room through the screen. The same tracker also detects pinches, for clicking where you look with the gaze pointer (not wired to the pointer yet). It's optional: `hands/run.sh install`, or the last step of `install.sh`.
+
+- `ft-camd` borrows XRService's camera buffers and publishes the four IR tracking cameras to `/run/user/UID/frametop-hands/cam-ring`. It runs on the host as `frametop-camd.service`, with file capabilities that `hands/run.sh install` sets through sudo, and it drops them once set up. A rebuild clears them: `hands/run.sh caps`.
+- `ft-hands` runs in the `dev` container as `frametop-hands.service`. It finds and triangulates the hands, and publishes `hands` (read by ft-screens' cutouts) and `gestures` (pinches) next to the ring.
+- Both start and stop with SteamVR. `hands/run.sh status` and `hands/run.sh log` show how they're doing.
+- Settings in `~/.config/frametop.conf`: `HANDS_SWAP_SIDES` (after some SteamVR restarts the side cameras' names come out swapped, and hands land beside the holes; `hands/tools/check_sides.py --ring` tells) and `HANDS_CPUS`.
+
+Details, options, and the recording and replay tools are in [hands/README.md](../hands/README.md).
+
 ## Remote desktop over VNC
 
 With `REMOTE=1` in the config (`desktops.sh remote on`), the desktop is also served over VNC, for RealVNC Viewer or macOS Screen Sharing. `desktops.sh remote info` prints the address and password.

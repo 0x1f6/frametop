@@ -1,8 +1,8 @@
 // Hand cutouts: where a tracked hand is between an eye and a screen, that eye sees the
 // room (Room View) through the screen instead of the screen drawn over the hand.
 //
-// frame-hands' tracker (a separate project, ~/Desktop/Projects/frame-hands) publishes
-// the hands it sees with the headset's cameras to $XDG_RUNTIME_DIR/frame-hands/hands:
+// ft-hands (hands/) publishes the hands it sees with the headset's cameras to
+// /run/user/UID/frametop-hands/hands (hands/include/fh_hands.h):
 // capsules (finger bones, palm, forearm) in the head frame at capture time. Hands turns
 // them into the room with the head pose at that time. Project() finds where each eye
 // sees them on a panel, and Renderer draws the panel's client buffer into a side-by-side

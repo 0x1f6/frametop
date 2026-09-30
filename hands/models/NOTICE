@@ -1,0 +1,12 @@
+The models in ncnn/ are converted from the OpenCV Zoo ONNX ports of Google's MediaPipe hand
+models, by tools/convert_models.py:
+
+- palm.ncnn.*: palm_detection_mediapipe_2023feb (https://huggingface.co/opencv/palm_detection_mediapipe)
+- hand.ncnn.*: handpose_estimation_mediapipe_2023feb (https://huggingface.co/opencv/handpose_estimation_mediapipe)
+
+MediaPipe is Copyright Google LLC. The models and the OpenCV Zoo ports are licensed under the
+Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+Changes made here: converted to ncnn with pnnx, with the palm detector's channel pads
+rewritten as ncnn Padding layers, and quantized to 8 bits (the *-int8.ncnn.* files) with
+ncnn's tools.
