@@ -156,6 +156,17 @@ Each item has a pass condition. Items that need a desktop restart with extra out
 - **0.5 SteamVR's laser.** Find out which overlay gets MouseMove and ButtonUp when a held laser moves from overlay A to overlay B, and when it's released over nothing, for both a controller and the 3D mouse. Pass: an interactive overlay placed on the laser reliably catches the release.
 - **0.6 Texture bounds.** Pass: `SetOverlayTextureBounds` crops a DMA-BUF (`SharedTextureHandle`) overlay correctly, mouse positions map to the cropped area, and two overlays can show different crops of one buffer.
 
+#### Results (2026-09-29, headless, KWin 6.2.5)
+
+`screens/test/headless.sh` runs these: ft-screens `--no-vr` with a bare nested KWin next to the running desktop, with an `input` command that feeds pointer events as if from a panel, KWin scripts loaded over D-Bus, and screenshots through ScreenShot2.
+
+- **0.1 passes.** `--no-vr`, `--control`, `toplevels`, and `input` are in ft-screens.
+- **0.2 passes.** Disabling a spare with `kscreen-doctor` keeps its toplevel, its title gets `- Output disabled`, and it stops committing; enabling it resumes on the same toplevel. A spare resized (`size`) while disabled comes up at the new size on its first frame, so a tear-off needn't blink. Live resizing works, output scale works (1.5: KWin lays out 1067 × 667 on a 1600 × 1000 buffer), and outputs with gaps between them (x = 5000, 8000, 10000) are accepted. A window placed inside a 1600 × 1200 output with a 300 px margin opens a context menu past its bottom and right edges, into the margin.
+- **0.3 mostly passes.** `workspace.screens`, `sendClientToScreen`, `windowList`, `frameGeometry` (set; it applies asynchronously), `callDBus`, `registerShortcut`, `registerUserActionsMenu`, and `readConfig` exist. `windowAdded` reports popups (`popupWindow` true, `transient` true) with their geometry. Move signals fire for KWin's title bars (`interactiveMoveResizeStarted` with `move` true, `Stepped` with the geometry, `Finished`). Not yet checked: apps' own title bars, the `callDBus` long poll, and the window menu entry. `globalThis` isn't defined in KWin's script engine. `print` goes to the journal unless `QT_FORCE_STDERR_LOGGING=1`.
+- **0.4: KWin starts the move on the press itself,** before any motion. So ft-screens freezes pointer motion as soon as a press lands in a floating window's title bar band (from the frame and client rectangles ft-floatd sends it), with no round trip. For apps that draw their own title bars, the script reports the move and ft-screens freezes then; the script puts back any few pixels the window slipped before that.
+- **Found and fixed:** KWin's nested backend ignores the position in `wl_pointer.enter`, and wlroots drops a motion to the position it entered at, so the first click after crossing onto another screen landed where KWin's pointer had been. ft-screens now enters one unit off.
+- **0.5 and 0.6** need SteamVR and the headset.
+
 ### Phase 1: float a window from its menu
 
 Build the KWin script, ft-floatd, and floating panels in ft-screens: the margin and popup overlays, controls, moving by the title bar, resizing (edges and tab), scale, full screen, close, and back to desktop. Add drag and drop across panels, with the pointer helper change.
