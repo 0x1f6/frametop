@@ -1,10 +1,10 @@
 // ft-handtest: try the hand cutouts without restarting the desktop. Shows a test panel
-// (a light grid) in front of you as its own overlay; where frame-hands tracks your hands
+// (a light grid) in front of you as its own overlay; where ft-hands tracks your hands
 // in front of it, each eye sees through it, like ft-screens' screens with cutouts.
 //
 //   ft-handtest [--distance m] [--width m] [--seconds s]
 //
-// Needs frame-hands' tracker running (it publishes $XDG_RUNTIME_DIR/frame-hands/hands).
+// Needs hand tracking running (hands/run.sh; ft-hands publishes /run/user/UID/frametop/hands).
 // Build: screens/build.sh (build/ft-handtest), run in the dev container.
 #include "handcut.h"
 

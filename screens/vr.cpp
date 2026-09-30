@@ -40,7 +40,7 @@
 //     own; also for flatscreen games, which aren't scene apps).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
-//   - hand cutouts (handcut.cpp): where frame-hands tracks a hand between an eye and a
+//   - hand cutouts (handcut.cpp): where ft-hands (hands/) tracks a hand between an eye and a
 //     screen, that eye sees through the screen (to Room View). Only then is the screen
 //     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
 //     buffer is shown as is.
