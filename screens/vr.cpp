@@ -276,10 +276,8 @@ struct Screen {
         return width > 0 ? metres * height / width : metres * 9 / 16;
     }
     // Buffer pixels from OpenVR's mouse position on the panel (its origin is bottom left).
-    void ToBuffer(double mx, double my, double *x, double *y) const {
-        if (floating && cropW > 0) *x = cropX + mx, *y = cropY + cropH - my;
-        else *x = mx, *y = height - my;
-    }
+    // A cropped panel too: SteamVR gives the position in the whole texture, not the crop.
+    void ToBuffer(double mx, double my, double *x, double *y) const { *x = mx, *y = height - my; }
     std::array<vr::VROverlayHandle_t, 6> Controls() const {
         return {bar, curveButton, rollButton, handle, dockButton, closeButton};
     }
@@ -1150,14 +1148,15 @@ void Push(Screen &s, double notches) {
 
 // ---------------------------------------------------------------- floating windows
 
-// Show the window's rectangle of the buffer, and map the mouse to it (see ToBuffer).
-// Texture bounds are fractions of the buffer, v from the top.
+// Show the window's rectangle of the buffer. Texture bounds are fractions of the buffer, v
+// from the top. SteamVR reports mouse positions in the whole texture (the bounds applied), so
+// the mouse scale is the buffer's size, as on a screen (see ToBuffer).
 void CropOverlay(vr::VROverlayHandle_t o, const Screen &s, int x, int y, int w, int h) {
     if (s.width <= 0 || s.height <= 0 || w <= 0 || h <= 0) return;
     vr::VRTextureBounds_t b = {float(x) / s.width, float(y) / s.height, float(x + w) / s.width,
                                float(y + h) / s.height};
     vr::VROverlay()->SetOverlayTextureBounds(o, &b);
-    vr::HmdVector2_t scale = {float(w), float(h)};
+    vr::HmdVector2_t scale = {float(s.width), float(s.height)};
     vr::VROverlay()->SetOverlayMouseScale(o, &scale);
 }
 
@@ -1571,15 +1570,11 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     RefreshPoses();
     for (auto &[index, s] : g_screens) {
         vr::VREvent_t ev;
-        // The screen itself: input for KWin.
         // The screen itself (and a floating window's popups): input for KWin.
-        auto panelEvent = [&](const vr::VREvent_t &ev, bool sub, const Sub *from) {
+        auto panelEvent = [&](const vr::VREvent_t &ev, bool sub) {
             ft_event e{};
             e.screen = index;
-            auto at = [&] {
-                if (from) e.x = from->x + ev.data.mouse.x, e.y = from->y + from->h - ev.data.mouse.y;
-                else s.ToBuffer(ev.data.mouse.x, ev.data.mouse.y, &e.x, &e.y);
-            };
+            auto at = [&] { s.ToBuffer(ev.data.mouse.x, ev.data.mouse.y, &e.x, &e.y); };
             switch (ev.eventType) {
                 case vr::VREvent_MouseMove:
                     if (s.titleCarry) return;  // KWin's pointer stays where the title bar was pressed
@@ -1624,9 +1619,9 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
             }
             handle(&e, data);
         };
-        while (vr::VROverlay()->PollNextOverlayEvent(s.overlay, &ev, sizeof ev)) panelEvent(ev, false, nullptr);
+        while (vr::VROverlay()->PollNextOverlayEvent(s.overlay, &ev, sizeof ev)) panelEvent(ev, false);
         for (const auto &[k, sub] : s.subs)
-            while (vr::VROverlay()->PollNextOverlayEvent(sub.overlay, &ev, sizeof ev)) panelEvent(ev, true, &sub);
+            while (vr::VROverlay()->PollNextOverlayEvent(sub.overlay, &ev, sizeof ev)) panelEvent(ev, true);
         // The controls light up under a laser.
         auto hover = [&](int k) {
             const bool on = ev.eventType == vr::VREvent_MouseMove || ev.eventType == vr::VREvent_FocusEnter;

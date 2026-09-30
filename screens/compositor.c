@@ -434,8 +434,10 @@ static int control_readable(int fd, uint32_t mask, void *data) {
         int value, index, w, h;
         double scale;
         if (sscanf(buf, "size %d %d %d", &index, &w, &h) == 3) {
-            // A new resolution for a screen, live: KWin resizes the screen to match.
-            if (index < 1 || index > MAX_SCREENS || !s->screens[index - 1] || w < 320 || h < 200 || w > 16384 ||
+            // A new resolution for a screen, live: KWin resizes the screen to match. (KWin makes
+            // it this size times its scale; ft-floatd sends spares' sizes divided by theirs.)
+            const int min_w = index - 1 < s->n_config ? 320 : 64, min_h = index - 1 < s->n_config ? 200 : 64;
+            if (index < 1 || index > MAX_SCREENS || !s->screens[index - 1] || w < min_w || h < min_h || w > 16384 ||
                 h > 16384) {
                 snprintf(reply, sizeof reply, "error bad screen or size");
             } else {

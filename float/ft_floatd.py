@@ -47,17 +47,32 @@ PATH = "/Float"
 SCRIPT = "frametop-float"
 POLL_SECONDS = 20        # NextCommand answers empty after this (KWin's D-Bus timeout is 25 s)
 SPARE_X, SPARE_CELL = 12000, 5000  # spares in KWin's layout: a grid from here, 4 across
-PULL_OUT = 0.05          # a floated window starts this far in front of its screen (metres)
+PULL_OUT = 0.3           # a floated window starts this far in front of its screen (metres), clear of it
 DEFAULT_MPP = 1.6 / 1920  # metres per pixel when ft-screens can't say (no SteamVR)
 DEBUG = os.environ.get("FT_FLOAT_DEBUG") == "1"  # log every event from the script
 
 
-def fit(px, scale):
-    """An output size KWin can draw at this scale: its nested backend gives the buffer a whole
-    buffer scale (1.2 -> 2), and a buffer that isn't a multiple of it is a protocol error that
-    disconnects KWin. So round up to a multiple; the margin takes the extra pixels."""
-    k = max(1, math.ceil(scale - 1e-6))
-    return (px + k - 1) // k * k
+def whole(*scales):
+    """The multiple a spare's size in pixels must be at these scales: KWin's nested backend gives
+    the buffer a whole buffer scale (1.2 -> 2), and a buffer that isn't a multiple of it is a
+    protocol error that disconnects KWin."""
+    k = 1
+    for s in scales:
+        k = math.lcm(k, max(1, math.ceil(s - 1e-6)))
+    return k
+
+
+def kwin_size(px, scale, k):
+    """What to ask ft-screens for so a spare comes out at least px pixels, a multiple of k. KWin
+    makes a nested output the size it's configured to times its scale, rounded. Returns (the
+    size to ask for, the pixels it comes out); the margin takes the extra pixels."""
+    n = max(1, math.floor(px / scale))
+    while True:
+        exact = n * scale
+        p = math.floor(exact + 0.5)
+        if p >= px and p % k == 0 and abs(exact - math.floor(exact) - 0.5) > 1e-6:
+            return n, p
+        n += 1
 
 
 def log(*args):
@@ -126,6 +141,8 @@ class Slot:
         self.index = screens + k + 1  # ft-screens' number (1-based)
         self.pos = (SPARE_X + (k % 4) * SPARE_CELL, (k // 4) * SPARE_CELL)
         self.size = None              # its output's size in pixels, as last set
+        self.want = None              # the size in pixels asked for (size is at least that)
+        self.kscale = 1.0             # its output's scale in KWin, as last set
         self.window = None            # Float
 
 
@@ -257,12 +274,14 @@ class Daemon:
         if not ev.get("normal"):
             return
         if slot.window is None:
+            if ev.get("cls") == "ksplashqml":  # the login splash, on every output at first
+                return
             # Floating when ft-floatd (re)started: take it over where it is.
             f = Float(wid, slot, None)
             slot.window = f
             self.floats[wid] = f
-            f.scale = output_scales().get(slot.output, 1.0)
-            log(f"{wid[:9]} already floats on {slot.output}")
+            f.scale = slot.kscale = output_scales().get(slot.output, 1.0)
+            log(f"{wid[:9]} ({ev.get('cls')}) already floats on {slot.output}")
             self.follow(f, ev)
             return
         # A new window that opened on a floating window's output: windows of floating apps
@@ -287,6 +306,15 @@ class Daemon:
             time.sleep(0.03)
         log(f"{slot.output} didn't take {size[0]}x{size[1]} in time")
         return False
+
+    def set_size(self, slot, want, k=None):
+        """Size a spare's output to at least want (pixels) at its current scale in KWin."""
+        if want == slot.want:
+            return
+        k = k or whole(slot.kscale)
+        (w, pw), (h, ph) = kwin_size(want[0], slot.kscale, k), kwin_size(want[1], slot.kscale, k)
+        slot.want, slot.size = want, (pw, ph)
+        self.screens.ask(f"size {slot.index} {w} {h}")
 
     def disable_unused(self):
         off = [f"output.{s.output}.disable" for s in self.slots if s.window is None]
@@ -323,21 +351,24 @@ class Daemon:
         f = Float(wid, slot, {"output": ev["output"], "frame": ev["frame"], "onAllDesktops": ev.get("onAllDesktops")})
         slot.window = f
         self.floats[wid] = f
-        f.scale = output_scales().get(ev["output"], 1.0)
+        scales = output_scales()
+        f.scale = scales.get(ev["output"], 1.0)
+        slot.kscale = scales.get(slot.output, slot.kscale)
         f.mpp = self.screen_mpp(ev["output"])
         fr, s, m = ev["frame"], f.scale, self.margin
         w, h = round(fr["w"] * s), round(fr["h"] * s)
-        slot.size = (fit(w + 2 * m, s), fit(h + 2 * m, s))
         log(f"{wid[:9]} ({ev.get('cls')}) floats on {slot.output}: {w}x{h} px, scale {s:g}")
-        # The spare's size first (while it's off, so its first frame is right), then its panel,
-        # then turn it on, then the window.
-        self.screens.ask(f"size {slot.index} {slot.size[0]} {slot.size[1]}")
-        self.sized(slot, slot.size)
+        # The spare's size first (while it's off, so its first frame is right; it's sized at
+        # its old scale, for pixels that suit the new one), then its panel, then turn it on,
+        # then the window.
+        slot.want = None
+        self.set_size(slot, (w + 2 * m, h + 2 * m), whole(slot.kscale, s))
         self.screens.ask(f"scale {slot.index} {s:g}")  # for pointer positions (KWin's units)
         self.set_panel(f, (m, m, w, h), title=round((ev["client"]["y"] - fr["y"]) * s))
         self.place_panel(f, ev)
         kscreen(f"output.{slot.output}.enable", f"output.{slot.output}.scale.{s:g}",
                 f"output.{slot.output}.position.{slot.pos[0]},{slot.pos[1]}")
+        self.rescaled(slot, s)
         self.command(cmd="place", id=wid, output=slot.output, x=slot.pos[0] + m / s, y=slot.pos[1] + m / s,
                      w=fr["w"], h=fr["h"], onAllDesktops=True)
 
@@ -378,11 +409,7 @@ class Daemon:
         if not full:
             f.normal = (w, h)
         m = 0 if full else self.margin
-        want = f.normal if full and f.normal else (w + 2 * m, h + 2 * m)
-        want = (fit(want[0], s), fit(want[1], s))
-        if want != slot.size:
-            slot.size = want
-            self.screens.ask(f"size {slot.index} {want[0]} {want[1]}")
+        self.set_size(slot, f.normal if full and f.normal else (w + 2 * m, h + 2 * m))
         if not full:
             x0, y0 = slot.pos[0] + m / s, slot.pos[1] + m / s
             if abs(fr["x"] - x0) > 0.5 or abs(fr["y"] - y0) > 0.5:
@@ -403,15 +430,25 @@ class Daemon:
         slot, m = f.slot, self.margin
         log(f"{f.id[:9]} scale {f.scale:g} -> {s:g}")
         f.scale = s
-        # The output's size must suit the new scale before KWin draws at it (see fit).
-        size = (fit(slot.size[0], s), fit(slot.size[1], s))
-        if size != slot.size:
-            slot.size = size
-            self.screens.ask(f"size {slot.index} {size[0]} {size[1]}")
-            self.sized(slot, size)
+        # The output's size in pixels must suit the new scale before KWin draws at it (see whole).
+        k = whole(slot.kscale, s)
+        if slot.size[0] % k or slot.size[1] % k:
+            slot.want = None
+            self.set_size(slot, slot.size, k)
+            self.sized(slot, slot.size)
         kscreen(f"output.{slot.output}.scale.{s:g}")
         self.screens.ask(f"scale {slot.index} {s:g}")
+        self.rescaled(slot, s)
         self.command(cmd="geometry", id=f.id, x=slot.pos[0] + m / s, y=slot.pos[1] + m / s, w=w / s, h=h / s)
+
+    def rescaled(self, slot, s):
+        """KWin has the spare at scale s now: ask for its size again in the new scale's terms,
+        or the next configure (any size, or KWin's own) would make it the old size times s."""
+        if s == slot.kscale:
+            return
+        slot.kscale = s
+        want, slot.want = slot.size, None
+        self.set_size(slot, want)
 
     def dock(self, f, frame=None):
         """Back where it came from (or onto screen 1 if we don't know)."""
@@ -427,6 +464,7 @@ class Daemon:
         slot = f.slot
         if slot.window is f:
             slot.window = None
+            slot.want = None
         for sub_id in list(f.subs):
             self.drop_sub(sub_id)
         self.screens.ask(f"unfloat {slot.index}", quiet=True)
