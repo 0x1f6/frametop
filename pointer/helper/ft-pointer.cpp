@@ -172,6 +172,11 @@
 // pinch point shifting as the fingers close stay inside it), at POINTER_PINCH_GAIN (0.5: half
 // the hand's angle, for precision). A correction is a lesson for the gaze tracker, as with the
 // mouse. A pinch ended by losing the hand (or by a grip taking over) doesn't click.
+//   Without gaze mode, a pinch is a real press instead, like the mouse's button: pressed when
+// it closes and released when it opens, and held, its hand drags the pointer (at the same gain
+// and past the same dead zone). A tap is still a click where the pointer is. That's what the
+// gaze probe's Click practice wants: it has its own gaze dot, frozen by the press and dragged
+// by the pointer's movement until the release.
 //   A grip (closing the hand) is a press and drag: the press where the pointer is, then the
 // hand moves the pointer at POINTER_GRIP_GAIN (1: as far as it moves, seen from the eye), and
 // opening the hand releases. So it drags whatever the pointer is on: a title bar moves the
@@ -807,6 +812,7 @@ int main() {
         int side = -1;
         bool grip = false, engaged = false;
         Vec3 origin;
+        bool pressed = false;  // a real press went out (a grip, or a pinch without gaze mode)
         double refYaw = 0, refPitch = 0, startYaw = 0, startPitch = 0, lastYaw = 0, lastPitch = 0;
     } hold;
     uint32_t seenBegins[2][2] = {}, seenEnds[2][2] = {};  // [pinch, grip][side], as last read
@@ -1377,7 +1383,7 @@ int main() {
             return true;
         };
         auto endHold = [&](bool lost) {
-            if (hold.grip) {
+            if (hold.pressed) {
                 if (leftHeld) releaseLeft();
             } else if (aimHeld) {
                 aimHeld = aimHand = false;
@@ -1420,8 +1426,10 @@ int main() {
             hold = {side, grip, false, Position(head)};
             if (!handAngles(g.begin_point, g.begin_ns, hold.origin, hold.refYaw, hold.refPitch)) return void(hold.side = -1);
             hold.startYaw = yaw, hold.startPitch = pitch;
-            if (grip) {
-                // A press and drag where the pointer is (where you look, in gaze mode).
+            // A grip, or a pinch without gaze mode: a real press where the pointer is (where
+            // you look, in gaze mode), dragging with the hand until it opens.
+            hold.pressed = grip || !gazeOn;
+            if (hold.pressed) {
                 gazeBack = gazeOn && gazeOwns;
                 pressLeft();
             } else {
