@@ -67,6 +67,17 @@
 #define SEAM_LIMIT    2.0   /* seam_score above this: the frame carries the half-size copy */
 #define STALE_RELEARN 30    /* consecutive unchanged frames: the mapping changed      */
 #define MAX_RELEARNS  5     /* then assume XRService has new buffers, and exit        */
+/*
+ * The color cameras never take the mono ones down with them. Each color buffer is ~9 MB,
+ * and every probe for a fresh one syncs a whole buffer's cache, so a color camera looks
+ * at no more than COLOR_PROBES buffers a frame. One that keeps going stale (on 2026-09-30
+ * it did while the headset was worn, never while it lay unused) is paused for
+ * COLOR_PAUSE_S, doubling each time up to COLOR_PAUSE_MAX_S, then learned again; ft-camd
+ * doesn't exit over it.
+ */
+#define COLOR_PROBES       4
+#define COLOR_PAUSE_S      10
+#define COLOR_PAUSE_MAX_S  160
 
 typedef struct {
     xr_camera_t    *cam;
@@ -105,6 +116,10 @@ typedef struct {
     unsigned        out_w, out_h;       /* image size in the ring                     */
     uint64_t        last_pub_ns;        /* --color-fps pacing                         */
     uint64_t        paced, seams;       /* color frames skipped: pacing, the half-size copy */
+    uint64_t        paused_until;       /* color: going stale, left alone until then  */
+    unsigned        pause_s;            /* ... for this long the next time            */
+    uint64_t        pauses;
+    unsigned        good_run;           /* color frames in a row that were fresh      */
     uint8_t        *ring_dark;
     uint64_t        dark_no;
 
@@ -128,6 +143,13 @@ static bool        opt_with_dark;       /* also publish the near-black frames */
 static bool        opt_with_color;      /* also publish the Arcturus color cameras */
 static unsigned    opt_color_scale = 2; /* ... at 1/N size */
 static double      opt_color_fps = 30;  /* ... at most this often */
+static double      opt_color_idle = 2;  /* ... and this often while no reader asks for more */
+/*
+ * The color rate readers ask for (see color_want): ft-hands tracks with the color cameras
+ * only in bright light, and otherwise needs just their brightness now and then, which
+ * saves most of the decoding (about 11% of a core at 30 fps).
+ */
+static double      color_fps = 2;
 static double      opt_status = 10.0;
 
 static volatile sig_atomic_t stop;
@@ -509,7 +531,7 @@ static int find_fresh(cam_t *c, uint64_t *out)
             int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
         }
 
-    for (int k = 0; k < c->nslots; k++) {
+    for (int k = 0; k < c->nslots && (!c->color || k < COLOR_PROBES); k++) {
 
         int s = order[k];
 
@@ -640,6 +662,9 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
     if (index < 0 || index >= MAX_INDEX || c->nslots == 0)
         return;
 
+    if (c->color && evtime < c->paused_until)
+        return;
+
     if (!c->mapped) {
         learn(c, (int)index);
         return;
@@ -652,8 +677,8 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
 
     int slot = c->slot_of[index];
 
-    /* color runs at 60 fps: skip frames early enough that --color-fps holds, before any sync */
-    if (c->color && opt_color_fps > 0 && evtime - c->last_pub_ns < (uint64_t)(1e9 / opt_color_fps) - 3000000) {
+    /* color runs at 60 fps: skip frames early enough that the asked rate holds, before any sync */
+    if (c->color && color_fps > 0 && evtime - c->last_pub_ns < (uint64_t)(1e9 / color_fps) - 3000000) {
         c->paced++;
         return;
     }
@@ -700,7 +725,19 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
         }
         c->stale++;
         c->rc->dropped++;
-        if (++c->stale_run >= STALE_RELEARN) {
+        c->good_run = 0;
+        if (++c->stale_run >= STALE_RELEARN && c->color && c->relearns >= 1) {
+            /* the second time in a row: leave it alone for a while (see COLOR_PAUSE_S) */
+            c->pause_s = c->pause_s ? (c->pause_s * 2 > COLOR_PAUSE_MAX_S ? COLOR_PAUSE_MAX_S : c->pause_s * 2)
+                                    : COLOR_PAUSE_S;
+            c->paused_until = evtime + (uint64_t)c->pause_s * 1000000000ull;
+            c->pauses++;
+            fprintf(stderr, "%s: %d frames in a row unchanged again; color paused for %u s\n", c->slug,
+                    c->stale_run, c->pause_s);
+            c->stale_run = 0;
+            c->relearns = 0;
+            reset_learning(c);
+        } else if (c->stale_run >= STALE_RELEARN) {
             if (++c->relearns > MAX_RELEARNS) {
                 fprintf(stderr, "%s: its buffers keep going stale; XRService must have new ones\n", c->slug);
                 exit(3);
@@ -713,6 +750,8 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
     }
 
     c->stale_run = 0;
+    if (c->color && ++c->good_run >= 600)   /* about a minute at the idle rate: trouble forgotten */
+        c->relearns = 0, c->pause_s = 0, c->good_run = 0;
     memcpy(c->samp[slot], cur, sizeof(cur));
     memcpy(c->hist[1], c->hist[0], sizeof(cur));
     memcpy(c->hist[0], cur, sizeof(cur));
@@ -749,6 +788,7 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
     if (mean < opt_dark * peak) {
         c->dark++;
         c->rc->dropped++;
+        c->rc->dark_mean = (float)(mean > 0.01 ? mean : 0.01);
         if (c->rc_dark)
             publish(c, c->rc_dark, c->ring_dark, &c->dark_no, c->map[slot], seq, ts, evtime, mean);
     } else {
@@ -799,6 +839,81 @@ static int ring_layout(int cam_of[], bool dark_of[], int max)
 }
 
 static char ring_dir[64], ring_file[96];
+
+/*
+ * The color rate readers want: a number of frames a second in ring_dir/color-fps, which
+ * ft-hands rewrites every second while it tracks with the color cameras. A file newer than
+ * 3 s holds (up to --color-fps); otherwise the color cameras run at --color-idle.
+ */
+static void color_want(void)
+{
+    char path[128], buf[32] = "";
+    struct stat st;
+    struct timespec now;
+    double want = opt_color_idle;
+
+    snprintf(path, sizeof(path), "%s/color-fps", ring_dir);
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (stat(path, &st) == 0 && now.tv_sec - st.st_mtim.tv_sec <= 3) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            if (fgets(buf, sizeof(buf), f) && atof(buf) > 0)
+                want = atof(buf);
+            fclose(f);
+        }
+    }
+
+    if (want > opt_color_fps)
+        want = opt_color_fps;
+
+    if (want != color_fps) {
+        printf("color cameras: %.0f fps\n", want);
+        fflush(stdout);
+        color_fps = want;
+    }
+}
+
+/* A setting from ~/.config/frametop.conf, or FT_<key> from the environment; "" if unset. */
+static void setting(const char *key, char *out, size_t n)
+{
+    char env[64], path[512], line[512];
+    const char *home = getenv("HOME");
+
+    snprintf(env, sizeof(env), "FT_%s", key);
+    out[0] = 0;
+
+    if (getenv(env)) {
+        snprintf(out, n, "%s", getenv(env));
+        return;
+    }
+
+    snprintf(path, sizeof(path), "%s/.config/frametop.conf", home ? home : "");
+    FILE *f = fopen(path, "r");
+
+    if (!f)
+        return;
+
+    size_t klen = strlen(key);
+
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncmp(p, key, klen) || (p[klen] != '=' && p[klen] != ' '))
+            continue;
+        p = strchr(p, '=');
+        if (!p)
+            continue;
+        p++;
+        while (*p == ' ' || *p == '"' || *p == '\'')
+            p++;
+        size_t len = strcspn(p, " \t\"'#\n");
+        snprintf(out, n, "%.*s", (int)len, p);
+    }
+
+    fclose(f);
+}
 
 /* Created once privileges are gone, as the user, in a folder only the user can write. */
 static uint8_t *ring_create(size_t *len_out)
@@ -950,18 +1065,20 @@ static void status(double secs)
     for (int i = 0; i < ncams; i++) {
         cam_t *c = &cams[i];
         if (c->color) {
-            printf("  %s %s%.1f fps (paced %llu half-size copy %llu stale %llu torn %llu, sync %.2f ms decode %.2f ms)",
-                   c->slug, c->mapped ? "" : "learning ", (double)(c->bright - c->last_bright) / opt_status,
-                   (unsigned long long)c->paced, (unsigned long long)c->seams, (unsigned long long)c->stale,
-                   (unsigned long long)c->torn, c->nsync ? c->sync_ns / 1e6 / c->nsync : 0.0,
+            printf("  %s %s%s%.1f fps (paced %llu half-size copy %llu stale %llu torn %llu paused %llu, sync %.2f ms "
+                   "decode %.2f ms)",
+                   c->slug, mono_ns() < c->paused_until ? "PAUSED " : "", c->mapped ? "" : "learning ",
+                   (double)(c->bright - c->last_bright) / opt_status, (unsigned long long)c->paced,
+                   (unsigned long long)c->seams, (unsigned long long)c->stale, (unsigned long long)c->torn,
+                   (unsigned long long)c->pauses, c->nsync ? c->sync_ns / 1e6 / c->nsync : 0.0,
                    c->bright ? c->copy_ns / 1e6 / c->bright : 0.0);
             c->last_bright = c->bright;
             continue;
         }
-        printf("  %s %s%.1f fps (dark %llu stale %llu torn %llu remapped %llu, sync %.2f ms copy %.2f ms)",
+        printf("  %s %s%.1f fps (dark %llu at %.1f stale %llu torn %llu remapped %llu, sync %.2f ms copy %.2f ms)",
                c->slug, c->mapped ? "" : "learning ", (double)(c->bright - c->last_bright) / opt_status,
-               (unsigned long long)c->dark, (unsigned long long)c->stale, (unsigned long long)c->torn,
-               (unsigned long long)c->repairs,
+               (unsigned long long)c->dark, c->rc->dark_mean, (unsigned long long)c->stale,
+               (unsigned long long)c->torn, (unsigned long long)c->repairs,
                c->nsync ? c->sync_ns / 1e6 / c->nsync : 0.0, c->bright ? c->copy_ns / 1e6 / c->bright : 0.0);
         c->last_bright = c->bright;
     }
@@ -985,8 +1102,11 @@ static void usage(const char *argv0)
            "  --with-dark    also publish the dark frames, as extra ring cameras flagged FH_CAM_DARK\n"
            "  --with-color   also publish the Arcturus color cameras' luma, flagged FH_CAM_COLOR\n"
            "  --color-scale N  ... at 1/N size (default 2: 986x1232)\n"
-           "  --color-fps F  ... at most F frames a second (default 30; they run at 60)\n"
+           "  --color-fps F  ... at most F frames a second (default 30; they run at 60), as readers ask\n"
+           "                 in /run/user/UID/frametop-hands/color-fps (ft-hands does when it tracks with them)\n"
+           "  --color-idle F ... and F a second while no reader asks (default 2: enough to tell the light)\n"
            "  --status S     print a status line every S seconds, 0 for never (default 10)\n"
+           "HANDS_CAMERAS=mono in ~/.config/frametop.conf (or FT_HANDS_CAMERAS) turns --with-color off.\n"
            "Frames go to /run/user/UID/" FH_RING_NAME " (layout in fhring.h).\n", argv0);
 }
 
@@ -1006,6 +1126,8 @@ int main(int argc, char **argv)
             opt_color_scale = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--color-fps") && i + 1 < argc)
             opt_color_fps = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--color-idle") && i + 1 < argc)
+            opt_color_idle = atof(argv[++i]);
         else if (!strcmp(argv[i], "--status") && i + 1 < argc)
             opt_status = atof(argv[++i]);
         else {
@@ -1013,6 +1135,14 @@ int main(int argc, char **argv)
             return strcmp(argv[i], "--help") ? 1 : 0;
         }
     }
+
+    char cams_setting[32];
+    setting("HANDS_CAMERAS", cams_setting, sizeof(cams_setting));
+    if (opt_with_color && !strcmp(cams_setting, "mono")) {
+        printf("HANDS_CAMERAS=mono: no color cameras\n");
+        opt_with_color = false;
+    }
+    color_fps = opt_color_idle < opt_color_fps ? opt_color_idle : opt_color_fps;
 
     bool root = geteuid() == 0;
     uid_t uid = getuid();
@@ -1093,7 +1223,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    uint64_t start = mono_ns(), last_status = start;
+    uint64_t start = mono_ns(), last_status = start, last_want = 0;
     int rc = 0;
 
     while (!stop) {
@@ -1105,6 +1235,11 @@ int main(int argc, char **argv)
 
         uint64_t now = mono_ns();
         __atomic_store_n(&ring->heartbeat_ns, now, __ATOMIC_RELEASE);
+
+        if (opt_with_color && now - last_want >= 500000000ull) {
+            color_want();
+            last_want = now;
+        }
 
         struct pollfd pf = { .fd = pidfd, .events = POLLIN };
 

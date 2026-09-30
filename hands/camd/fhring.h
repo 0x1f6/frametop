@@ -55,7 +55,11 @@ typedef struct {
     uint64_t          published;    /* frames published                             */
     uint64_t          dropped;      /* dark, stale or torn frames not published     */
     uint32_t          flags;        /* FH_CAM_*                                     */
-    uint8_t           reserved[28];
+    float             dark_mean;    /* mono: mean luma of its latest near-black     */
+                                    /* frame (a short fixed exposure, so it follows */
+                                    /* the room's IR light, sunlight above all);    */
+                                    /* 0 before the first                           */
+    uint8_t           reserved[24];
 } fh_ring_cam_t;                    /* 160 bytes */
 
 typedef struct {

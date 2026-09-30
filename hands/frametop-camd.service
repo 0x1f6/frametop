@@ -10,7 +10,9 @@ PartOf=steamvr.service
 # On the host: the dev container can't reach XRService. Its file capabilities (set by
 # hands/run.sh install) let it borrow the buffers; it drops them once set up. It exits when
 # XRService restarts, and comes back to attach to the new one.
-ExecStart=@REPO@/hands/build/ft-camd --status 60
+# The colour cameras run at 2 fps (their brightness picks the tracking cameras) until
+# ft-hands asks for more; HANDS_CAMERAS=mono leaves them out.
+ExecStart=@REPO@/hands/build/ft-camd --with-color --status 60
 Restart=always
 RestartSec=5
 TimeoutStopSec=5
