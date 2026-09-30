@@ -8,7 +8,7 @@
 //
 //   {"t":<sample time, CLOCK_MONOTONIC_RAW s>,"age":<ms old when read>,"n":<sample counter>,
 //    "head":{"yaw":..,"pitch":..,"hit":HIT},          head forward ray (for head nudging)
-//    "src":{"action":SRC,"mmap1":SRC,"mmap2":SRC,"left":SRC,"right":SRC},"eye":EYE}
+//    "src":{"action":SRC,"mmap1":SRC,"mmap2":SRC,"left":SRC,"right":SRC,"own":SRC},"eye":EYE}
 //   SRC = {"hy":..,"hp":..,"hit":HIT} or {"ok":0}    hy/hp: gaze direction relative to the
 //                                                     head, degrees (yaw +left, pitch +up)
 //         mmap1 adds "open":[l,r] (probably eye openness, 0 in a blink) and "dist" (vergence
@@ -21,6 +21,12 @@
 //         (set 1's eyes always share one pitch, and while it's lost an eye it keeps that
 //         eye's yaw where it was: set 2 is each eye's own reading). From the head's origin,
 //         not the eye's.
+//    "own":SRC                                        our own tracker (frame-eyes fe-trackd), from
+//         /dev/shm/frame-eyes-gaze; adds "age" (ms since its frame), "eyes":[[hy,hp],[hy,hp]]
+//         (left, right; null for an eye it doesn't see), "ehit":[HIT,HIT] where each of those
+//         lands, and "slip":[[x,y],[x,y]] (left, right: each eye's shift in its camera image
+//         since the calibration, pixels; null until a click has measured it). {"ok":0}
+//         without the file or when it's over 100 ms old.
 //   EYE = {"q":[l,r],"m":[[x,y],[x,y]],"new":[l,r]}  the tracker's latest measurement of
 //         each eye before filtering: "m" (camera-relative, undocumented units), "q" its
 //         variance (about 2e-5 on a clear view of the eye, rising as the lid or lashes get
@@ -156,6 +162,69 @@ bool ReadSample(const EyeFile &f, EyeSample &s) {
     }
     return false;
 }
+
+// --- Our own tracker: /dev/shm/frame-eyes-gaze, written by frame-eyes' fe-trackd ---
+// Layout (fe-trackd's docstring): u32 seq (odd while written), u32 version, f64 t, f32 yaw,
+// pitch, u32 flags (bit 0 right eye, 1 left, 2 right slip known, 3 left), u32 n, then f32
+// right yaw, pitch, left yaw, pitch; slip right x, y, left x, y; pupils (unused here).
+struct OwnSample {
+    double t = 0;
+    float yaw = 0, pitch = 0;
+    uint32_t flags = 0, n = 0;
+    float eyes[4] = {}, slip[4] = {};
+};
+
+class OwnFile {
+public:
+    // Reopened when it appears or is replaced, since fe-trackd may start after us.
+    bool Read(OwnSample &o) {
+        const double now = NowRaw();
+        if (!p_ || now - checked_ > 2.0) Reopen(now);
+        if (!p_) return false;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            uint32_t s0, s1, version;
+            std::memcpy(&s0, p_, 4);
+            if (s0 & 1) continue;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            std::memcpy(&version, p_ + 4, 4);
+            std::memcpy(&o.t, p_ + 8, 8);
+            std::memcpy(&o.yaw, p_ + 16, 4);
+            std::memcpy(&o.pitch, p_ + 20, 4);
+            std::memcpy(&o.flags, p_ + 24, 4);
+            std::memcpy(&o.n, p_ + 28, 4);
+            std::memcpy(o.eyes, p_ + 32, sizeof o.eyes);
+            std::memcpy(o.slip, p_ + 48, sizeof o.slip);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            std::memcpy(&s1, p_, 4);
+            if (s0 == s1) return version == 1;
+        }
+        return false;
+    }
+
+private:
+    static constexpr size_t kSize = 128;
+    void Reopen(double now) {
+        checked_ = now;
+        struct stat st {};
+        if (stat("/dev/shm/frame-eyes-gaze", &st) != 0) return Close();
+        if (p_ && st.st_ino == ino_) return;
+        Close();
+        const int fd = open("/dev/shm/frame-eyes-gaze", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return;
+        if (fstat(fd, &st) == 0 && size_t(st.st_size) >= kSize) {
+            void *m = mmap(nullptr, kSize, PROT_READ, MAP_SHARED, fd, 0);
+            if (m != MAP_FAILED) p_ = static_cast<const uint8_t *>(m), ino_ = st.st_ino;
+        }
+        close(fd);
+    }
+    void Close() {
+        if (p_) munmap(const_cast<uint8_t *>(p_), kSize);
+        p_ = nullptr;
+    }
+    const uint8_t *p_ = nullptr;
+    ino_t ino_ = 0;
+    double checked_ = -1e9;
+};
 
 // --- Screens from ft-screens ---
 struct Screen {
@@ -394,6 +463,7 @@ int main(int argc, char **argv) {
     const bool haveMmap = eyes.Open();
     std::fprintf(stderr, "ft-gaze: eye-server.mmap %s\n", haveMmap ? "open" : "not available");
 
+    OwnFile ownFile;
     Screens screens;
     screens.Start();
     PoseHistory history;
@@ -482,14 +552,42 @@ int main(int argc, char **argv) {
                 eye = extra;
             }
 
+            // Our tracker: its own sample time picks the head pose, like the mmap's.
+            std::string own = "{\"ok\":0}";
+            OwnSample o;
+            if (ownFile.Read(o) && now - o.t < 0.1) {
+                vr::HmdMatrix34_t headOwn = headNow;
+                history.At(o.t, headOwn);
+                auto pair = [](bool ok, float a, float b) {
+                    char p[48];
+                    if (!ok) return std::string("null");
+                    std::snprintf(p, sizeof p, "[%.4f,%.4f]", a, b);
+                    return std::string(p);
+                };
+                // Stored right eye first; reported left first, like the other sources.
+                const std::string extra = "\"age\":" + std::to_string(int((now - o.t) * 1000)) +
+                                          ",\"eyes\":[" + pair(o.flags & 2, o.eyes[2], o.eyes[3]) + "," +
+                                          pair(o.flags & 1, o.eyes[0], o.eyes[1]) + "],\"slip\":[" +
+                                          pair(o.flags & 8, o.slip[2], o.slip[3]) + "," +
+                                          pair(o.flags & 4, o.slip[0], o.slip[1]) + "],";
+                // Where each eye's own gaze lands (left, right), for drawing them apart.
+                auto eyeHit = [&](bool ok, float y, float p) {
+                    return ok ? HitJson(list, headOwn, y, p) : std::string("null");
+                };
+                const std::string hits = "\"ehit\":[" + eyeHit(o.flags & 2, o.eyes[2], o.eyes[3]) + "," +
+                                         eyeHit(o.flags & 1, o.eyes[0], o.eyes[1]) + "],";
+                own = SrcJson(list, headOwn, Direction(o.yaw, o.pitch), extra + hits);
+            }
+
             double yaw, pitch;
             const Vec3 f = Rotate(headNow, {0, 0, -1});
             yaw = std::atan2(-f.x, -f.z) * 180 / M_PI;
             pitch = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
             std::printf("{\"t\":%.5f,\"age\":%.1f,\"n\":%u,\"head\":{\"yaw\":%.4f,\"pitch\":%.4f,\"hit\":%s},"
-                        "\"src\":{\"action\":%s,\"mmap1\":%s,\"mmap2\":%s,\"left\":%s,\"right\":%s},\"eye\":%s}\n",
+                        "\"src\":{\"action\":%s,\"mmap1\":%s,\"mmap2\":%s,\"left\":%s,\"right\":%s,\"own\":%s},"
+                        "\"eye\":%s}\n",
                         s.t, (now - s.t) * 1000, s.n, yaw, pitch, HitJson(list, headNow, 0, 0).c_str(), action.c_str(),
-                        m1.c_str(), m2.c_str(), left.c_str(), right.c_str(), eye.c_str());
+                        m1.c_str(), m2.c_str(), left.c_str(), right.c_str(), own.c_str(), eye.c_str());
             if (std::fflush(stdout) != 0) break;  // the reader went away
         }
 

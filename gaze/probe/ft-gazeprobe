@@ -60,6 +60,7 @@ import math
 import os
 import random
 import signal
+import socket
 import statistics
 import subprocess
 import sys
@@ -78,13 +79,42 @@ REPO = Path(__file__).resolve().parents[2]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
 STATE = Path.home() / ".local" / "state" / "frametop" / "gaze"
 # left and right: each eye alone (set 2's own reading of that eye), calibrated and tested
-# like the rest, to see what one eye is worth against both.
-SOURCES = ["action", "mmap1", "mmap2", "left", "right"]
+# like the rest, to see what one eye is worth against both. own: our own tracker
+# (~/Desktop/Projects/frame-eyes, fe-trackd), when it's running; it has its own calibration.
+SOURCES = ["action", "mmap1", "mmap2", "left", "right", "own"]
 SOURCE_NAMES = {"action": "SteamVR action", "mmap1": "mmap set 1", "mmap2": "mmap set 2", "left": "Left eye",
-                "right": "Right eye"}
+                "right": "Right eye", "own": "Own tracker"}
 SOURCE_COLORS = {"action": (0.2, 0.8, 1.0), "mmap1": (1.0, 0.6, 0.1), "mmap2": (0.9, 0.3, 0.9),
-                 "left": (0.4, 1.0, 0.6), "right": (1.0, 1.0, 0.4)}
+                 "left": (0.4, 1.0, 0.6), "right": (1.0, 1.0, 0.4), "own": (1.0, 0.35, 0.35)}
 TRIGGER_KEYS = {Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space}
+
+
+class OwnTracker:
+    """Talks to our own tracker (frame-eyes fe-trackd) over its control socket (@frame_eyes).
+    It keeps its own calibration: the probe sends it calibration dots and clicks, each with
+    when you looked and where (head-relative degrees), and it learns from its own frames."""
+
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.sock.bind(f"\0ft_gazeprobe.{os.getpid()}")
+        self.sock.settimeout(1.0)
+
+    def ask(self, command):
+        """The reply line, or "fail ..." if the tracker isn't running or doesn't answer."""
+        try:
+            while True:  # drop a late reply to an earlier command
+                self.sock.setblocking(False)
+                self.sock.recv(4096)
+        except (BlockingIOError, OSError):
+            pass
+        self.sock.settimeout(1.0)
+        try:
+            self.sock.sendto(command.encode(), "\0frame_eyes")
+            return self.sock.recv(4096).decode()
+        except (ConnectionRefusedError, FileNotFoundError):
+            return "fail the Own tracker isn't running (frame-eyes: tools/fe-live)"
+        except (socket.timeout, OSError) as e:
+            return f"fail no answer from the Own tracker ({e})"
 
 
 # The math, filters, correction models, and SteamVR log reader are shared with ft-gazed.
@@ -427,6 +457,9 @@ class Probe(Adw.ApplicationWindow):
         self.fitcheck = FitCheck()      # Headset fit: how well the tracker sees each eye
 
         self.models = {s: Correction() for s in SOURCES}
+        self.own = OwnTracker()
+        self.reseat_check = False    # showing the one-dot check after the headset was off
+        self.reseat_skipped = False  # S skipped this one
         self.live = {s: LiveCorrection() for s in SOURCES}
         self.steam = SteamEyeLog()
         self.steam.poll()
@@ -704,12 +737,22 @@ class Probe(Adw.ApplicationWindow):
             grid.attach(widget, 1, row, 1, 1)
             row += 1
 
+        # Which tracker drives the dot. SteamVR's gaze is still logged in the background with
+        # the Own tracker (for comparing), but not shown.
+        tracker = Gtk.Box(css_classes=["linked"])
+        self.w_steamvr = Gtk.ToggleButton(label="SteamVR", active=True)
+        self.w_own = Gtk.ToggleButton(label="Own tracker", group=self.w_steamvr)
+        tracker.append(self.w_steamvr)
+        tracker.append(self.w_own)
+        self.w_own.connect("toggled", lambda b: self.on_tracker())
+        add("Tracker", tracker)
         self.w_screen = self.dropdown(["Screen 1"])
         add("Screen", self.w_screen)
         self.w_mode = self.dropdown(self.MODE_NAMES)
         add("Mode", self.w_mode)
         # mmap set 2 had the least jitter (0.25 deg vs 0.30 for the action, sitting still).
         self.w_source = self.dropdown([SOURCE_NAMES[s] for s in SOURCES], 2)
+        self.w_source.connect("notify::selected", lambda *_: self.sync_tracker())
         add("Source", self.w_source)
         self.w_filter = self.dropdown(["Raw", "One Euro", "Fixation lock"], 2)
         add("Smoothing", self.w_filter)
@@ -866,6 +909,25 @@ class Probe(Adw.ApplicationWindow):
         n = len(self.live[self.source].samples)
         return self.model_mode + (f" + {n} clicks" if n and self.w_snaps.get_active() else "")
 
+    def on_tracker(self):
+        """The tracker toggle: the Own tracker, or SteamVR's set 2 (its quietest source)."""
+        own = self.w_own.get_active()
+        if own != (self.source == "own"):
+            self.w_source.set_selected(SOURCES.index("own") if own else SOURCES.index("mmap2"))
+        if own:
+            reply = self.own.ask("status")
+            if reply.startswith("fail"):
+                self.on_status(reply[5:])
+            else:
+                st = json.loads(reply)
+                self.on_status("Own tracker: " + ("calibrated " + st["calibration"].get("made", "")
+                                                  if st.get("calibration") else "not calibrated yet: Run calibration"))
+
+    def sync_tracker(self):
+        own = self.source == "own"
+        if self.w_own.get_active() != own:
+            (self.w_own if own else self.w_steamvr).set_active(True)
+
     def on_setting(self):
         model = self.model_mode
         if model != getattr(self, "last_model", model):
@@ -928,6 +990,10 @@ class Probe(Adw.ApplicationWindow):
         if keyval in (Gdk.KEY_s, Gdk.KEY_S) and self.calib:
             self.calib_skip()
             return True
+        if keyval in (Gdk.KEY_s, Gdk.KEY_S) and self.reseat_check:
+            self.reseat_check, self.reseat_skipped = False, True
+            self.area.queue_draw()
+            return True
         if keyval == Gdk.KEY_Escape:
             if self.calib or self.test:
                 self.calib = self.test = None
@@ -969,8 +1035,59 @@ class Probe(Adw.ApplicationWindow):
         if self.steam.poll():
             self.on_status("SteamVR's eye tracker just started again: its own calibration started over, "
                            "so the raw gaze may have moved")
+        self.poll_own()
         self.update_stats()
         return True
+
+    def poll_own(self):
+        """With the Own tracker: after the headset was off (or the tracker restarted), its
+        next click starts each eye's shift over, and until then the first clicks can be
+        10-17 degrees off (frame-eyes, session 5). So ask for one look at a centre dot first,
+        as Varjo's headsets do each time they're put on."""
+        if self.source != "own" or self.calib or self.capture:
+            return
+        reply = self.own.ask("status")
+        if reply.startswith("fail"):
+            return
+        st = json.loads(reply)
+        pending = bool(st.get("calibration")) and any(e.get("reseat") for e in st["eyes"].values())
+        if not pending:
+            self.reseat_skipped = False
+        check = pending and not self.reseat_skipped
+        if check != self.reseat_check:
+            self.reseat_check = check
+            self.area.queue_draw()
+
+    def reseat_press(self):
+        """The press on the check dot: a click there teaches both eyes' shifts at once."""
+        if not self.recent:
+            return
+        t_end = self.recent[-1]["t"]
+        w, h = self.canvas_size()
+        d = self.screen_direction([smp for smp in self.recent if smp["t"] >= t_end - 0.6], (w / 2, h / 2))
+        if d is None:
+            self.on_status("no gaze samples on this screen: look at the dot and press again")
+            return
+        reply = self.own.ask(f"click {t_end:.6f} {d[0]:.4f} {d[1]:.4f}")
+        if reply.startswith("ok"):
+            self.reseat_check = False
+            self.on_status("Own tracker: checked after the headset was off")
+        else:
+            self.on_status(reply[5:] if reply.startswith("fail") else reply)
+        self.area.queue_draw()
+
+    def draw_reseat(self, cr, w, h):
+        cx, cy = w / 2, h / 2
+        cr.set_source_rgb(1, 1, 1)
+        cr.arc(cx, cy, 10, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgb(0.1, 0.1, 0.1)
+        cr.arc(cx, cy, 3, 0, 2 * math.pi)
+        cr.fill()
+        ink = (0.9, 0.9, 0.9)
+        self.text(cr, 60, 70, "Own tracker: the headset was off, so it may sit differently now", ink, 26)
+        self.text(cr, 60, 108, self.status if self.status.startswith("no gaze") else
+                  "Look at the dot and press (Enter, Space, or click). S skips.", ink, 20)
 
     def on_sample(self, s):
         self.sample = s
@@ -991,6 +1108,9 @@ class Probe(Adw.ApplicationWindow):
         head = s["head"].get("hit")
         ox, oy = self.origin or (0, 0)
         self.head = (head["x"] - ox, head["y"] - oy) if head and head["s"] == self.screen else None
+        # The Own tracker's eyes, each where it alone puts your gaze (left, right).
+        self.own_eyes = [(h["x"] - ox, h["y"] - oy) if h and h["s"] == self.screen else None
+                         for h in ((s["src"].get("own") or {}).get("ehit") or [])]
 
         r = self.raw.get(self.source)
         if r is None:
@@ -1025,7 +1145,10 @@ class Probe(Adw.ApplicationWindow):
 
     def correction(self, name, hy, hp, snaps=None):
         """The whole correction at (hy, hp): the calibration, plus what snap and practice
-        clicks have taught since (when "Learn from clicks" is on)."""
+        clicks have taught since (when "Learn from clicks" is on). None for the Own tracker:
+        it learns from the clicks itself (own_click)."""
+        if name == "own":
+            return 0.0, 0.0
         cy, cp = self.models[name].get(hy, hp, self.model_mode)
         if snaps if snaps is not None else self.w_snaps.get_active():
             ly, lp = self.live[name].get(hy, hp)
@@ -1154,6 +1277,9 @@ class Probe(Adw.ApplicationWindow):
         if self.calib:
             self.calib_press()
             return
+        if self.reseat_check:
+            self.reseat_press()
+            return
         if self.mode == "test":
             self.test_press()
             return
@@ -1263,7 +1389,7 @@ class Probe(Adw.ApplicationWindow):
             self.on_status("no gaze on this screen at the press")
             return
         self.practice = {"t": time.monotonic(), "F": self.gaze, "fix": fix, "pointer0": self.pointer,
-                         "target": self.targets[0]}
+                         "target": self.targets[0], "t_raw": self.recent[-1]["t"] if self.recent else None}
         self.area.queue_draw()
 
     def practice_point(self):
@@ -1304,6 +1430,13 @@ class Probe(Adw.ApplicationWindow):
             # You were looking at the release point when you pressed: from the raw gaze to
             # it is the whole error there.
             oy, op = deg_from_px(fix["j"], px - fix["x"], py - fix["y"])
+            if name == "own":
+                rec["sources"][name] = {"hy": fix["hy"], "hp": fix["hp"], "raw": [fix["x"], fix["y"]],
+                                        "off": [oy, op], "n": fix["n"]}
+                if self.source == "own":
+                    rec["own"] = self.own_click(p, fix["hy"] + oy, fix["hp"] + op, math.hypot(oy, op))
+                    verdict = rec["own"]
+                continue
             c = self.correction(name, fix["hy"], fix["hp"], snaps=True)
             left = math.hypot(oy - c[0], op - c[1])
             rec["sources"][name] = {"hy": fix["hy"], "hp": fix["hp"], "raw": [fix["x"], fix["y"]], "off": [oy, op],
@@ -1320,7 +1453,7 @@ class Probe(Adw.ApplicationWindow):
         if learn:
             self.save_calibration()
         rec["verdict"] = verdict
-        rec["learned"] = verdict == "learned"
+        rec["learned"] = verdict == "learned" or verdict.startswith("taught")
         self.attempts.append(rec)
         self.log("practice.jsonl", rec)
         # Drawn for a moment: the drag, from where the gaze put the pointer to where you let go.
@@ -1329,6 +1462,19 @@ class Probe(Adw.ApplicationWindow):
         self.clicks = self.clicks[-20:]
         self.new_target()
         self.update_stats()
+
+    def own_click(self, p, yaw, pitch, off):
+        """Teach the Own tracker: you were looking at (yaw, pitch) just before the press.
+        Every click counts, dragged or not (a click that needed no drag says so too), unless
+        the drag was too far to be the tracker's error."""
+        if not self.w_snaps.get_active():
+            return "clicked (learning is off)"
+        if off > self.OWN_LEARN_MAX:
+            return f"dragged {off:.1f} deg: too far to be the tracker's error, not learned"
+        if p.get("t_raw") is None:
+            return "no sample time at the press"
+        reply = self.own.ask(f"click {p['t_raw']:.6f} {yaw:.4f} {pitch:.4f}")
+        return "taught the Own tracker" if reply.startswith("ok") else reply
 
     def on_motion(self, x, y):
         self.pointer = (x, y)
@@ -1387,6 +1533,11 @@ class Probe(Adw.ApplicationWindow):
     FLICK = 1.5       # degrees the gaze has to move from where it was at the press to step
     REARM = 0.9       # ... and come back within, before the next glance steps again
     SNAP_LEARN_MAX = 6.0  # degrees: a lesson bigger than this (after the correction) is a wrong element
+    # The Own tracker takes bigger ones: after the headset is taken off and put back on, its
+    # first clicks were 11-17 degrees off, and a 6-degree limit kept them from teaching it
+    # (frame-eyes, session 5). It keeps the median of an eye's last 5 clicks, so one click
+    # where you changed your mind does little harm.
+    OWN_LEARN_MAX = 25.0
 
     def snap_layout(self):
         w, h = self.canvas_size()
@@ -1551,6 +1702,13 @@ class Probe(Adw.ApplicationWindow):
                 best, best_cost = k, cost
         return best
 
+    @staticmethod
+    def steady_for(name, samples):
+        """steady_samples, but for the Own tracker its own view of the eyes, not SteamVR's."""
+        if name != "own":
+            return steady_samples(samples)
+        return [smp for smp in samples if all((smp["src"].get("own") or {}).get("eyes") or [None])]
+
     def press_fixation(self, name):
         """Where `name` put your gaze just before the press: the median of the last 300 ms,
         without blinks, dropouts, or samples from before an eye movement in that time."""
@@ -1559,7 +1717,7 @@ class Probe(Adw.ApplicationWindow):
         t_end = self.recent[-1]["t"]
         pts = []
         ox, oy = self.origin or (0, 0)
-        for smp in steady_samples([smp for smp in self.recent if smp["t"] >= t_end - 0.3]):
+        for smp in self.steady_for(name, [smp for smp in self.recent if smp["t"] >= t_end - 0.3]):
             src = smp["src"].get(name) or {}
             hit = src.get("hit")
             if hit and hit["s"] == self.screen:
@@ -1733,12 +1891,28 @@ class Probe(Adw.ApplicationWindow):
     def calib_points(self, rnd):
         """The centre, then six on a ring of `Calibration ring` degrees (as much of it as fits
         in the window), turned 20 degrees per round, and half the size in the middle round,
-        so the fit sees the middle, halfway out, and the edge of your view."""
+        so the fit sees the middle, halfway out, and the edge of your view.
+
+        For the Own tracker: the centre, then eight directions on an oval out to `Calibration
+        ring` degrees each way (as much as fits across and up the window), turned 20 degrees
+        per round, and half the size in the middle round. Its fit is quadratic and goes
+        wrong past its dots, and the ring (limited by the window's height) left the sides
+        out: in frame-eyes' practice2 the worst clicks were all past the ring."""
         w, h = self.canvas_size()
         cx, cy = w / 2, h / 2
         r = self.raw.get(self.source)
         px_per_deg = 1 / r[5] if r and r[5] else 32.0
-        radius = min(self.w_ring.get_value() * px_per_deg, w / 2 - 60, h / 2 - 60) * self.RING_SCALE[rnd]
+        reach = self.w_ring.get_value() * px_per_deg
+        if self.source == "own":
+            k = self.RING_SCALE[rnd]
+            rx = min(reach, cx - 80) * k
+            up, down = min(reach, cy - 150) * k, min(reach, cy - 80) * k  # clear of the text at the top
+            pts = [(cx, cy)]
+            for i in range(8):
+                a = math.radians(-90 + rnd * 20 + i * 45)
+                pts.append((cx + rx * math.cos(a), cy + (up if math.sin(a) < 0 else down) * math.sin(a)))
+            return pts
+        radius = min(reach, w / 2 - 60, h / 2 - 60) * self.RING_SCALE[rnd]
         pts = [(cx, cy)]
         for k in range(6):
             a = math.radians(-90 + rnd * 20 + k * 60)
@@ -1746,6 +1920,13 @@ class Probe(Adw.ApplicationWindow):
         return pts
 
     def start_calibration(self):
+        if self.source == "own":
+            # A fresh calibration for the Own tracker: it forgets the old one's clicks and
+            # shifts when this one is fitted.
+            reply = self.own.ask("calib-start")
+            if reply.startswith("fail"):
+                self.on_status(reply[5:])
+                return
         self.test = None
         self.results = None
         self.capture = None
@@ -1808,7 +1989,9 @@ class Probe(Adw.ApplicationWindow):
                    "sources": {n: {k: g[k] for k in ("err_deg", "sd_deg", "off_deg", "mean", "n")}
                                for n, g in entry["sources"].items()}}
         verdict = None
-        if not mine:
+        if self.source == "own":
+            verdict = self.own_calib_point(c["samples"], target)
+        elif not mine:
             if len(steady) < 20:
                 verdict = (f"only {len(steady)} of {len(c['samples'])} samples had both eyes tracked "
                            "(blinks, or the tracker lost an eye): open your eyes wide and press again")
@@ -1830,10 +2013,43 @@ class Probe(Adw.ApplicationWindow):
             c["retry"] = verdict + (" (S skips this dot)" if c["tries"] >= 2 else "")
             return
         c["tries"] = 0
-        c.setdefault("seen", {})[c["index"]] = tuple(mine["mean"])
+        if mine:
+            c.setdefault("seen", {})[c["index"]] = tuple(mine["mean"])
         c["data"].append(entry)
         c["done_at"] = now  # a short pause on the filled dot, then the next one
         GLib.timeout_add(350, self.calib_next)
+
+    def own_calib_point(self, samples, target):
+        """Send one calibration dot to the Own tracker: the time you looked at it and its
+        direction. None if accepted, else why not."""
+        d = self.screen_direction(samples, target)
+        if d is None or len(samples) < 2:
+            return "no gaze samples on this screen: look at the dot and press again"
+        reply = self.own.ask(f"calib-point {samples[0]['t']:.6f} {samples[-1]['t']:.6f} {d[0]:.4f} {d[1]:.4f}")
+        if reply.startswith("ok"):
+            return None
+        return reply[5:] + ": look at the dot and press again"
+
+    def screen_direction(self, samples, target):
+        """The head-relative direction (yaw, pitch) of a point on the canvas, from the screen
+        geometry around it: SteamVR's nearby gaze and its pixels-per-degree there (only the
+        geometry is used, not where SteamVR thinks you looked). None without samples."""
+        pts = []
+        ox, oy = self.origin or (0, 0)
+        for smp in samples:
+            for name in ("mmap1", "mmap2", "action"):
+                src = smp["src"].get(name) or {}
+                hit = src.get("hit")
+                if hit and hit["s"] == self.screen:
+                    pts.append((hit["x"] - ox, hit["y"] - oy, hit["j"], src["hy"], src["hp"]))
+                    break
+        if len(pts) < 5:
+            return None
+        x = statistics.median(q[0] for q in pts)
+        y = statistics.median(q[1] for q in pts)
+        j = [statistics.fmean(q[2][k] for q in pts) for k in range(4)]
+        oy_, op_ = deg_from_px(j, target[0] - x, target[1] - y)
+        return statistics.median(q[3] for q in pts) + oy_, statistics.median(q[4] for q in pts) + op_
 
     def other_dot(self, c, g):
         """Was the gaze on another dot of this round rather than the current one?
@@ -1899,17 +2115,22 @@ class Probe(Adw.ApplicationWindow):
         self.test_history = []
         self.log_points("calibration", data)
         self.save_calibration()
+        own_note = ""
+        if self.source == "own":
+            reply = self.own.ask("calib-fit")
+            own_note = ("Own tracker: " + reply[3:]) if reply.startswith("ok") else ("Own tracker: " + reply)
+            print(f"calibration: {own_note}", file=sys.stderr, flush=True)
         if self.model_mode == "none":
             self.last_model = mode  # just fitted
             self.w_model.set_selected(MODELS.index(mode))
         if self.w_autotest.get_active():
             # The check on spots the calibration hasn't seen, right away: same head
             # position, same session of SteamVR's own calibration.
-            self.on_status(f"calibrated ({mode}) from {len(data)} dots; now testing it on new spots")
+            self.on_status(f"calibrated ({mode}) from {len(data)} dots; now testing it on new spots. {own_note}")
             GLib.timeout_add(1500, lambda: (self.start_test(), False)[1])
         else:
             self.panel.set_visible(True)
-            self.on_status(f"calibrated ({mode}) from {len(data)} dots; Start test to check it")
+            self.on_status(f"calibrated ({mode}) from {len(data)} dots; Start test to check it. {own_note}")
 
     def draw_calib(self, cr, w, h):
         c = self.calib
@@ -1949,9 +2170,9 @@ class Probe(Adw.ApplicationWindow):
                 cr.arc(x, y, 7, 0, 2 * math.pi)
                 cr.stroke()
         GLib.idle_add(self.area.queue_draw)  # the pulse
-        total = len(self.ROUND_BG) * 7
-        n = c["round"] * 7 + c["index"] + 1
-        self.text(cr, 60, 70, f"Calibration: round {c['round'] + 1} of 3 ({self.ROUND_NAMES[c['round']]}), dot {n} of {total}",
+        total = len(self.ROUND_BG) * len(c["points"])
+        n = c["round"] * len(c["points"]) + c["index"] + 1
+        self.text(cr, 60, 70, f"Calibration ({'Own tracker' if self.source == 'own' else 'SteamVR'}): round {c['round'] + 1} of 3 ({self.ROUND_NAMES[c['round']]}), dot {n} of {total}",
                   ink, 26)
         hint = "Face the centre dot, look at the highlighted dot, and press. Esc cancels, S skips a dot."
         self.text(cr, 60, 108, c.get("retry") or hint, (0.8, 0.2, 0.1) if c.get("retry") and bright else
@@ -2332,6 +2553,9 @@ class Probe(Adw.ApplicationWindow):
         if self.calib:
             self.draw_calib(cr, w, h)
             return
+        if self.reseat_check:
+            self.draw_reseat(cr, w, h)
+            return
         m = self.monitors.get(self.screen)
         if m and self.is_fullscreen():
             g = m.get_geometry()
@@ -2386,7 +2610,8 @@ class Probe(Adw.ApplicationWindow):
 
         frozen = self.capture is not None
         live = not frozen or self.w_live.get_active()
-        if self.w_all.get_active() and live:
+        own = self.source == "own"
+        if self.w_all.get_active() and live and not own:
             for name in SOURCES:
                 rr = self.raw.get(name)
                 if rr:
@@ -2403,7 +2628,14 @@ class Probe(Adw.ApplicationWindow):
                 cr.move_to(x, y - 12)
                 cr.line_to(x, y + 12)
                 cr.stroke()
-        if self.w_rawdot.get_active() and r and live:
+        if self.w_rawdot.get_active() and own and live:
+            # Each eye alone: they should meet, with a little jitter, where you look.
+            for e in getattr(self, "own_eyes", []):
+                if e:
+                    cr.set_source_rgba(1, 0.25, 0.25, 0.85)
+                    cr.arc(e[0], e[1], 5, 0, 2 * math.pi)
+                    cr.fill()
+        elif self.w_rawdot.get_active() and r and live:
             cr.set_source_rgba(1, 0.3, 0.3, 0.8)
             cr.arc(r[0], r[1], 5, 0, 2 * math.pi)
             cr.fill()
@@ -2425,7 +2657,7 @@ class Probe(Adw.ApplicationWindow):
         res = self.result
         if res and now - res["shown"] < 2.5 and "L" in res:
             a = max(0.0, 1 - (now - res["shown"]) / 2.5)
-            ok = res["verdict"] == "learned" or res["verdict"] == "measured"
+            ok = res["verdict"] in ("learned", "measured") or res["verdict"].startswith("taught")
             (fx, fy), (lx, ly) = res["F"], res["L"]
             cr.set_source_rgba(*((1, 0.85, 0.2) if ok else (1, 0.35, 0.3)), a)
             cr.set_line_width(2)
@@ -2603,12 +2835,19 @@ def main():
     ap = argparse.ArgumentParser(description="Eye tracking playground for the Frametop desktop")
     ap.add_argument("--screen", type=int, default=0, help="Frametop screen to open on (default: where it opens)")
     ap.add_argument("--mode", choices=Probe.MODE_KEYS, help="start in this mode (fit: Headset fit)")
+    ap.add_argument("--source", choices=SOURCES,
+                    help="gaze source to start with (default: own if frame-eyes' tracker is running, else mmap2)")
     args, rest = ap.parse_known_args()
     app = Adw.Application(application_id="dev.frametop.GazeProbe", flags=Gio.ApplicationFlags.NON_UNIQUE)
     windows = []
 
     def activate(a):
         win = Probe(a, args.screen)
+        if args.source:
+            win.w_source.set_selected(SOURCES.index(args.source))
+        elif not win.own.ask("status").startswith("fail"):
+            # Our own tracker is running: that's what you're here to test.
+            win.w_source.set_selected(SOURCES.index("own"))
         if args.mode:
             win.set_mode(args.mode)
         windows.append(win)
