@@ -305,6 +305,18 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
             break;
         case FT_SCROLL:
             if (s->pointer_focus != sc) break;
+            if (sc->index >= s->n_config && e->dy != 0 &&
+                (wlr_keyboard_get_modifiers(&s->keyboard) & WLR_MODIFIER_LOGO)) {
+                // Meta+scroll on a floating window: its scale, bigger or smaller (ft-floatd).
+                char msg[48];
+                snprintf(msg, sizeof msg, "scale %d %d", sc->index + 1, e->dy < 0 ? 1 : -1);
+                struct sockaddr_un addr = {.sun_family = AF_UNIX};
+                const char name[] = "frametop_float";
+                memcpy(addr.sun_path + 1, name, sizeof name - 1);
+                sendto(s->relay_fd, msg, strlen(msg), MSG_DONTWAIT, (struct sockaddr *)&addr,
+                       offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
+                break;
+            }
             if (e->dy != 0)
                 wlr_seat_pointer_notify_axis(s->seat, t, WL_POINTER_AXIS_VERTICAL_SCROLL, e->dy * 15,
                                              (int32_t)(e->dy * 120), WL_POINTER_AXIS_SOURCE_WHEEL,
@@ -427,6 +439,10 @@ static int control_readable(int fd, uint32_t mask, void *data) {
                 h > 16384) {
                 snprintf(reply, sizeof reply, "error bad screen or size");
             } else {
+                // A screen's size is even: KWin's nested backend gives a scaled screen a whole
+                // buffer scale (1.5 -> 2), and a buffer that isn't a multiple of it is a protocol
+                // error that disconnects KWin. (ft-floatd rounds spares' sizes for their scale.)
+                if (index - 1 < s->n_config) w += w & 1, h += h & 1;
                 if (index - 1 < s->n_config) s->config[index - 1].width = w, s->config[index - 1].height = h;
                 wlr_xdg_toplevel_set_size(s->screens[index - 1]->toplevel, w, h);
                 snprintf(reply, sizeof reply, "ok");

@@ -12,7 +12,7 @@ which window floats on which spare output and panel, and connects three parts:
 Commands and ft-screens' events arrive as datagrams on @frametop_float (ft-float is the
 command-line side). Replies go to the sender:
   float [ID|active]   dock [ID|active]   close ID   list   quit          (ft-float)
-  dock N | close N | resize N W H | carried N                          (ft-screens, N = its screen)
+  dock N | close N | resize N W H | scale N STEPS                      (ft-screens, N = its screen)
 
 Spare outputs are WL-<screens> .. WL-<screens + slots - 1>. A floating window's output is its
 frame plus a margin on each side (FLOAT_MARGIN pixels), so menus have room; the panel shows
@@ -49,6 +49,15 @@ POLL_SECONDS = 20        # NextCommand answers empty after this (KWin's D-Bus ti
 SPARE_X, SPARE_CELL = 12000, 5000  # spares in KWin's layout: a grid from here, 4 across
 PULL_OUT = 0.05          # a floated window starts this far in front of its screen (metres)
 DEFAULT_MPP = 1.6 / 1920  # metres per pixel when ft-screens can't say (no SteamVR)
+DEBUG = os.environ.get("FT_FLOAT_DEBUG") == "1"  # log every event from the script
+
+
+def fit(px, scale):
+    """An output size KWin can draw at this scale: its nested backend gives the buffer a whole
+    buffer scale (1.2 -> 2), and a buffer that isn't a multiple of it is a protocol error that
+    disconnects KWin. So round up to a multiple; the margin takes the extra pixels."""
+    k = max(1, math.ceil(scale - 1e-6))
+    return (px + k - 1) // k * k
 
 
 def log(*args):
@@ -104,6 +113,8 @@ class Float:
         self.frame = None         # last frame (logical, global)
         self.client = None
         self.full = False         # full screen: no margin
+        self.normal = None        # its size in pixels when last not full screen
+        self.unfull_until = 0.0   # left full screen just now (see follow)
         self.move_from = None     # frame when a title-bar move started (put back after)
         self.subs = {}            # popup or dialog id -> number on the panel
 
@@ -174,6 +185,9 @@ class Daemon:
 
     def on_event(self, ev):
         kind = ev.get("ev")
+        if DEBUG:
+            log("event", {k: v for k, v in ev.items() if k in ("ev", "id", "output", "frame", "fullScreen", "popup",
+                                                                "parent", "move")})
         wid = ev.get("id", "")
         if kind == "hello":
             self.command(cmd="config", screens=self.screens_n)
@@ -211,8 +225,9 @@ class Daemon:
             if (m["x"], m["y"]) != (ev["frame"]["x"], ev["frame"]["y"]):
                 self.command(cmd="geometry", id=f.id, x=m["x"], y=m["y"], w=ev["frame"]["w"], h=ev["frame"]["h"])
         elif kind == "fullscreen" and f:
-            f.full = bool(ev.get("fullScreen"))
-            self.follow(f, ev, refit=True)
+            if not ev.get("fullScreen"):
+                f.unfull_until = time.monotonic() + 1.0
+            self.follow(f, ev)
         elif kind == "minimized" and f:
             self.screens.ask(f"minimized {f.slot.index} {1 if ev.get('minimized') else 0}", quiet=True)
 
@@ -248,7 +263,7 @@ class Daemon:
             self.floats[wid] = f
             f.scale = output_scales().get(slot.output, 1.0)
             log(f"{wid[:9]} already floats on {slot.output}")
-            self.follow(f, ev, refit=True)
+            self.follow(f, ev)
             return
         # A new window that opened on a floating window's output: windows of floating apps
         # float too; anything else goes to the screens.
@@ -260,6 +275,18 @@ class Daemon:
                          y=ev["frame"]["y"] % 300 + 100, w=ev["frame"]["w"], h=ev["frame"]["h"])
 
     # ------------------------------------------------------------ floating and docking
+
+    def sized(self, slot, size, timeout=1.0):
+        """Wait (briefly) until KWin has taken the spare's new size, before a scale that needs it."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            for line in self.screens.ask("toplevels", quiet=True).splitlines()[1:]:
+                f = line.split()
+                if len(f) >= 2 and f[0] == str(slot.index) and f[1] == f"{size[0]}x{size[1]}":
+                    return True
+            time.sleep(0.03)
+        log(f"{slot.output} didn't take {size[0]}x{size[1]} in time")
+        return False
 
     def disable_unused(self):
         off = [f"output.{s.output}.disable" for s in self.slots if s.window is None]
@@ -300,11 +327,12 @@ class Daemon:
         f.mpp = self.screen_mpp(ev["output"])
         fr, s, m = ev["frame"], f.scale, self.margin
         w, h = round(fr["w"] * s), round(fr["h"] * s)
-        slot.size = (w + 2 * m, h + 2 * m)
+        slot.size = (fit(w + 2 * m, s), fit(h + 2 * m, s))
         log(f"{wid[:9]} ({ev.get('cls')}) floats on {slot.output}: {w}x{h} px, scale {s:g}")
         # The spare's size first (while it's off, so its first frame is right), then its panel,
         # then turn it on, then the window.
         self.screens.ask(f"size {slot.index} {slot.size[0]} {slot.size[1]}")
+        self.sized(slot, slot.size)
         self.screens.ask(f"scale {slot.index} {s:g}")  # for pointer positions (KWin's units)
         self.set_panel(f, (m, m, w, h), title=round((ev["client"]["y"] - fr["y"]) * s))
         self.place_panel(f, ev)
@@ -333,27 +361,57 @@ class Daemon:
         rows = [f"{xa[k]:.5f} {ya[k]:.5f} {za[k]:.5f} {p[k]:.4f}" for k in range(3)]
         self.screens.ask(f"pose {f.slot.index} {' '.join(rows)}")
 
-    def follow(self, f, ev, refit=False):
+    def follow(self, f, ev):
         """The window moved or resized on its output: crop the panel to it, and keep the
-        output its size plus the margin."""
+        output its size plus the margin. Full screen: no margin, and the output keeps the
+        window's size from before, so the window fills its own panel."""
         slot, s = f.slot, f.scale
         fr, cl, out = ev["frame"], ev["client"], ev["outputRect"]
         f.frame, f.client = fr, cl
-        m = 0 if f.full else self.margin
+        # KWin sizes a window to its output before it reports it full screen; with a margin, a
+        # window that fills its output is going full screen. (Not just after it left full
+        # screen: then it fills the output until the output grows back.)
+        fills = self.margin > 0 and (fr["x"], fr["y"], fr["w"], fr["h"]) == (out["x"], out["y"], out["w"], out["h"])
+        full = bool(ev.get("fullScreen")) or (fills and time.monotonic() > f.unfull_until)
+        f.full = full
         w, h = round(fr["w"] * s), round(fr["h"] * s)
-        want = (w + 2 * m, h + 2 * m)
-        if f.full:
-            want = slot.size or want
-        if refit or want != slot.size:
-            if not f.full and want != slot.size:
-                slot.size = want
-                self.screens.ask(f"size {slot.index} {want[0]} {want[1]}")
+        if not full:
+            f.normal = (w, h)
+        m = 0 if full else self.margin
+        want = f.normal if full and f.normal else (w + 2 * m, h + 2 * m)
+        want = (fit(want[0], s), fit(want[1], s))
+        if want != slot.size:
+            slot.size = want
+            self.screens.ask(f"size {slot.index} {want[0]} {want[1]}")
+        if not full:
             x0, y0 = slot.pos[0] + m / s, slot.pos[1] + m / s
-            if not f.full and (abs(fr["x"] - x0) > 0.5 or abs(fr["y"] - y0) > 0.5):
+            if abs(fr["x"] - x0) > 0.5 or abs(fr["y"] - y0) > 0.5:
                 self.command(cmd="geometry", id=f.id, x=x0, y=y0, w=fr["w"], h=fr["h"])
                 return  # the next geometry event crops the panel
         x, y = round((fr["x"] - out["x"]) * s), round((fr["y"] - out["y"]) * s)
-        self.set_panel(f, (x, y, w, h), title=0 if f.full else round((cl["y"] - fr["y"]) * s))
+        self.set_panel(f, (x, y, w, h), title=0 if full else round((cl["y"] - fr["y"]) * s))
+
+    def rescale(self, f, steps):
+        """Meta+scroll: the window's content bigger or smaller, at the same size in pixels, so its
+        panel stays the same size (KWin's output scale, in steps of 10%)."""
+        if not f.frame or f.full or steps == 0:
+            return
+        s = min(3.0, max(0.5, round(f.scale * 1.1 ** steps * 20) / 20))
+        if s == f.scale:
+            return
+        w, h = round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale)
+        slot, m = f.slot, self.margin
+        log(f"{f.id[:9]} scale {f.scale:g} -> {s:g}")
+        f.scale = s
+        # The output's size must suit the new scale before KWin draws at it (see fit).
+        size = (fit(slot.size[0], s), fit(slot.size[1], s))
+        if size != slot.size:
+            slot.size = size
+            self.screens.ask(f"size {slot.index} {size[0]} {size[1]}")
+            self.sized(slot, size)
+        kscreen(f"output.{slot.output}.scale.{s:g}")
+        self.screens.ask(f"scale {slot.index} {s:g}")
+        self.command(cmd="geometry", id=f.id, x=slot.pos[0] + m / s, y=slot.pos[1] + m / s, w=w / s, h=h / s)
 
     def dock(self, f, frame=None):
         """Back where it came from (or onto screen 1 if we don't know)."""
@@ -424,7 +482,7 @@ class Daemon:
         if cmd in ("float", "dock") and (not rest or rest[0] == "active"):
             self.command(cmd="request-active")
             return "ok"
-        if cmd in ("dock", "close", "resize", "carried") and rest and rest[0].isdigit():
+        if cmd in ("dock", "close", "resize", "scale") and rest and rest[0].isdigit():
             f = self.by_panel(int(rest[0]))
             if not f:
                 return f"error no floating window on screen {rest[0]}"
@@ -432,6 +490,8 @@ class Daemon:
                 self.dock(f)
             elif cmd == "close":
                 self.command(cmd="close", id=f.id)
+            elif cmd == "scale" and len(rest) == 2:
+                self.rescale(f, int(rest[1]))
             elif cmd == "resize" and len(rest) == 3 and f.frame:
                 w, h = max(320, int(rest[1])), max(200, int(rest[2]))
                 self.command(cmd="geometry", id=f.id, x=f.frame["x"], y=f.frame["y"], w=w / f.scale, h=h / f.scale)

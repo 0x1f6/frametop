@@ -105,6 +105,11 @@
 // SteamVR's resize snap back.
 // A left release also goes to ft-screens ("up"), which releases a button held on its
 // screens in KWin if SteamVR gave the release to some other overlay.
+// Across Frametop's panels (a drag and drop, or a window moved from one screen or floating
+// window to another), the lock gives way: while the left button is held on one of ft-screens'
+// panels, the ray is still tested against ft-screens' panels, and the cursor goes onto
+// whichever it meets first. Not while that panel is being carried (its title bar or its bar):
+// then the ray would find what's behind it.
 //
 // Head follow (experimental, off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
 // is carried by a reference direction, where the head faced when it last settled, and turns
@@ -283,6 +288,19 @@ std::string ExeDir() {
     buf[n] = 0;
     std::string p(buf);
     return p.substr(0, p.rfind('/'));
+}
+
+// One of ft-screens' panels showing a desktop: a screen (frametop.screen.N), a floating
+// window (frametop.float.N), or a floating window's popup (frametop.float.N.sub.K), not a
+// control of theirs.
+bool FramePanel(const std::string &key) {
+    for (const char *prefix : {"frametop.screen.", "frametop.float."}) {
+        if (key.rfind(prefix, 0) != 0) continue;
+        const std::string rest = key.substr(std::strlen(prefix));
+        const size_t dot = rest.find('.');
+        return dot == std::string::npos || rest.compare(dot, 5, ".sub.") == 0;
+    }
+    return false;
 }
 
 void SendTo(int fd, const char *name, const std::string &msg) {
@@ -621,6 +639,9 @@ int main() {
     Clock::time_point dropHoldUntil{};  // after a left release: keep the drag pose this long
     bool debug = false;
     std::string lastHit;
+    // The ft-screens panel the left button was pressed on, and where it was then (see the top).
+    std::string pressKey;
+    vr::HmdMatrix34_t pressPose{};
     auto lastDebug = Clock::now();
     vr::VROverlayHandle_t systemPointer = vr::k_ulOverlayHandleInvalid;
     overlay->FindOverlay("system.pointer", &systemPointer);
@@ -683,6 +704,14 @@ int main() {
         nudging = false;
         leftHeld = true;
         dragDistance = lastDistance;
+        pressKey.clear();
+        if (FramePanel(lastHit)) {
+            vr::ETrackingUniverseOrigin uo;
+            auto it = handles.find(lastHit);
+            if (it != handles.end() &&
+                overlay->GetOverlayTransformAbsolute(it->second, &uo, &pressPose) == vr::VROverlayError_None)
+                pressKey = lastHit;
+        }
         tiltYaw = tiltPitch = 0;  // a new drag starts untilted
         dropHoldUntil = {};
         pulseAt = Clock::now();
@@ -1364,6 +1393,35 @@ int main() {
                         bestKey = edgeKey;
                         onEdge = true;
                     }
+                }
+            }
+            // Held on one of ft-screens' panels that stays where it is: onto whichever of them
+            // the ray meets (see the top).
+            if (leftHeld && !pressKey.empty()) {
+                vr::ETrackingUniverseOrigin uo;
+                vr::HmdMatrix34_t now{};
+                auto it = handles.find(pressKey);
+                bool still = it != handles.end() &&
+                             overlay->GetOverlayTransformAbsolute(it->second, &uo, &now) == vr::VROverlayError_None;
+                for (int i = 0; still && i < 3; ++i)
+                    for (int j = 0; j < 4; ++j)
+                        if (std::fabs(now.m[i][j] - pressPose.m[i][j]) > 0.001f) still = false;
+                if (still) {
+                    Hit h;
+                    for (const auto &[key, handle] : handles) {
+                        if (!visible[key] || !FramePanel(key)) continue;
+                        vr::VROverlayIntersectionParams_t params{};
+                        params.vSource = {float(anchor.x), float(anchor.y), float(anchor.z)};
+                        params.vDirection = {float(dir.x), float(dir.y), float(dir.z)};
+                        params.eOrigin = vr::TrackingUniverseStanding;
+                        vr::VROverlayIntersectionResults_t r{};
+                        if (overlay->ComputeOverlayIntersection(handle, &params, &r) && r.fDistance > 0.05f &&
+                            r.fDistance < h.along)
+                            h.along = r.fDistance, h.key = key;
+                    }
+                    if (h.along < 1e8) dragDistance = h.along, lastHit = h.key;
+                } else {
+                    pressKey.clear();  // carried: the lock holds for the rest of this press
                 }
             }
             // While dragging: keep the press-time distance and show the non-interactive marker.

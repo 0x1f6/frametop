@@ -115,7 +115,7 @@ case "${1:-}" in
     pkill -f -- "--socket frametop_float_test" 2>/dev/null || true
     read -r screens spares < "$rt/counts"
     nohup env XDG_RUNTIME_DIR="$rt" XDG_CONFIG_HOME="$cfg" DBUS_SESSION_BUS_ADDRESS="$bus" \
-      WAYLAND_DISPLAY=wayland-0 "$REPO_ROOT/float/ft-floatd" --screens "$screens" --slots "$spares" \
+      WAYLAND_DISPLAY=wayland-0 FT_FLOAT_DEBUG=1 "$REPO_ROOT/float/ft-floatd" --screens "$screens" --slots "$spares" \
       --control ft_screens_test --socket frametop_float_test \
       > "$logs/floatd.log" 2>&1 &
     sleep 2
