@@ -30,7 +30,7 @@ for var in $(compgen -e); do
 done
 
 conf=$HOME/.config/frametop.conf
-BACKEND=screens SCREENS=2 WIDTH=1920 HEIGHT=1080 PHYS_WIDTH=1.6 REMOTE=0
+BACKEND=screens SCREENS=2 WIDTH=1920 HEIGHT=1080 PHYS_WIDTH=1.6 REMOTE=0 FLOAT_SLOTS=8 FLOAT_MARGIN=300
 # shellcheck disable=SC1090
 [ -f "$conf" ] && . "$conf"
 backend=${FT_BACKEND:-$BACKEND}
@@ -39,6 +39,13 @@ width=${FT_WIDTH:-$WIDTH}
 height=${FT_HEIGHT:-$HEIGHT}
 phys_width=${FT_PHYS_WIDTH:-$PHYS_WIDTH}
 remote=${FT_REMOTE:-$REMOTE}
+# Floating windows (screens backend): KWin gets this many spare outputs after the screens,
+# and ft-floatd floats a window on each (docs/floating-windows.md). Changing it takes a
+# desktop restart.
+float_slots=${FT_FLOAT_SLOTS:-$FLOAT_SLOTS}
+[[ $float_slots =~ ^[0-9]+$ ]] || float_slots=8
+[ "$float_slots" -le 16 ] || float_slots=16
+[ "$backend" = screens ] || float_slots=0
 if [ "$backend" = gamescope ] && [ $((width * height)) -gt $((1920 * 1080)) ]; then
   # gamescope's VR backend aborts above 1920x1080 worth of pixels (its upload buffer;
   # see docs/design.md). Shrink a bigger size to fit, keeping its shape.
@@ -80,10 +87,10 @@ if [ "${1:-}" != --inner ]; then
   # Plasma stay on the host and connect to its socket.
   socket=ft-screens-0
   read -ra screen_args <<< "$("$here/../layout/ft-layout" screen-args)"
-  export FT_SCREEN_COUNT=$(( ${#screen_args[@]} / 2 ))
+  export FT_SCREEN_COUNT=$(( ${#screen_args[@]} / 2 )) FT_FLOAT_SLOTS=$float_slots
   "$here/../scripts/container-up.sh"  # not owned by this desktop, or stopping it would stop the container
   "$HOME/.local/bin/distrobox" enter dev -- "$here/../screens/build/ft-screens" --socket "$socket" \
-    "${screen_args[@]}" > /tmp/frametop-screens.log 2>&1 < /dev/null &
+    "${screen_args[@]}" --spares "$float_slots" > /tmp/frametop-screens.log 2>&1 < /dev/null &
   stop_screens() { pkill -x ft-screens 2>/dev/null || true; }
   trap stop_screens EXIT
   for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/$socket" ] && break; sleep 0.2; done
@@ -135,7 +142,7 @@ fi
 # With ft-screens the size is only the starting one: ft-screens sets each screen's own.
 cat > "$runtime/bin/kwin_wayland_wrapper" <<EOF
 #!/bin/sh
-exec /usr/bin/kwin_wayland_wrapper --width $width --height $height --output-count $screens --no-lockscreen "\$@"
+exec /usr/bin/kwin_wayland_wrapper --width $width --height $height --output-count $((screens + float_slots)) --no-lockscreen "\$@"
 EOF
 chmod +x "$runtime/bin/kwin_wayland_wrapper"
 export PATH=$runtime/bin:$PATH
@@ -161,6 +168,23 @@ if [ "$remote" = 1 ]; then
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
   "$here/remote-desktop.sh" "$runtime" > /tmp/frametop-remote.log 2>&1 &
   "$here/vnc-bridge.sh" "$width" "$height" > /tmp/frametop-vnc.log 2>&1 &
+fi
+
+# ft-floatd (floating windows) runs inside the Plasma session, on its D-Bus: started from
+# the session's autostart, which only this desktop reads (XDG_CONFIG_HOME above).
+autostart=$XDG_CONFIG_HOME/autostart/frametop-floatd.desktop
+if [ "$float_slots" -gt 0 ]; then
+  mkdir -p "$(dirname "$autostart")"
+  cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop floating windows
+Exec=sh -c 'exec "$here/../float/ft-floatd" --screens $screens --slots $float_slots > /tmp/frametop-floatd.log 2>&1'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+else
+  rm -f "$autostart"
 fi
 
 dbus-run-session startplasma-wayland

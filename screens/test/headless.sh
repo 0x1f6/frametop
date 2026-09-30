@@ -6,7 +6,7 @@
 # or on the Frame. Build ft-screens first (screens/build.sh).
 #
 #   headless.sh start [SCREENS] [SPARES]   (default 2 screens, 1920x1080 and 1080x1920, and
-#                                          3 spare 800x600 outputs, disabled once KWin is up)
+#                                          3 spare outputs, disabled once KWin is up)
 #   headless.sh stop
 #   headless.sh ask '<ft-screens command>'  e.g. toplevels, "input 1 down 400 20"
 #   headless.sh kd <kscreen-doctor args>    e.g. -o, output.WL-2.enable
@@ -89,7 +89,7 @@ case "${1:-}" in
     args=(--screen 1920x1080@1.6 --screen 1080x1920@0.9)
     for ((i = 2; i < screens; i++)); do args+=(--screen 1920x1080@1.6); done
     args=("${args[@]:0:$((screens * 2))}")
-    for ((i = 0; i < spares; i++)); do args+=(--screen 800x600); done
+    args+=(--spares "$spares")
     cd "$REPO_ROOT"
     nohup "$HOME/.local/bin/distrobox" enter "$FRAME_BOX" -- env XDG_RUNTIME_DIR="$rt" \
       ./screens/build/ft-screens --no-vr --socket ft-test-0 --control ft_screens_test "${args[@]}" \

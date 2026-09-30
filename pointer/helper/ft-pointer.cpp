@@ -371,6 +371,7 @@ private:
             if (rest.find("Thumbnail") != std::string::npos || rest.find("Subview") != std::string::npos) continue;
             if (key.rfind("system.pointer", 0) == 0 || key.rfind("system.cursor", 0) == 0 ||
                 key.rfind("frametop.pointer", 0) == 0 || key.rfind("frametop.guide", 0) == 0 ||
+                key == "frametop.catcher" ||  // ft-screens' release catcher: only on a laser mid-drag
                 key == "system.HeadsetView" || key == "system.toast")
                 continue;
             // The name can hold quotes; it ends at the last "', " (the size and state follow).
@@ -1255,10 +1256,11 @@ int main() {
                 overlay->GetOverlayTextureSize(h, &tw, &th);
                 vr::VROverlayTransformType tt = vr::VROverlayTransform_Invalid;
                 overlay->GetOverlayTransformType(h, &tt);
-                // ft-screens' panels (frametop.screen.N) are 0x0 and absolute too (a shared
-                // texture), but they're real panels of any size.
+                // ft-screens' panels (frametop.screen.N, and floating windows with their
+                // popups, frametop.float.N...) are 0x0 and absolute too (a shared texture),
+                // but they're real panels of any size.
                 sceneGraph[key] = (tw == 0 || th == 0) && tt == vr::VROverlayTransform_Absolute &&
-                                  key.rfind("frametop.screen.", 0) != 0;
+                                  key.rfind("frametop.screen.", 0) != 0 && key.rfind("frametop.float.", 0) != 0;
             }
             ours = vr::k_unTrackedDeviceIndexInvalid;
             for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {

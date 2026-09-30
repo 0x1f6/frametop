@@ -305,6 +305,7 @@ class Daemon:
         # The spare's size first (while it's off, so its first frame is right), then its panel,
         # then turn it on, then the window.
         self.screens.ask(f"size {slot.index} {slot.size[0]} {slot.size[1]}")
+        self.screens.ask(f"scale {slot.index} {s:g}")  # for pointer positions (KWin's units)
         self.set_panel(f, (m, m, w, h), title=round((ev["client"]["y"] - fr["y"]) * s))
         self.place_panel(f, ev)
         kscreen(f"output.{slot.output}.enable", f"output.{slot.output}.scale.{s:g}",

@@ -13,13 +13,15 @@
 //     scale first ("scale <screen> <s>", from ft-layout).
 //
 // Usage: ft-screens [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]...
-//                   [-- COMMAND ARGS...]
+//                   [--spares N] [-- COMMAND ARGS...]
 //   --socket    Wayland socket name in $XDG_RUNTIME_DIR (default ft-screens-0)
 //   --control   the control socket's abstract name (default ft_screens)
 //   --no-vr     run without SteamVR, for tests next to the running desktop: no panels, no
 //               input, and nothing sent to the input relay. Commands still work, and
 //               "toplevels" shows what KWin opened.
 //   --screen    one per screen, in KWin's order (default: 3440x1440@2.4)
+//   --spares    KWin's outputs after the screens: spares for floating windows (ft-floatd
+//               turns them on and sizes them; see docs/floating-windows.md)
 //   COMMAND     run with WAYLAND_DISPLAY set to our socket (e.g. the Frametop session)
 // Runs in the dev container (wlroots 0.20); KWin connects from the host.
 #define _GNU_SOURCE
@@ -57,7 +59,7 @@
 
 #include "vr.h"
 
-#define MAX_SCREENS 8
+#define MAX_SCREENS 24  // screens and spare outputs
 
 struct config {
     int width, height;
@@ -97,7 +99,8 @@ struct server {
     struct screen *screens[MAX_SCREENS];
     struct config config[MAX_SCREENS];
     double scale[MAX_SCREENS];  // KWin's scale for each screen (panel pixels per logical unit)
-    int n_config, n_screens;
+    int n_config, n_screens;  // n_config: the screens; the outputs after them are spares
+    int spares;
     struct wl_list buffers;  // tracked_buffer
     struct wl_event_source *tick;
     struct screen *pointer_focus;
@@ -145,7 +148,8 @@ static void screen_commit(struct wl_listener *l, void *data) {
     struct wlr_xdg_surface *xdg = sc->toplevel->base;
     if (xdg->initial_commit) {
         // First commit: tell KWin the size of this screen.
-        const struct config *c = &sc->server->config[sc->index < sc->server->n_config ? sc->index : 0];
+        const struct config spare = {640, 480, 0.5};  // until ft-floatd sizes it
+        const struct config *c = sc->index < sc->server->n_config ? &sc->server->config[sc->index] : &spare;
         wlr_xdg_toplevel_set_size(sc->toplevel, c->width, c->height);
         wlr_xdg_toplevel_set_activated(sc->toplevel, true);
         if (sc->decoration)
@@ -205,7 +209,9 @@ static void screen_destroy(struct wl_listener *l, void *data) {
 // after it while that output is off.
 static void screen_title(struct wl_listener *l, void *data) {
     struct screen *sc = wl_container_of(l, sc, set_title);
-    wlr_log(WLR_INFO, "screen %d: \"%s\"", sc->index + 1, sc->toplevel->title ? sc->toplevel->title : "");
+    const char *title = sc->toplevel->title ? sc->toplevel->title : "";
+    wlr_log(WLR_INFO, "screen %d: \"%s\"", sc->index + 1, title);
+    if (sc->index >= sc->server->n_config) ft_vr_float_output(sc->index, !strstr(title, "Output disabled"));
 }
 
 static void new_toplevel(struct wl_listener *l, void *data) {
@@ -222,9 +228,15 @@ static void new_toplevel(struct wl_listener *l, void *data) {
     sc->index = index;
     sc->toplevel = toplevel;
     s->screens[index] = sc;
-    const struct config *c = &s->config[index < s->n_config ? index : 0];
-    wlr_log(WLR_INFO, "screen %d: KWin window, %dx%d, %.2f m wide", index + 1, c->width, c->height, c->metres);
-    ft_vr_screen_create(index, c->metres, s->n_config > index + 1 ? s->n_config : index + 1);
+    if (index >= s->n_config) {
+        wlr_log(WLR_INFO, "screen %d: KWin window, a spare output (floating window %d)", index + 1,
+                index - s->n_config + 1);
+        ft_vr_float_create(index, index - s->n_config + 1);
+    } else {
+        const struct config *c = &s->config[index];
+        wlr_log(WLR_INFO, "screen %d: KWin window, %dx%d, %.2f m wide", index + 1, c->width, c->height, c->metres);
+        ft_vr_screen_create(index, c->metres, s->n_config);
+    }
     sc->commit.notify = screen_commit;
     wl_signal_add(&toplevel->base->surface->events.commit, &sc->commit);
     sc->destroy.notify = screen_destroy;
@@ -537,6 +549,8 @@ int main(int argc, char **argv) {
             socket_name = argv[++i];
         } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
             control_name = argv[++i];
+        } else if (strcmp(argv[i], "--spares") == 0 && i + 1 < argc) {
+            s.spares = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-vr") == 0) {
             s.vr = false;
         } else if (strcmp(argv[i], "--screen") == 0 && i + 1 < argc && s.n_config < MAX_SCREENS) {
@@ -554,7 +568,7 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr,
                     "usage: %s [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]... "
-                    "[-- COMMAND ARGS...]\n",
+                    "[--spares N] [-- COMMAND ARGS...]\n",
                     argv[0]);
             return 2;
         }
@@ -599,7 +613,7 @@ int main(int argc, char **argv) {
     }
     char path[256];
     snprintf(path, sizeof path, "%s/%s", getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "/tmp", socket_name);
-    wlr_log(WLR_INFO, "listening on %s; %d screen(s) configured", path, s.n_config);
+    wlr_log(WLR_INFO, "listening on %s; %d screen(s) configured, %d spare(s)", path, s.n_config, s.spares);
 
     const int control = open_control_socket(control_name);
     if (control < 0) return 1;
