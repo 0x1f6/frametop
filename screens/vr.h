@@ -38,6 +38,10 @@ bool ft_vr_screens_shown(void);
 // A panel for screen `index`, width in metres, placed in a row in front of the head.
 void ft_vr_screen_create(int index, double metres, int count);
 void ft_vr_screen_destroy(int index);
+// A spare output's panel, for floating windows (slot numbers from 1): hidden until
+// ft-floatd floats a window on it and KWin has the output turned on.
+void ft_vr_float_create(int index, int slot);
+void ft_vr_float_output(int index, bool on);
 // Show a client buffer (identified by `key`) on the screen's panel. False if SteamVR
 // can't import it.
 bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *buf);

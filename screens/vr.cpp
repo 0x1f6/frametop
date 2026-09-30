@@ -44,6 +44,17 @@
 //     screen, that eye sees through the screen (to Room View). Only then is the screen
 //     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
 //     buffer is shown as is.
+//   - the catcher: a button pressed on a screen is released in KWin even when the laser
+//     lets go between panels (UpdateCatcher).
+//   - floating windows (docs/floating-windows.md): KWin's spare outputs, after the screens,
+//     are panels too, for one window each. ft-floatd sizes the output to the window plus a
+//     margin and tells us the window's rectangle ("float"): the panel shows only that crop of
+//     the buffer (SetOverlayTextureBounds), at the density of the screen it came from, and
+//     each popup or dialog gets a small panel of its own over it, cut from the same buffer
+//     ("sub"). Pressing its title bar carries the panel like the bar does, while KWin's
+//     pointer stays put, so the window doesn't move on its output. The corner tab resizes the
+//     window (in pixels, at the same density) instead of scaling the panel, and two more
+//     buttons close it and put it back on the desktop (both through ft-floatd).
 // OpenVR has no overlay-relative transforms here (openvr v2.15.6), so the bar, button,
 // and handle are placed whenever their screen moves.
 #include "vr.h"
@@ -55,6 +66,8 @@
 #include <openvr.h>
 
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <linux/input-event-codes.h>
 #include <limits.h>
 #include <spawn.h>
@@ -65,6 +78,7 @@ extern char **environ;  // for posix_spawn
 #include <chrono>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -212,12 +226,20 @@ constexpr double kRollStep = 5;      // degrees per scroll notch on the roll but
 constexpr float kChromeIdle = 0.55f; // the controls' opacity without a laser on them
 constexpr long kControlsLinger = 35; // ticks (~0.4 s) the controls stay after a laser leaves
 long g_tick = 0;                     // ft_vr_poll calls
+bool g_vr = false;                   // connected to SteamVR (ft-screens --no-vr runs without it)
 constexpr vr::TrackedDeviceIndex_t kNone = vr::k_unTrackedDeviceIndexInvalid;
+
+// A popup or dialog of a floating window: a small panel over it, cut from the same buffer.
+struct Sub {
+    vr::VROverlayHandle_t overlay = vr::k_ulOverlayHandleInvalid;
+    int x = 0, y = 0, w = 0, h = 0;  // in the output's buffer, pixels
+};
 
 struct Screen {
     vr::VROverlayHandle_t overlay = vr::k_ulOverlayHandleInvalid, bar = vr::k_ulOverlayHandleInvalid,
                           handle = vr::k_ulOverlayHandleInvalid, curveButton = vr::k_ulOverlayHandleInvalid,
-                          rollButton = vr::k_ulOverlayHandleInvalid;
+                          rollButton = vr::k_ulOverlayHandleInvalid, dockButton = vr::k_ulOverlayHandleInvalid,
+                          closeButton = vr::k_ulOverlayHandleInvalid;  // the last two: floating windows
     int width = 0, height = 0;    // current buffer size (mouse scale)
     double metres = 1;
     double curve = 0;             // cylinder radius in metres; 0 = flat
@@ -233,7 +255,7 @@ struct Screen {
     double grabX = 0, grabY = 0;              // resize: the grab point relative to the corner
     Mat rollFrom = Identity();                // roll: the pose at the press (pinRel when pinned)
     double rollAngle = 0;                     // roll: the laser's angle around the centre then
-    bool hover[4] = {};                       // a laser is on the bar, curve, roll, resize control
+    bool hover[6] = {};                       // a laser is on the bar, curve, roll, resize, dock, close control
     bool lasers = true;                       // MakeOverlaysInteractiveIfVisible is set
     float controls = 0;                       // the controls' fade, 0 (hidden) .. 1
     bool controlsUp = false;                  // the controls' overlays are shown
@@ -247,9 +269,33 @@ struct Screen {
     bool cutting = false;         // showing a cutout buffer (side by side) instead
     double chrome = 0.3;          // the bar's width; the other controls follow it (ChromeSize)
     double grip = 0.04;           // the corner tab's and the round buttons' size
-    double heightMetres() const { return width > 0 ? metres * height / width : metres * 9 / 16; }
-    std::array<vr::VROverlayHandle_t, 4> Controls() const { return {bar, curveButton, rollButton, handle}; }
-    std::array<vr::VROverlayHandle_t, 5> All() const { return {overlay, bar, curveButton, rollButton, handle}; }
+    // A floating window's panel (see the top): the window's rectangle in the buffer, its
+    // title bar's height there, and the density.
+    bool floating = false;        // a spare output's panel
+    bool floatOn = false;         // ft-floatd has a window on it ("float" .. "unfloat")
+    bool outputOn = false;        // KWin has the spare output turned on
+    bool minimized = false;
+    int cropX = 0, cropY = 0, cropW = 0, cropH = 0;
+    int titleH = 0;
+    double mpp = 0;               // metres per buffer pixel
+    bool titleCarry = false;      // carried by its title bar: KWin's pointer stays at carryX, carryY
+    double carryX = 0, carryY = 0;
+    long resizeSent = 0;          // g_tick of the last resize request (they're throttled)
+    int resizeW = 0, resizeH = 0; // ...and its size
+    std::map<int, Sub> subs;
+    double heightMetres() const {
+        if (floating && cropW > 0) return metres * cropH / cropW;
+        return width > 0 ? metres * height / width : metres * 9 / 16;
+    }
+    // Buffer pixels from OpenVR's mouse position on the panel (its origin is bottom left).
+    // A cropped panel too: SteamVR gives the position in the whole texture, not the crop.
+    void ToBuffer(double mx, double my, double *x, double *y) const { *x = mx, *y = height - my; }
+    std::array<vr::VROverlayHandle_t, 6> Controls() const {
+        return {bar, curveButton, rollButton, handle, dockButton, closeButton};
+    }
+    std::array<vr::VROverlayHandle_t, 7> All() const {
+        return {overlay, bar, curveButton, rollButton, handle, dockButton, closeButton};
+    }
 };
 std::map<int, Screen> g_screens;
 std::map<const void *, vr::SharedTextureHandle_t> g_imports;
@@ -360,6 +406,29 @@ std::vector<uint8_t> RollTexture(int n) {
             // The head at 0 degrees, pointing up (the way the arc turns there).
             const double hx = u - 0.48, hy = v + 0.02;
             return hy >= 0 && hy <= 0.3 && std::fabs(hx) <= 0.24 * (1 - hy / 0.3);
+        },
+        DiscRim);
+}
+
+std::vector<uint8_t> CloseTexture(int n) {
+    // A cross: "close this window".
+    return ControlTexture(
+        n, InDisc,
+        [](double u, double v) {
+            return std::max(std::fabs(u), std::fabs(v)) < 0.42 &&
+                   (std::fabs(u - v) < 0.12 || std::fabs(u + v) < 0.12);
+        },
+        DiscRim);
+}
+
+std::vector<uint8_t> DockTexture(int n) {
+    // An arrow down onto a line: "back to the desktop".
+    return ControlTexture(
+        n, InDisc,
+        [](double u, double v) {
+            if (std::fabs(u) < 0.5 && v > -0.52 && v < -0.38) return true;  // the line
+            if (std::fabs(u) < 0.08 && v > -0.1 && v < 0.5) return true;    // the shaft
+            return v >= -0.3 && v <= -0.05 && std::fabs(u) <= (v + 0.3) * 1.2;  // the head, point down
         },
         DiscRim);
 }
@@ -516,13 +585,37 @@ Mat BarOffset(const Screen &s) { return OnSurface(s, 0, BarY(s), 0.003); }
 
 // Put the bar, the curve button, and the corner tab under the screen (same parent: the
 // room or the controller), sized for the screen and its distance, and on its surface.
-// Where each control sits, relative to the screen: bar, curve, roll, resize tab.
-std::array<Mat, 4> ControlOffsets(const Screen &s) {
+// Where each control sits, relative to the screen: bar, curve, roll, resize tab, and a
+// floating window's dock and close buttons (left of the bar).
+std::array<Mat, 6> ControlOffsets(const Screen &s) {
     const double h = s.heightMetres(), bar = s.chrome, button = s.grip, gap = bar * 0.06;
     return {BarOffset(s), OnSurface(s, bar / 2 + gap + button / 2, BarY(s), 0.003),
             OnSurface(s, bar / 2 + gap * 2 + button * 1.5, BarY(s), 0.003),
             // The tab's top left corner is the screen's bottom right corner.
-            OnSurface(s, s.metres / 2 + s.grip / 2, -(h / 2 + s.grip / 2), 0.003)};
+            OnSurface(s, s.metres / 2 + s.grip / 2, -(h / 2 + s.grip / 2), 0.003),
+            OnSurface(s, -(bar / 2 + gap + button / 2), BarY(s), 0.003),
+            OnSurface(s, -(bar / 2 + gap * 2 + button * 1.5), BarY(s), 0.003)};
+}
+
+// A floating window's popups and dialogs, a few millimetres in front of it, where they are
+// in the buffer relative to the window.
+void PlaceSubs(const Screen &s) {
+    if (s.subs.empty() || s.cropW <= 0) return;
+    Mat p;
+    if (s.pinned == kNone && !ScreenPose(s, &p)) return;
+    for (const auto &[k, sub] : s.subs) {
+        const double u = (sub.x + sub.w / 2.0 - (s.cropX + s.cropW / 2.0)) * s.mpp;
+        const double v = -(sub.y + sub.h / 2.0 - (s.cropY + s.cropH / 2.0)) * s.mpp;
+        const Mat off = OnSurface(s, u, v, 0.005);
+        vr::VROverlay()->SetOverlayWidthInMeters(sub.overlay, float(std::max(0.01, sub.w * s.mpp)));
+        if (s.pinned != kNone) {
+            const Mat m = Mul(s.pinRel, off);
+            vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(sub.overlay, s.pinned, &m);
+        } else {
+            const Mat m = Mul(p, off);
+            vr::VROverlay()->SetOverlayTransformAbsolute(sub.overlay, vr::TrackingUniverseStanding, &m);
+        }
+    }
 }
 
 void PlaceChrome(Screen &s) {
@@ -533,12 +626,19 @@ void PlaceChrome(Screen &s) {
     vr::VROverlay()->SetOverlayWidthInMeters(s.curveButton, float(button));
     vr::VROverlay()->SetOverlayWidthInMeters(s.rollButton, float(button));
     vr::VROverlay()->SetOverlayWidthInMeters(s.handle, float(s.grip));
+    if (s.floating) {
+        vr::VROverlay()->SetOverlayWidthInMeters(s.dockButton, float(button));
+        vr::VROverlay()->SetOverlayWidthInMeters(s.closeButton, float(button));
+    }
     // Curved, the bar bends with the screen's bottom edge.
     vr::VROverlay()->SetOverlayCurvature(s.bar, s.curve > 0 ? float(std::min(1.0, bar / (2 * M_PI * s.curve))) : 0.f);
     const std::pair<vr::VROverlayHandle_t, Mat> parts[] = {
-        {s.bar, offsets[0]}, {s.curveButton, offsets[1]}, {s.rollButton, offsets[2]}, {s.handle, offsets[3]}};
+        {s.bar, offsets[0]},        {s.curveButton, offsets[1]}, {s.rollButton, offsets[2]},
+        {s.handle, offsets[3]},     {s.dockButton, offsets[4]},  {s.closeButton, offsets[5]}};
+    PlaceSubs(s);
     if (s.pinned != kNone) {
         for (const auto &[o, off] : parts) {
+            if (o == vr::k_ulOverlayHandleInvalid) continue;
             const Mat m = Mul(s.pinRel, off);
             vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(o, s.pinned, &m);
         }
@@ -547,6 +647,7 @@ void PlaceChrome(Screen &s) {
     Mat p;
     if (!ScreenPose(s, &p)) return;
     for (const auto &[o, off] : parts) {
+        if (o == vr::k_ulOverlayHandleInvalid) continue;
         const Mat m = Mul(p, off);
         vr::VROverlay()->SetOverlayTransformAbsolute(o, vr::TrackingUniverseStanding, &m);
     }
@@ -653,11 +754,13 @@ bool ModeVisible() {
 // it's being dragged.
 void ApplyAlpha(const Screen &s) {
     vr::VROverlay()->SetOverlayAlpha(s.overlay, s.alpha);
-    const bool active[4] = {s.hover[0] || s.drag == Drag::Move, s.hover[1], s.hover[2] || s.drag == Drag::Roll,
-                            s.hover[3] || s.drag == Drag::Resize};
+    for (const auto &[k, sub] : s.subs) vr::VROverlay()->SetOverlayAlpha(sub.overlay, s.alpha);
+    const bool active[6] = {s.hover[0] || s.drag == Drag::Move, s.hover[1], s.hover[2] || s.drag == Drag::Roll,
+                            s.hover[3] || s.drag == Drag::Resize, s.hover[4], s.hover[5]};
     const auto controls = s.Controls();
-    for (int k = 0; k < 4; ++k)
-        vr::VROverlay()->SetOverlayAlpha(controls[k], s.alpha * s.controls * (active[k] ? 1.f : kChromeIdle));
+    for (int k = 0; k < 6; ++k)
+        if (controls[k] != vr::k_ulOverlayHandleInvalid)
+            vr::VROverlay()->SetOverlayAlpha(controls[k], s.alpha * s.controls * (active[k] ? 1.f : kChromeIdle));
 }
 
 void SetVisible(Screen &s, bool visible, float alpha) {
@@ -669,11 +772,14 @@ void SetVisible(Screen &s, bool visible, float alpha) {
     s.visible = visible;
     if (visible) {
         vr::VROverlay()->ShowOverlay(s.overlay);
+        for (const auto &[k, sub] : s.subs) vr::VROverlay()->ShowOverlay(sub.overlay);
         return;
     }
     // Hidden: the controls go at once (UpdateControls brings them back).
     vr::VROverlay()->HideOverlay(s.overlay);
-    for (auto o : s.Controls()) vr::VROverlay()->HideOverlay(o);
+    for (const auto &[k, sub] : s.subs) vr::VROverlay()->HideOverlay(sub.overlay);
+    for (auto o : s.Controls())
+        if (o != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->HideOverlay(o);
     s.controls = 0, s.controlsUp = false;
 }
 
@@ -683,6 +789,9 @@ void UpdateVisibility() {
     const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
     for (auto &[i, s] : g_screens) {
         bool visible = s.shown && (shared || s.drag != Drag::None);
+        // A floating window's panel: while a window floats on it, its output is on, and the
+        // window isn't minimized (and once it has a crop).
+        if (s.floating) visible = visible && s.floatOn && s.outputOn && !s.minimized && s.cropW > 0;
         float alpha = 1;
         Mat p;
         if (visible && s.pinned != kNone && s.pinned != vr::k_unTrackedDeviceIndex_Hmd && s.drag == Drag::None &&
@@ -728,7 +837,9 @@ void UpdateControls() {
             const auto offsets = ControlOffsets(s);
             for (double f : {-0.5, -0.25, 0.0, 0.25, 0.5})
                 spots.push_back(Mul(p, Mul(offsets[0], Translation(f * s.chrome, 0, 0))));
-            for (int k = 1; k < 4; ++k) spots.push_back(Mul(p, offsets[k]));
+            const auto controls = s.Controls();
+            for (int k = 1; k < 6; ++k)
+                if (controls[k] != vr::k_ulOverlayHandleInvalid) spots.push_back(Mul(p, offsets[k]));
             const double reach = std::max(s.grip * 1.5, s.chrome * 0.12);
             for (const Mat &d : lasers) {
                 const double o[3] = {d.m[0][3], d.m[1][3], d.m[2][3]}, dir[3] = {-d.m[0][2], -d.m[1][2], -d.m[2][2]};
@@ -746,13 +857,14 @@ void UpdateControls() {
                 }
             }
         }
-        const bool inUse = s.drag != Drag::None || s.hover[0] || s.hover[1] || s.hover[2] || s.hover[3];
+        const bool inUse = s.drag != Drag::None || std::any_of(std::begin(s.hover), std::end(s.hover), [](bool h) { return h; });
         const bool want = s.visible && (inUse || g_tick < s.nearUntil);
         // The controls stay shown while their screen is, just fully transparent when not
         // wanted: SteamVR's laser still hits them, and the hover event brings them in, for
         // any device's laser, whatever its shape.
         if (s.visible && !s.controlsUp) {
-            for (auto o : s.Controls()) vr::VROverlay()->ShowOverlay(o);
+            for (auto o : s.Controls())
+                if (o != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->ShowOverlay(o);
             s.controlsUp = true;
             ApplyAlpha(s);
         }
@@ -763,6 +875,19 @@ void UpdateControls() {
 }
 
 // ---------------------------------------------------------------- moving, resizing, pinning
+
+// To ft-floatd (@frametop_float), for floating windows: dock, close, resize. From an unbound
+// socket, so its replies go nowhere.
+void SendFloat(const std::string &msg) {
+    static const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const char name[] = "frametop_float";
+    std::memcpy(addr.sun_path + 1, name, sizeof name - 1);
+    sendto(fd, msg.data(), msg.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&addr),
+           socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1));
+    std::printf("to ft-floatd: %s\n", msg.c_str());
+}
 
 // Where a device's ray meets the screen's plane, in the screen's x (right) and y (up),
 // metres from its centre.
@@ -921,7 +1046,7 @@ void FinishDrag(Screen &s, int index) {
     EndDrag(s);
     Mat c, p;
     if (!moved) return;
-    ArrangeDesktopSoon();
+    if (!s.floating) ArrangeDesktopSoon();
     if (target != kNone && DevicePose(target, &c) && ScreenPose(s, &p)) {
         Pin(s, target, Mul(Inverse(c), p));
         if (target == vr::k_unTrackedDeviceIndex_Hmd) std::printf("screen %d: pinned to the head\n", index + 1);
@@ -1009,6 +1134,19 @@ void UpdateDrag(Screen &s, int index) {
     double hx, hy;
     Mat l;
     if (!LaserPose(s.dragDevice, &l) || !RayOnScreen(s, l, &hx, &hy)) return;
+    if (s.floating) {
+        // A floating window: the corner goes where the laser is, in both directions, and the
+        // window gets that many pixels at the same density (ft-floatd resizes it, and the
+        // new crop comes back as "float", with the top left corner kept where it is).
+        if (s.mpp <= 0 || g_tick - s.resizeSent < 4) return;  // about 20 a second
+        const double left = -s.metres / 2, top = s.heightMetres() / 2;
+        const int w = std::max(320, int(std::lround((hx - s.grabX - left) / s.mpp)));
+        const int h = std::max(200, int(std::lround((top - (hy - s.grabY)) / s.mpp)));
+        if (w == s.resizeW && h == s.resizeH) return;
+        s.resizeW = w, s.resizeH = h, s.resizeSent = g_tick;
+        SendFloat("resize " + std::to_string(index + 1) + " " + std::to_string(w) + " " + std::to_string(h));
+        return;
+    }
     const double a = s.width > 0 ? double(s.height) / s.width : 9.0 / 16;
     const double cx = hx - s.grabX, cy = hy - s.grabY;  // where the corner should be
     SetWidth(s, 2 * (cx - a * cy) / (1 + a * a));
@@ -1028,6 +1166,184 @@ void Push(Screen &s, double notches) {
     s.dragRel = Mul(Inverse(d), p);
 }
 
+// ---------------------------------------------------------------- floating windows
+
+// Show the window's rectangle of the buffer. Texture bounds are fractions of the buffer, v
+// from the top. SteamVR reports mouse positions in the whole texture (the bounds applied), so
+// the mouse scale is the buffer's size, as on a screen (see ToBuffer).
+void CropOverlay(vr::VROverlayHandle_t o, const Screen &s, int x, int y, int w, int h) {
+    if (s.width <= 0 || s.height <= 0 || w <= 0 || h <= 0) return;
+    vr::VRTextureBounds_t b = {float(x) / s.width, float(y) / s.height, float(x + w) / s.width,
+                               float(y + h) / s.height};
+    vr::VROverlay()->SetOverlayTextureBounds(o, &b);
+    vr::HmdVector2_t scale = {float(s.width), float(s.height)};
+    vr::VROverlay()->SetOverlayMouseScale(o, &scale);
+}
+
+void ApplyCrop(Screen &s) {
+    CropOverlay(s.overlay, s, s.cropX, s.cropY, s.cropW, s.cropH);
+    for (const auto &[k, sub] : s.subs) CropOverlay(sub.overlay, s, sub.x, sub.y, sub.w, sub.h);
+}
+
+// ft-floatd's "float": the window's rectangle, its title bar, and the density. The panel's
+// top left corner stays where it is when the window changes size.
+void SetFloat(Screen &s, double mpp, int x, int y, int w, int h, int title) {
+    const bool first = !s.floatOn || s.cropW <= 0;
+    const double oldW = s.metres, oldH = s.heightMetres();
+    s.floatOn = true;
+    s.mpp = mpp;
+    s.cropX = x, s.cropY = y, s.cropW = w, s.cropH = h, s.titleH = title;
+    s.metres = w * mpp;
+    vr::VROverlay()->SetOverlayWidthInMeters(s.overlay, float(s.metres));
+    ApplyCurve(s);
+    ApplyCrop(s);
+    const double dx = (s.metres - oldW) / 2, dy = -(s.heightMetres() - oldH) / 2;
+    if (!first && (std::fabs(dx) > 1e-6 || std::fabs(dy) > 1e-6)) {
+        if (s.pinned != kNone) Pin(s, s.pinned, Mul(s.pinRel, Translation(dx, dy, 0)));
+        else SetAbsolute(s, Mul(s.pose, Translation(dx, dy, 0)));
+    } else {
+        PlaceChrome(s);
+    }
+}
+
+void Unfloat(Screen &s) {
+    if (s.drag != Drag::None) EndDrag(s);
+    for (auto &[k, sub] : s.subs) vr::VROverlay()->DestroyOverlay(sub.overlay);
+    s.subs.clear();
+    s.floatOn = s.minimized = s.titleCarry = false;
+    s.cropW = s.cropH = 0;
+    s.resizeW = s.resizeH = 0;
+}
+
+// A popup or dialog (number k) at x, y, w, h in the buffer; w = 0 takes it away.
+void SetSub(Screen &s, int index, int k, int x, int y, int w, int h) {
+    auto it = s.subs.find(k);
+    if (w <= 0 || h <= 0) {
+        if (it != s.subs.end()) {
+            vr::VROverlay()->DestroyOverlay(it->second.overlay);
+            s.subs.erase(it);
+        }
+        return;
+    }
+    if (it == s.subs.end()) {
+        Sub sub;
+        char key[80], name[64];
+        std::snprintf(key, sizeof key, "frametop.float.%d.sub.%d", index + 1, k);
+        std::snprintf(name, sizeof name, "Floating window menu %d", k);
+        if (vr::VROverlay()->CreateOverlay(key, name, &sub.overlay) != vr::VROverlayError_None) return;
+        vr::VROverlay()->SetOverlayInputMethod(sub.overlay, vr::VROverlayInputMethod_Mouse);
+        vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_IgnoreTextureAlpha, true);
+        vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
+        vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, s.lasers);
+        vr::VROverlay()->SetOverlaySortOrder(sub.overlay, 5);
+        it = s.subs.emplace(k, sub).first;
+        if (s.shown) {
+            auto imp = g_imports.find(s.shown);
+            if (imp != g_imports.end()) {
+                vr::SharedTextureHandle_t handle = imp->second;
+                vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+                vr::VROverlay()->SetOverlayTexture(sub.overlay, &tex);
+            }
+        }
+        vr::VROverlay()->SetOverlayAlpha(sub.overlay, s.alpha);
+        if (s.visible) vr::VROverlay()->ShowOverlay(sub.overlay);
+    }
+    it->second.x = x, it->second.y = y, it->second.w = w, it->second.h = h;
+    CropOverlay(it->second.overlay, s, x, y, w, h);
+    PlaceSubs(s);
+}
+
+// ---------------------------------------------------------------- the catcher
+
+// A button pressed on a screen belongs to KWin until it comes up, wherever the laser is by
+// then: a window move or a drag and drop can end between panels. SteamVR sends the release
+// only to an overlay under the laser, so while the pressing laser is on none of our panels,
+// an invisible catcher sits on it, at the distance where it last met one, and a release
+// there goes to KWin at the pointer's last spot. While a button is held, the laser leaving
+// a screen doesn't take KWin's pointer away either, as with a real mouse; crossing onto
+// another screen still moves it there.
+struct Press {
+    uint32_t buttons = 0;                     // held, as bits (1 << (BTN_* - BTN_LEFT))
+    vr::TrackedDeviceIndex_t device = kNone;  // the laser that pressed them
+    int screen = -1;                          // where KWin's pointer is: the last screen the laser was on
+    double x = 0, y = 0;                      // ...and where on it, in buffer pixels
+    double distance = 1;                      // from the laser's start to the last panel it met
+    long upAt = -1;                           // the pointer helper saw left come up: release it at this tick
+};
+Press g_press;
+vr::VROverlayHandle_t g_catcher = vr::k_ulOverlayHandleInvalid;
+bool g_catcherShown = false;
+
+uint32_t ButtonBit(uint32_t linuxButton) { return 1u << (linuxButton - BTN_LEFT); }
+
+void PressDown(vr::TrackedDeviceIndex_t dev, uint32_t button, int screen, double x, double y) {
+    if (!g_press.buttons) g_press.device = dev;
+    g_press.buttons |= ButtonBit(button);
+    g_press.screen = screen, g_press.x = x, g_press.y = y;
+}
+
+// A button came up somewhere that isn't a screen (the catcher, a control, or the helper's
+// word): release it in KWin where its pointer is, and once nothing is held, the laser is
+// off the screens, so KWin's pointer leaves.
+void ReleaseAway(uint32_t button, void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!(g_press.buttons & ButtonBit(button))) return;
+    g_press.buttons &= ~ButtonBit(button);
+    if (!g_press.buttons) g_press.upAt = -1;
+    if (g_press.screen < 0) return;
+    ft_event e{};
+    e.type = FT_BUTTON;
+    e.screen = g_press.screen;
+    e.button = button;
+    e.pressed = false;
+    e.x = g_press.x, e.y = g_press.y;
+    handle(&e, data);
+    std::printf("caught a release off the screens (button %u)\n", button);
+    if (g_press.buttons) return;
+    e = ft_event{};
+    e.type = FT_LEAVE;
+    e.screen = g_press.screen;
+    handle(&e, data);
+}
+
+void ShowCatcher(bool on) {
+    if (on == g_catcherShown || g_catcher == vr::k_ulOverlayHandleInvalid) return;
+    g_catcherShown = on;
+    if (on) vr::VROverlay()->ShowOverlay(g_catcher);
+    else vr::VROverlay()->HideOverlay(g_catcher);
+}
+
+// Every tick: while a button is held, find what the pressing laser is on. On one of our
+// panels or controls, note how far away; on none, put the catcher across it there.
+void UpdateCatcher() {
+    Mat l;
+    if (!g_press.buttons || g_catcher == vr::k_ulOverlayHandleInvalid || !LaserPose(g_press.device, &l)) {
+        ShowCatcher(false);
+        return;
+    }
+    vr::VROverlayIntersectionParams_t params{};
+    params.eOrigin = vr::TrackingUniverseStanding;
+    for (int k = 0; k < 3; ++k) params.vSource.v[k] = l.m[k][3], params.vDirection.v[k] = -l.m[k][2];
+    for (auto &[i, s] : g_screens) {
+        if (!s.visible) continue;
+        std::vector<vr::VROverlayHandle_t> parts(s.All().begin(), s.All().end());
+        for (const auto &[k, sub] : s.subs) parts.push_back(sub.overlay);
+        for (auto o : parts) {
+            vr::VROverlayIntersectionResults_t hit;
+            if (o != vr::k_ulOverlayHandleInvalid && vr::VROverlay()->ComputeOverlayIntersection(o, &params, &hit)) {
+                g_press.distance = std::max(0.05, double(hit.fDistance));
+                ShowCatcher(false);
+                return;
+            }
+        }
+    }
+    const double d = g_press.distance;
+    const double pt[3] = {l.m[0][3] - l.m[0][2] * d, l.m[1][3] - l.m[1][2] * d, l.m[2][3] - l.m[2][2] * d};
+    const Mat m = FacingPose(pt, l);  // across the laser, facing its start
+    vr::VROverlay()->SetOverlayTransformAbsolute(g_catcher, vr::TrackingUniverseStanding, &m);
+    vr::VROverlay()->SetOverlayWidthInMeters(g_catcher, float(std::max(0.5, 2 * d)));
+    ShowCatcher(true);
+}
+
 Screen *Find(int one_based) {
     auto it = g_screens.find(one_based - 1);
     return it == g_screens.end() ? nullptr : &it->second;
@@ -1039,6 +1355,12 @@ uint32_t LinuxButton(uint32_t vrButton) {
         case vr::VRMouseButton_Middle: return BTN_MIDDLE;
         default: return BTN_LEFT;
     }
+}
+
+// Any of the holding laser's buttons coming up on one of our controls or the catcher.
+void ReleaseAwayBy(vr::TrackedDeviceIndex_t dev, uint32_t vrButton, void (*handle)(const struct ft_event *, void *),
+                   void *data) {
+    if (g_press.buttons && dev == g_press.device) ReleaseAway(LinuxButton(vrButton), handle, data);
 }
 
 const char *LasersName() {
@@ -1115,6 +1437,8 @@ void StopCutting(Screen &s) {
 
 // Each tick: for each visible screen with a hand in front of it (for either eye), draw its
 // client buffer with the hands cut out and show that; else show the client buffer.
+// Floating windows don't get cutouts yet: their panel and popups show crops of the client
+// buffer (texture bounds), which a side-by-side buffer doesn't match.
 void UpdateCutouts() {
     Mat head;
     const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
@@ -1126,7 +1450,7 @@ void UpdateCutouts() {
     for (auto &[i, s] : g_screens) {
         std::vector<handcut::Capsule2D> spots[2];
         Mat p;
-        bool cut = hands && s.visible && s.key && s.width > 0 && ScreenPose(s, &p) &&
+        bool cut = hands && s.visible && !s.floating && s.key && s.width > 0 && ScreenPose(s, &p) &&
                    handcut::Project({p, s.metres, s.heightMetres(), s.curve, s.width, s.height}, g_hands.capsules(),
                                     eyes, spots);
         const handcut::Output *out = cut && CutterReady() ? g_cutter.Composite(i, s.key, s.buf, spots) : nullptr;
@@ -1194,13 +1518,27 @@ bool ft_vr_init(void) {
         std::fprintf(stderr, "openvr: no IVRIPCResourceManagerClient (SteamVR too old?)\n");
         return false;
     }
+    g_vr = true;
     RefreshPoses();
+    // The catcher (see UpdateCatcher): clear and invisible, but the laser lands on it, and
+    // it keeps SteamVR's laser mouse on while it's up.
+    if (vr::VROverlay()->CreateOverlay("frametop.catcher", "Frametop: release catcher", &g_catcher) ==
+        vr::VROverlayError_None) {
+        static std::vector<uint8_t> clear(4 * 4 * 4, 0);
+        vr::VROverlay()->SetOverlayRaw(g_catcher, clear.data(), 4, 4, 4);
+        vr::VROverlay()->SetOverlayInputMethod(g_catcher, vr::VROverlayInputMethod_Mouse);
+        vr::VROverlay()->SetOverlayAlpha(g_catcher, 0);
+        vr::VROverlay()->SetOverlayFlag(g_catcher, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
+    }
     return true;
 }
 
 void ft_vr_shutdown(void) {
+    if (!g_vr) return;
     if (g_cutterState == 1)
         for (auto &[i, s] : g_screens) g_cutter.DropPanel(i);  // drops their imports while SteamVR is up
+    if (g_catcher != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->DestroyOverlay(g_catcher);
+    g_catcher = vr::k_ulOverlayHandleInvalid;
     for (auto &[i, s] : g_screens)
         for (auto o : s.All()) vr::VROverlay()->DestroyOverlay(o);
     for (auto &[dev, g] : g_guides)
@@ -1214,24 +1552,33 @@ void ft_vr_shutdown(void) {
 }
 
 int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
+    if (!g_vr) {  // --no-vr: nothing imports the buffers, so any layout KWin can draw
+        if (max < 1) return 0;
+        out[0] = 0;  // DRM_FORMAT_MOD_LINEAR
+        return 1;
+    }
     uint32_t n = uint32_t(max);
     if (!vr::VRIPCResourceManager()->GetDmabufModifiers(vr::VRApplication_Overlay, format, &n, out)) return 0;
     return int(n < uint32_t(max) ? n : uint32_t(max));
 }
 
-bool ft_vr_screens_shown(void) { return ModeVisible(); }
+bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
 
-void ft_vr_screen_create(int index, double metres, int count) {
-    Screen &s = g_screens[index];
-    s.metres = metres;
+}  // extern "C"
+
+namespace {
+
+// A panel and its controls. `prefix` names the overlays (frametop.screen.N,
+// frametop.float.N), `label` is what SteamVR shows ("Screen 2", "Floating window 1").
+bool MakePanel(Screen &s, const char *prefix, const char *label) {
     char key[64], name[64];
-    std::snprintf(key, sizeof key, "frametop.screen.%d", index + 1);
-    std::snprintf(name, sizeof name, "Screen %d", index + 1);
+    std::snprintf(key, sizeof key, "%s", prefix);
+    std::snprintf(name, sizeof name, "%s", label);
     if (vr::VROverlay()->CreateOverlay(key, name, &s.overlay) != vr::VROverlayError_None) {
         std::fprintf(stderr, "openvr: can't create overlay %s\n", key);
-        return;
+        return false;
     }
-    vr::VROverlay()->SetOverlayWidthInMeters(s.overlay, float(metres));
+    vr::VROverlay()->SetOverlayWidthInMeters(s.overlay, float(s.metres));
     vr::VROverlay()->SetOverlayInputMethod(s.overlay, vr::VROverlayInputMethod_Mouse);
     vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_IgnoreTextureAlpha, true);
     vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
@@ -1239,21 +1586,39 @@ void ft_vr_screen_create(int index, double metres, int count) {
     static const auto corner = CornerTexture(64);
     static const auto curve = CurveTexture(64);
     static const auto roll = RollTexture(64);
-    std::snprintf(key, sizeof key, "frametop.screen.%d.bar", index + 1);
-    std::snprintf(name, sizeof name, "Screen %d: move", index + 1);
-    s.bar = MakeChrome(key, name, BarTexture(false), 256, 24);
+    auto chrome = [&](const char *part, const char *what, const std::vector<uint8_t> &px, int w, int h) {
+        std::snprintf(key, sizeof key, "%s.%s", prefix, part);
+        std::snprintf(name, sizeof name, "%s: %s", label, what);
+        return MakeChrome(key, name, px, w, h);
+    };
+    s.bar = chrome("bar", "move", BarTexture(false), 256, 24);
     vr::VROverlay()->SetOverlayFlag(s.bar, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
-    std::snprintf(key, sizeof key, "frametop.screen.%d.curve", index + 1);
-    std::snprintf(name, sizeof name, "Screen %d: curve", index + 1);
-    s.curveButton = MakeChrome(key, name, curve, 64, 64);
-    std::snprintf(key, sizeof key, "frametop.screen.%d.roll", index + 1);
-    std::snprintf(name, sizeof name, "Screen %d: roll", index + 1);
-    s.rollButton = MakeChrome(key, name, roll, 64, 64);
+    s.curveButton = chrome("curve", "curve", curve, 64, 64);
+    s.rollButton = chrome("roll", "roll", roll, 64, 64);
     vr::VROverlay()->SetOverlayFlag(s.rollButton, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
-    std::snprintf(key, sizeof key, "frametop.screen.%d.resize", index + 1);
-    std::snprintf(name, sizeof name, "Screen %d: resize", index + 1);
-    s.handle = MakeChrome(key, name, corner, 64, 64);
+    s.handle = chrome("resize", "resize", corner, 64, 64);
+    if (s.floating) {
+        static const auto dock = DockTexture(64);
+        static const auto close = CloseTexture(64);
+        s.dockButton = chrome("dock", "back to the desktop", dock, 64, 64);
+        s.closeButton = chrome("close", "close", close, 64, 64);
+    }
     ApplyAlpha(s);
+    return true;
+}
+
+}  // namespace
+
+extern "C" {
+
+void ft_vr_screen_create(int index, double metres, int count) {
+    if (!g_vr) return;
+    Screen &s = g_screens[index];
+    s.metres = metres;
+    char prefix[64], label[64];
+    std::snprintf(prefix, sizeof prefix, "frametop.screen.%d", index + 1);
+    std::snprintf(label, sizeof label, "Screen %d", index + 1);
+    if (!MakePanel(s, prefix, label)) return;
     // Until the layout places it: 2 m ahead of the head, in a row, screen 1 on the left.
     RefreshPoses();
     Mat head;
@@ -1264,15 +1629,34 @@ void ft_vr_screen_create(int index, double metres, int count) {
     SetAbsolute(s, PanelPose(head.m[0][3] + dx * 2, head.m[1][3], head.m[2][3] + dz * 2, yaw, 0, 0));
 }
 
+// A spare output's panel (number `slot` from 1): hidden until a window floats on it.
+void ft_vr_float_create(int index, int slot) {
+    if (!g_vr) return;
+    Screen &s = g_screens[index];
+    s.floating = true;
+    char prefix[64], label[64];
+    std::snprintf(prefix, sizeof prefix, "frametop.float.%d", slot);
+    std::snprintf(label, sizeof label, "Floating window %d", slot);
+    MakePanel(s, prefix, label);
+}
+
+void ft_vr_float_output(int index, bool on) {
+    auto it = g_screens.find(index);
+    if (it != g_screens.end()) it->second.outputOn = on;
+}
+
 void ft_vr_screen_destroy(int index) {
     auto it = g_screens.find(index);
     if (it == g_screens.end()) return;
     if (g_cutterState == 1) g_cutter.DropPanel(index);
-    for (auto o : it->second.All()) vr::VROverlay()->DestroyOverlay(o);
+    for (auto o : it->second.All())
+        if (o != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->DestroyOverlay(o);
+    for (auto &[k, sub] : it->second.subs) vr::VROverlay()->DestroyOverlay(sub.overlay);
     g_screens.erase(it);
 }
 
 bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *b) {
+    if (!g_vr) return false;
     auto sit = g_screens.find(index);
     if (sit == g_screens.end()) return false;
     Screen &s = sit->second;
@@ -1300,17 +1684,21 @@ bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *b)
     }
     if (b->width != s.width || b->height != s.height) {
         s.width = b->width, s.height = b->height;
-        vr::HmdVector2_t scale = {float(s.width), float(s.height)};
-        vr::VROverlay()->SetOverlayMouseScale(s.overlay, &scale);
+        if (s.floating) {
+            ApplyCrop(s);
+        } else {
+            vr::HmdVector2_t scale = {float(s.width), float(s.height)};
+            vr::VROverlay()->SetOverlayMouseScale(s.overlay, &scale);
+        }
         PlaceChrome(s);  // the height changed
         std::printf("screen %d: %dx%d\n", index + 1, s.width, s.height);
     }
     s.key = key, s.buf = *b, s.plain = it->second;
-    if (!s.cutting) {  // otherwise the next tick draws the new buffer with the cutouts
-        vr::SharedTextureHandle_t handle = it->second;
-        vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
-        vr::VROverlay()->SetOverlayTexture(s.overlay, &tex);
-    }
+    // While cutting, the next tick draws the new buffer with the cutouts (never floating).
+    if (!s.cutting) SetScreenTexture(s, it->second);
+    vr::SharedTextureHandle_t handle = it->second;
+    vr::Texture_t tex = {&handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+    for (const auto &[k, sub] : s.subs) vr::VROverlay()->SetOverlayTexture(sub.overlay, &tex);
     s.shown = key;  // UpdateVisibility shows it on the next tick
     return true;
 }
@@ -1326,18 +1714,21 @@ void ft_vr_forget(const void *key) {
 }
 
 void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!g_vr) return;
     RefreshPoses();
     for (auto &[index, s] : g_screens) {
         vr::VREvent_t ev;
-        // The screen itself: input for KWin.
-        while (vr::VROverlay()->PollNextOverlayEvent(s.overlay, &ev, sizeof ev)) {
+        // The screen itself (and a floating window's popups): input for KWin.
+        auto panelEvent = [&](const vr::VREvent_t &ev, bool sub) {
             ft_event e{};
             e.screen = index;
+            auto at = [&] { s.ToBuffer(ev.data.mouse.x, ev.data.mouse.y, &e.x, &e.y); };
             switch (ev.eventType) {
                 case vr::VREvent_MouseMove:
+                    if (s.titleCarry) return;  // KWin's pointer stays where the title bar was pressed
                     e.type = FT_MOTION;
-                    e.x = ev.data.mouse.x;
-                    e.y = s.height - ev.data.mouse.y;  // OpenVR's mouse origin is bottom left
+                    at();
+                    if (g_press.buttons) g_press.screen = index, g_press.x = e.x, g_press.y = e.y;
                     break;
                 case vr::VREvent_MouseButtonDown:
                 case vr::VREvent_MouseButtonUp:
@@ -1345,8 +1736,21 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.type = FT_BUTTON;
                     e.button = LinuxButton(ev.data.mouse.button);
                     e.pressed = ev.eventType == vr::VREvent_MouseButtonDown;
-                    e.x = ev.data.mouse.x;
-                    e.y = s.height - ev.data.mouse.y;
+                    at();
+                    if (!e.pressed && s.titleCarry) e.x = s.carryX, e.y = s.carryY, s.titleCarry = false;
+                    if (e.pressed) {
+                        PressDown(ev.trackedDeviceIndex, e.button, index, e.x, e.y);
+                        // A floating window's title bar: carry the panel, and KWin (which starts
+                        // moving the window on the press) sees no motion until the release.
+                        if (!sub && s.floating && e.button == BTN_LEFT && s.titleH > 0 && e.y >= s.cropY &&
+                            e.y < s.cropY + s.titleH && s.drag == Drag::None) {
+                            s.titleCarry = true, s.carryX = e.x, s.carryY = e.y;
+                            StartDrag(s, Drag::Move, ev.trackedDeviceIndex);
+                        }
+                    } else {
+                        g_press.buttons &= ~ButtonBit(e.button);
+                        if (!g_press.buttons) g_press.upAt = -1;
+                    }
                     break;
                 case vr::VREvent_ScrollDiscrete:
                     e.type = FT_SCROLL;
@@ -1354,13 +1758,18 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.dy = -ev.data.scroll.ydelta;
                     break;
                 case vr::VREvent_FocusLeave:
+                    if (g_press.buttons) return;  // KWin keeps the pointer while a button is held
+                    if (sub) return;              // off a popup is usually onto its window
                     e.type = FT_LEAVE;
                     break;
                 default:
-                    continue;
+                    return;
             }
             handle(&e, data);
-        }
+        };
+        while (vr::VROverlay()->PollNextOverlayEvent(s.overlay, &ev, sizeof ev)) panelEvent(ev, false);
+        for (const auto &[k, sub] : s.subs)
+            while (vr::VROverlay()->PollNextOverlayEvent(sub.overlay, &ev, sizeof ev)) panelEvent(ev, true);
         // The controls light up under a laser.
         auto hover = [&](int k) {
             const bool on = ev.eventType == vr::VREvent_MouseMove || ev.eventType == vr::VREvent_FocusEnter;
@@ -1372,8 +1781,10 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
             hover(0);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Move, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
             else if (ev.eventType == vr::VREvent_ScrollDiscrete && s.drag == Drag::Move)
                 Push(s, ev.data.scroll.ydelta);
         }
@@ -1382,24 +1793,44 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
             hover(3);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Resize, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
         }
         // The curve button.
         while (vr::VROverlay()->PollNextOverlayEvent(s.curveButton, &ev, sizeof ev)) {
             hover(1);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 ToggleCurve(s);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
+        }
+        // A floating window's buttons: back to the desktop, and close (ft-floatd does both).
+        for (int k : {4, 5}) {
+            const vr::VROverlayHandle_t o = s.Controls()[k];
+            if (o == vr::k_ulOverlayHandleInvalid) continue;
+            while (vr::VROverlay()->PollNextOverlayEvent(o, &ev, sizeof ev)) {
+                hover(k);
+                if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left) {
+                    SendFloat((k == 4 ? "dock " : "close ") + std::to_string(index + 1));
+                } else if (ev.eventType == vr::VREvent_MouseButtonUp) {
+                    EndDragsBy(ev.trackedDeviceIndex);
+                    ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+                }
+            }
         }
         // The roll button: drag around like a knob, or scroll.
         while (vr::VROverlay()->PollNextOverlayEvent(s.rollButton, &ev, sizeof ev)) {
             hover(2);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Roll, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
             else if (ev.eventType == vr::VREvent_ScrollDiscrete && s.drag == Drag::None) {
                 Mat p;
                 if (!ScreenPose(s, &p)) continue;
@@ -1409,8 +1840,14 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         }
         if (s.drag != Drag::None) UpdateDrag(s, index);
     }
-    RefreshChrome();
+    // A release on the catcher, or the pointer helper's word that left came up (see "up").
     vr::VREvent_t ev;
+    while (g_catcher != vr::k_ulOverlayHandleInvalid &&
+           vr::VROverlay()->PollNextOverlayEvent(g_catcher, &ev, sizeof ev))
+        if (ev.eventType == vr::VREvent_MouseButtonUp)
+            ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+    if (g_press.upAt >= 0 && g_tick >= g_press.upAt) ReleaseAway(BTN_LEFT, handle, data);
+    RefreshChrome();
     while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
         if (ev.eventType == vr::VREvent_Quit) {
             ft_event e{};
@@ -1452,6 +1889,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateControls();
     UpdateGuides();
     UpdateCutouts();
+    UpdateCatcher();
 }
 
 // Our keyboard (keyboard.cpp) for a screen. It's placed where you'll reach it, not on the
@@ -1509,15 +1947,29 @@ void ft_vr_keyboard_hide(void) {
 //   controllers always|outside_games|dashboard   when controllers' lasers work the screens
 //   ingames hide|visible      during a VR game, "always" acts like "only with the dashboard"
 //                             (hide), or stays as it is (visible)
+//   up                        the pointer helper: the mouse's left button came up. If SteamVR
+//                             hasn't delivered that release to one of our overlays within
+//                             ~100 ms (it landed on something else), KWin gets it anyway
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
 //                     <controllers> <game running 0|1> <ingames>"
 //   cutouts on|off|state      hand cutouts (see handcut.h) -> "ok <on|off> <ready|idle|unavailable>
 //                             <last composite ms> ms, predict <on|off> lead <ms> ms"
 //   cutouts predict on|off    move the hands ahead along their velocity (on by default)
 //   cutouts lead <ms>         ...to this long after now: about when the frame is on the displays
+// Floating windows (from ft-floatd; <screen> is the spare output's number, after the screens):
+//   float <screen> <metres per pixel> <x> <y> <w> <h> <title>   the window's rectangle in the
+//                             buffer and its title bar's height (pixels); shows the panel
+//   unfloat <screen>          hides it
+//   pose <screen> <12 numbers>  its place in the room (rows of a 3x4, standing universe)
+//   sub <screen> <k> <x> <y> <w> <h> | sub <screen> <k> off   popup or dialog k over it
+//   minimized <screen> 0|1
+//   carry <screen>            the window's own title bar was pressed (an app that draws its
+//                             own): carry the panel with the pressing laser until the release
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
-// numbered from 1 here, like everywhere the user sees them.
+// numbered from 1 here, like everywhere the user sees them. "screens" and "all" leave out
+// floating windows.
 void ft_vr_command(const char *cmd, char *reply, int size) {
+    if (!g_vr) return (void)std::snprintf(reply, size, "error no SteamVR (--no-vr)");
     RefreshPoses();
     int n;
     double x, y, z, yaw, pitch, roll, w;
@@ -1525,7 +1977,8 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
     float r[12];
     auto each = [&](const char *which, auto fn) -> bool {  // "all" or a screen number
         if (std::strcmp(which, "all") == 0) {
-            for (auto &[i, s] : g_screens) fn(s);
+            for (auto &[i, s] : g_screens)
+                if (!s.floating) fn(s);
             return true;
         }
         Screen *s = Find(std::atoi(which));
@@ -1596,9 +2049,10 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
             for (int k = 0; k < 12 && len < size; ++k)
                 len += std::snprintf(reply + len, size - len, " %.5f", s->pinRel.m[k / 4][k % 4]);
     } else if (std::strncmp(cmd, "screens", 7) == 0) {
-        int len = std::snprintf(reply, size, "ok %zu", g_screens.size());
+        const size_t count = std::count_if(g_screens.begin(), g_screens.end(), [](auto &e) { return !e.second.floating; });
+        int len = std::snprintf(reply, size, "ok %zu", count);
         for (auto &[i, s] : g_screens)
-            if (len < size)
+            if (len < size && !s.floating)
                 len += std::snprintf(reply + len, size - len, " %d:%dx%d:%.3f", i + 1, s.width, s.height, s.metres);
     } else if (std::strncmp(cmd, "head", 4) == 0) {
         Mat m;
@@ -1659,6 +2113,52 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         std::snprintf(reply, size, "ok %s %s %.2f ms, predict %s lead %.0f ms", g_cutouts ? "on" : "off",
                       g_cutterState > 0 ? "ready" : g_cutterState < 0 ? "unavailable" : "idle", g_cutter.lastMs(),
                       g_hands.predicting() ? "on" : "off", g_hands.leadMs());
+    } else if (int x0, y0, w0, h0, t0; std::sscanf(cmd, "float %d %lf %d %d %d %d %d", &n, &w, &x0, &y0, &w0, &h0, &t0) == 7) {
+        Screen *s = Find(n);
+        if (!s || !s->floating) return (void)std::snprintf(reply, size, "error no floating window panel %d", n);
+        if (!(w > 1e-5 && w < 0.01) || w0 < 1 || h0 < 1) return (void)std::snprintf(reply, size, "error bad float");
+        SetFloat(*s, w, x0, y0, w0, h0, std::max(0, t0));
+        std::snprintf(reply, size, "ok");
+    } else if (std::sscanf(cmd, "unfloat %d", &n) == 1) {
+        Screen *s = Find(n);
+        if (!s || !s->floating) return (void)std::snprintf(reply, size, "error no floating window panel %d", n);
+        Unfloat(*s);
+        UpdateVisibility();
+        std::snprintf(reply, size, "ok");
+    } else if (std::sscanf(cmd, "pose %d %f %f %f %f %f %f %f %f %f %f %f %f", &n, &r[0], &r[1], &r[2], &r[3], &r[4],
+                           &r[5], &r[6], &r[7], &r[8], &r[9], &r[10], &r[11]) == 13) {
+        Screen *s = Find(n);
+        if (!s) return (void)std::snprintf(reply, size, "error no screen %d", n);
+        Mat m{};
+        for (int k = 0; k < 12; ++k) m.m[k / 4][k % 4] = r[k];
+        EndDrag(*s);
+        SetAbsolute(*s, m);
+        std::snprintf(reply, size, "ok");
+    } else if (int k0; std::sscanf(cmd, "sub %d %d %d %d %d %d", &n, &k0, &x0, &y0, &w0, &h0) == 6 ||
+                       (std::sscanf(cmd, "sub %d %d %15s", &n, &k0, word) == 3 && !std::strcmp(word, "off"))) {
+        Screen *s = Find(n);
+        if (!s || !s->floating) return (void)std::snprintf(reply, size, "error no floating window panel %d", n);
+        if (std::strstr(cmd, " off")) w0 = h0 = 0;
+        SetSub(*s, n - 1, k0, x0, y0, w0, h0);
+        std::snprintf(reply, size, "ok");
+    } else if (int on; std::sscanf(cmd, "minimized %d %d", &n, &on) == 2) {
+        Screen *s = Find(n);
+        if (!s || !s->floating) return (void)std::snprintf(reply, size, "error no floating window panel %d", n);
+        s->minimized = on != 0;
+        UpdateVisibility();
+        std::snprintf(reply, size, "ok");
+    } else if (std::sscanf(cmd, "carry %d", &n) == 1) {
+        Screen *s = Find(n);
+        if (!s || !s->floating) return (void)std::snprintf(reply, size, "error no floating window panel %d", n);
+        if (!(g_press.buttons & ButtonBit(BTN_LEFT)) || g_press.screen != n - 1 || s->drag != Drag::None)
+            return (void)std::snprintf(reply, size, "error not pressed there");
+        s->titleCarry = true, s->carryX = g_press.x, s->carryY = g_press.y;
+        StartDrag(*s, Drag::Move, g_press.device);
+        std::snprintf(reply, size, "ok");
+    } else if (std::strcmp(cmd, "up") == 0) {
+        if ((g_press.buttons & ButtonBit(BTN_LEFT)) && g_press.device != kNone && !IsHandController(g_press.device))
+            g_press.upAt = g_tick + 9;
+        std::snprintf(reply, size, "ok");
     } else if (std::strncmp(cmd, "state", 5) == 0) {
         std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
                       g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,
