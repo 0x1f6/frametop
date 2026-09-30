@@ -842,28 +842,6 @@ Kirigami.ApplicationWindow {
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
-                ColumnLayout {
-                    Kirigami.FormData.label: "Pointer takes the role:"
-                    Repeater {
-                        model: backend.pointerRoles
-                        delegate: Controls.RadioButton {
-                            required property var modelData
-                            text: modelData.text
-                            checked: backend.pointerRole === modelData.value
-                            onToggled: if (checked) backend.setPointerRole(modelData.value)
-                        }
-                    }
-                }
-                Controls.Label {
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
-                    wrapMode: Text.WordWrap
-                    text: "A controller in your hand takes that hand's role, and then the pointer's clicks don't land. "
-                          + "Holding the right controller as the precision tool, give the pointer the left hand, or the "
-                          + "stylus role. It applies the next time the pointer wakes."
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                }
-
                 Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Key combinations" }
 
                 Repeater {
