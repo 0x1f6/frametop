@@ -16,7 +16,9 @@
 #   headless.sh js '<javascript>'           run a one-off KWin script; its print()s come back
 #   headless.sh shot [OUTPUT]               a JPEG of one output (default WL-0); from the PC it
 #                                          lands in captures/ and its path is printed
-#   headless.sh log [kwin|screens|apps] [N] the last N lines (default 30)
+#   headless.sh floatd                      start ft-floatd in it (socket @frametop_float_test)
+#   headless.sh float <ft-float args>       e.g. "float active", list
+#   headless.sh log [kwin|screens|apps|floatd] [N] the last N lines (default 30)
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/../../scripts/_env.sh"
@@ -83,6 +85,7 @@ case "${1:-}" in
     rm -rf "$rt" "$cfg"
     mkdir -p "$rt" "$cfg"
     chmod 700 "$rt"
+    echo "$screens $spares" > "$rt/counts"
     args=(--screen 1920x1080@1.6 --screen 1080x1920@0.9)
     for ((i = 2; i < screens; i++)); do args+=(--screen 1920x1080@1.6); done
     args=("${args[@]:0:$((screens * 2))}")
@@ -108,6 +111,17 @@ case "${1:-}" in
     ask toplevels
     ;;
   stop) stop ;;
+  floatd)
+    pkill -f -- "--socket frametop_float_test" 2>/dev/null || true
+    read -r screens spares < "$rt/counts"
+    nohup env XDG_RUNTIME_DIR="$rt" XDG_CONFIG_HOME="$cfg" DBUS_SESSION_BUS_ADDRESS="$bus" \
+      WAYLAND_DISPLAY=wayland-0 "$REPO_ROOT/float/ft-floatd" --screens "$screens" --slots "$spares" \
+      --control ft_screens_test --socket frametop_float_test \
+      > "$logs/floatd.log" 2>&1 &
+    sleep 2
+    tail -3 "$logs/floatd.log"
+    ;;
+  float) shift; FT_FLOAT_SOCKET=frametop_float_test "$REPO_ROOT/float/ft-float" "$@" ;;
   ask) ask "$2" ;;
   kd) shift; kd "$@" ;;
   run)
