@@ -40,6 +40,8 @@
 //     own; also for flatscreen games, which aren't scene apps).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
+//   - the catcher: a button pressed on a screen is released in KWin even when the laser
+//     lets go between panels (UpdateCatcher).
 // OpenVR has no overlay-relative transforms here (openvr v2.15.6), so the bar, button,
 // and handle are placed whenever their screen moves.
 #include "vr.h"
@@ -1008,6 +1010,95 @@ void Push(Screen &s, double notches) {
     s.dragRel = Mul(Inverse(d), p);
 }
 
+// ---------------------------------------------------------------- the catcher
+
+// A button pressed on a screen belongs to KWin until it comes up, wherever the laser is by
+// then: a window move or a drag and drop can end between panels. SteamVR sends the release
+// only to an overlay under the laser, so while the pressing laser is on none of our panels,
+// an invisible catcher sits on it, at the distance where it last met one, and a release
+// there goes to KWin at the pointer's last spot. While a button is held, the laser leaving
+// a screen doesn't take KWin's pointer away either, as with a real mouse; crossing onto
+// another screen still moves it there.
+struct Press {
+    uint32_t buttons = 0;                     // held, as bits (1 << (BTN_* - BTN_LEFT))
+    vr::TrackedDeviceIndex_t device = kNone;  // the laser that pressed them
+    int screen = -1;                          // where KWin's pointer is: the last screen the laser was on
+    double x = 0, y = 0;                      // ...and where on it, in buffer pixels
+    double distance = 1;                      // from the laser's start to the last panel it met
+    long upAt = -1;                           // the pointer helper saw left come up: release it at this tick
+};
+Press g_press;
+vr::VROverlayHandle_t g_catcher = vr::k_ulOverlayHandleInvalid;
+bool g_catcherShown = false;
+
+uint32_t ButtonBit(uint32_t linuxButton) { return 1u << (linuxButton - BTN_LEFT); }
+
+void PressDown(vr::TrackedDeviceIndex_t dev, uint32_t button, int screen, double x, double y) {
+    if (!g_press.buttons) g_press.device = dev;
+    g_press.buttons |= ButtonBit(button);
+    g_press.screen = screen, g_press.x = x, g_press.y = y;
+}
+
+// A button came up somewhere that isn't a screen (the catcher, a control, or the helper's
+// word): release it in KWin where its pointer is, and once nothing is held, the laser is
+// off the screens, so KWin's pointer leaves.
+void ReleaseAway(uint32_t button, void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!(g_press.buttons & ButtonBit(button))) return;
+    g_press.buttons &= ~ButtonBit(button);
+    if (!g_press.buttons) g_press.upAt = -1;
+    if (g_press.screen < 0) return;
+    ft_event e{};
+    e.type = FT_BUTTON;
+    e.screen = g_press.screen;
+    e.button = button;
+    e.pressed = false;
+    e.x = g_press.x, e.y = g_press.y;
+    handle(&e, data);
+    std::printf("caught a release off the screens (button %u)\n", button);
+    if (g_press.buttons) return;
+    e = ft_event{};
+    e.type = FT_LEAVE;
+    e.screen = g_press.screen;
+    handle(&e, data);
+}
+
+void ShowCatcher(bool on) {
+    if (on == g_catcherShown || g_catcher == vr::k_ulOverlayHandleInvalid) return;
+    g_catcherShown = on;
+    if (on) vr::VROverlay()->ShowOverlay(g_catcher);
+    else vr::VROverlay()->HideOverlay(g_catcher);
+}
+
+// Every tick: while a button is held, find what the pressing laser is on. On one of our
+// panels or controls, note how far away; on none, put the catcher across it there.
+void UpdateCatcher() {
+    Mat l;
+    if (!g_press.buttons || g_catcher == vr::k_ulOverlayHandleInvalid || !LaserPose(g_press.device, &l)) {
+        ShowCatcher(false);
+        return;
+    }
+    vr::VROverlayIntersectionParams_t params{};
+    params.eOrigin = vr::TrackingUniverseStanding;
+    for (int k = 0; k < 3; ++k) params.vSource.v[k] = l.m[k][3], params.vDirection.v[k] = -l.m[k][2];
+    for (auto &[i, s] : g_screens) {
+        if (!s.visible) continue;
+        for (auto o : s.All()) {
+            vr::VROverlayIntersectionResults_t hit;
+            if (vr::VROverlay()->ComputeOverlayIntersection(o, &params, &hit)) {
+                g_press.distance = std::max(0.05, double(hit.fDistance));
+                ShowCatcher(false);
+                return;
+            }
+        }
+    }
+    const double d = g_press.distance;
+    const double pt[3] = {l.m[0][3] - l.m[0][2] * d, l.m[1][3] - l.m[1][2] * d, l.m[2][3] - l.m[2][2] * d};
+    const Mat m = FacingPose(pt, l);  // across the laser, facing its start
+    vr::VROverlay()->SetOverlayTransformAbsolute(g_catcher, vr::TrackingUniverseStanding, &m);
+    vr::VROverlay()->SetOverlayWidthInMeters(g_catcher, float(std::max(0.5, 2 * d)));
+    ShowCatcher(true);
+}
+
 Screen *Find(int one_based) {
     auto it = g_screens.find(one_based - 1);
     return it == g_screens.end() ? nullptr : &it->second;
@@ -1019,6 +1110,12 @@ uint32_t LinuxButton(uint32_t vrButton) {
         case vr::VRMouseButton_Middle: return BTN_MIDDLE;
         default: return BTN_LEFT;
     }
+}
+
+// Any of the holding laser's buttons coming up on one of our controls or the catcher.
+void ReleaseAwayBy(vr::TrackedDeviceIndex_t dev, uint32_t vrButton, void (*handle)(const struct ft_event *, void *),
+                   void *data) {
+    if (g_press.buttons && dev == g_press.device) ReleaseAway(LinuxButton(vrButton), handle, data);
 }
 
 const char *LasersName() {
@@ -1054,10 +1151,22 @@ bool ft_vr_init(void) {
         return false;
     }
     RefreshPoses();
+    // The catcher (see UpdateCatcher): clear and invisible, but the laser lands on it, and
+    // it keeps SteamVR's laser mouse on while it's up.
+    if (vr::VROverlay()->CreateOverlay("frametop.catcher", "Frametop: release catcher", &g_catcher) ==
+        vr::VROverlayError_None) {
+        static std::vector<uint8_t> clear(4 * 4 * 4, 0);
+        vr::VROverlay()->SetOverlayRaw(g_catcher, clear.data(), 4, 4, 4);
+        vr::VROverlay()->SetOverlayInputMethod(g_catcher, vr::VROverlayInputMethod_Mouse);
+        vr::VROverlay()->SetOverlayAlpha(g_catcher, 0);
+        vr::VROverlay()->SetOverlayFlag(g_catcher, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
+    }
     return true;
 }
 
 void ft_vr_shutdown(void) {
+    if (g_catcher != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->DestroyOverlay(g_catcher);
+    g_catcher = vr::k_ulOverlayHandleInvalid;
     for (auto &[i, s] : g_screens)
         for (auto o : s.All()) vr::VROverlay()->DestroyOverlay(o);
     for (auto &[dev, g] : g_guides)
@@ -1187,6 +1296,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.type = FT_MOTION;
                     e.x = ev.data.mouse.x;
                     e.y = s.height - ev.data.mouse.y;  // OpenVR's mouse origin is bottom left
+                    if (g_press.buttons) g_press.screen = index, g_press.x = e.x, g_press.y = e.y;
                     break;
                 case vr::VREvent_MouseButtonDown:
                 case vr::VREvent_MouseButtonUp:
@@ -1196,6 +1306,12 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.pressed = ev.eventType == vr::VREvent_MouseButtonDown;
                     e.x = ev.data.mouse.x;
                     e.y = s.height - ev.data.mouse.y;
+                    if (e.pressed) {
+                        PressDown(ev.trackedDeviceIndex, e.button, index, e.x, e.y);
+                    } else {
+                        g_press.buttons &= ~ButtonBit(e.button);
+                        if (!g_press.buttons) g_press.upAt = -1;
+                    }
                     break;
                 case vr::VREvent_ScrollDiscrete:
                     e.type = FT_SCROLL;
@@ -1203,6 +1319,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.dy = -ev.data.scroll.ydelta;
                     break;
                 case vr::VREvent_FocusLeave:
+                    if (g_press.buttons) continue;  // KWin keeps the pointer while a button is held
                     e.type = FT_LEAVE;
                     break;
                 default:
@@ -1221,8 +1338,10 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
             hover(0);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Move, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
             else if (ev.eventType == vr::VREvent_ScrollDiscrete && s.drag == Drag::Move)
                 Push(s, ev.data.scroll.ydelta);
         }
@@ -1231,24 +1350,30 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
             hover(3);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Resize, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
         }
         // The curve button.
         while (vr::VROverlay()->PollNextOverlayEvent(s.curveButton, &ev, sizeof ev)) {
             hover(1);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 ToggleCurve(s);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
         }
         // The roll button: drag around like a knob, or scroll.
         while (vr::VROverlay()->PollNextOverlayEvent(s.rollButton, &ev, sizeof ev)) {
             hover(2);
             if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left)
                 StartDrag(s, Drag::Roll, ev.trackedDeviceIndex);
-            else if (ev.eventType == vr::VREvent_MouseButtonUp)
+            else if (ev.eventType == vr::VREvent_MouseButtonUp) {
                 EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
             else if (ev.eventType == vr::VREvent_ScrollDiscrete && s.drag == Drag::None) {
                 Mat p;
                 if (!ScreenPose(s, &p)) continue;
@@ -1258,8 +1383,14 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         }
         if (s.drag != Drag::None) UpdateDrag(s, index);
     }
-    RefreshChrome();
+    // A release on the catcher, or the pointer helper's word that left came up (see "up").
     vr::VREvent_t ev;
+    while (g_catcher != vr::k_ulOverlayHandleInvalid &&
+           vr::VROverlay()->PollNextOverlayEvent(g_catcher, &ev, sizeof ev))
+        if (ev.eventType == vr::VREvent_MouseButtonUp)
+            ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+    if (g_press.upAt >= 0 && g_tick >= g_press.upAt) ReleaseAway(BTN_LEFT, handle, data);
+    RefreshChrome();
     while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
         if (ev.eventType == vr::VREvent_Quit) {
             ft_event e{};
@@ -1276,6 +1407,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateLasers();
     UpdateControls();
     UpdateGuides();
+    UpdateCatcher();
 }
 
 // Control commands (datagrams on @ft_screens, replies to the sender):
@@ -1298,6 +1430,9 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 //   controllers always|outside_games|dashboard   when controllers' lasers work the screens
 //   ingames hide|visible      during a VR game, "always" acts like "only with the dashboard"
 //                             (hide), or stays as it is (visible)
+//   up                        the pointer helper: the mouse's left button came up. If SteamVR
+//                             hasn't delivered that release to one of our overlays within
+//                             ~100 ms (it landed on something else), KWin gets it anyway
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
 //                     <controllers> <game running 0|1> <ingames>"
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
@@ -1429,6 +1564,10 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         else return (void)std::snprintf(reply, size, "error modes: always outside_games dashboard");
         UpdateLasers();
         std::snprintf(reply, size, "ok %s", LasersName());
+    } else if (std::strcmp(cmd, "up") == 0) {
+        if ((g_press.buttons & ButtonBit(BTN_LEFT)) && g_press.device != kNone && !IsHandController(g_press.device))
+            g_press.upAt = g_tick + 9;
+        std::snprintf(reply, size, "ok");
     } else if (std::strncmp(cmd, "state", 5) == 0) {
         std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
                       g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,

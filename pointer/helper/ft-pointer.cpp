@@ -103,6 +103,8 @@
 // press and collision is frozen, so dragging past a panel's edge (resizing, moving)
 // doesn't jump the cursor to free space or swap in the laser-catching dot, which made
 // SteamVR's resize snap back.
+// A left release also goes to ft-screens ("up"), which releases a button held on its
+// screens in KWin if SteamVR gave the release to some other overlay.
 //
 // Head follow (experimental, off by default; POINTER_FOLLOW=1, or the relay's "follow toggle"): the cursor
 // is carried by a reference direction, where the head faced when it last settled, and turns
@@ -691,6 +693,9 @@ int main() {
         // Hold the drag pose (tilt, frozen distance) while SteamVR finishes the drop.
         dropHoldUntil = Clock::now() + std::chrono::milliseconds(500);
         SendTo(out, "ft_pointer", "btn trigger 0");
+        // ft-screens releases a button held on its screens in KWin even when SteamVR hands
+        // the release to some other overlay (its catcher usually gets it; this is the backstop).
+        SendTo(out, "ft_screens", "up");
         if (gazeBack) gazeOwns = true, gazeBack = false;
     };
     // The left button, from the relay's "btn trigger", with gaze mode's held-back press (see
