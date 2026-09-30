@@ -1826,9 +1826,20 @@ class Probe(Adw.ApplicationWindow):
     def calib_points(self, rnd):
         """The centre, then six on a ring of `Calibration ring` degrees (as much of it as fits
         in the window), turned 20 degrees per round, and half the size in the middle round,
-        so the fit sees the middle, halfway out, and the edge of your view."""
+        so the fit sees the middle, halfway out, and the edge of your view.
+
+        For the Own tracker: the centre, then the corners and the middle of each side of the
+        area practice targets use, half the size in the middle round. Its fit is quadratic and
+        goes wrong past its dots, and the ring (limited by the window's height) left the sides
+        out: in frame-eyes' practice2 the worst clicks were all past the ring."""
         w, h = self.canvas_size()
         cx, cy = w / 2, h / 2
+        if self.source == "own":
+            s = self.RING_SCALE[rnd]
+            left, right, bottom = cx - (cx - 80) * s, cx + (cx - 80) * s, cy + (cy - 80) * s
+            top = cy - (cy - 150) * s  # clear of the round and dot text at the top
+            return [(cx, cy), (left, top), (cx, top), (right, top), (right, cy), (right, bottom),
+                    (cx, bottom), (left, bottom), (left, cy)]
         r = self.raw.get(self.source)
         px_per_deg = 1 / r[5] if r and r[5] else 32.0
         radius = min(self.w_ring.get_value() * px_per_deg, w / 2 - 60, h / 2 - 60) * self.RING_SCALE[rnd]
@@ -2084,8 +2095,8 @@ class Probe(Adw.ApplicationWindow):
                 cr.arc(x, y, 7, 0, 2 * math.pi)
                 cr.stroke()
         GLib.idle_add(self.area.queue_draw)  # the pulse
-        total = len(self.ROUND_BG) * 7
-        n = c["round"] * 7 + c["index"] + 1
+        total = len(self.ROUND_BG) * len(c["points"])
+        n = c["round"] * len(c["points"]) + c["index"] + 1
         self.text(cr, 60, 70, f"Calibration: round {c['round'] + 1} of 3 ({self.ROUND_NAMES[c['round']]}), dot {n} of {total}",
                   ink, 26)
         hint = "Face the centre dot, look at the highlighted dot, and press. Esc cancels, S skips a dot."
