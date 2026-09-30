@@ -2,6 +2,16 @@
 
 Status: design settled 2026-09-29 (see "Decisions"); being built on the `floating-windows` branch.
 
+Built so far (2026-09-29; the KWin side tested on the headless test desktop, `screens/test/headless.sh`; nothing yet tried in the headset):
+
+- The catcher (a release off every panel still reaches KWin), and the pointer helper's "up" backstop.
+- `float/frametop-float.js` (the KWin script), `float/ft-floatd`, and `float/ft-float`. "Float in VR" is in the window menu under Extensions, and Meta+Shift+F toggles the active window. Floating, docking (back where it came from), closing, full screen, per-window scale (Meta+scroll), popups reported with their rectangles, windows of a floating app floating too, and the notification when every spare is in use.
+- ft-screens: a panel per spare output (`frametop.float.N`) with the crop, density, popups and dialogs as small panels over it, title-bar carrying, the corner tab resizing the window, and dock and close buttons. `--spares`, and the commands `float`, `unfloat`, `pose`, `sub`, `minimized`, `carry`.
+- The session adds `FLOAT_SLOTS` spares and starts ft-floatd from the desktop's autostart; ft-layout leaves the spares alone.
+- The 3D mouse's drag lock crosses onto other Frametop panels (not while carrying one).
+
+Not built yet: phase 2 (the ghost, tear-off by dragging, push-flush docking), phase 3 (launching floating, the Frametop Apps entry and picker, remembered placement), and phase 4. Frametop Apps (decision 10) needs a per-screen hide, which ft-screens doesn't have yet: its hide and show are for all screens.
+
 The goal is to let any desktop app float in VR in a panel of its own, like SteamVR's floating windows, while it stays part of the Frametop desktop. That means drag and drop, the clipboard, and focus keep working between floating windows and the screens.
 
 - There are two ways to get a floating window. Launch the app floating, or drag a desktop window by its title bar off a screen and let go in the air.
