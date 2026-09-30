@@ -102,6 +102,10 @@ struct server {
     int relay_fd;         // unbound, so the relay can't reply into our control socket
     uint32_t relay_sent;  // when the relay last heard from us (ms)
     unsigned ticks;
+    // Our keyboard ("vrkeyboard" commands from the input relay; see keyboard_command).
+    int kb_screen;         // the screen it's open for, -1 closed
+    bool kb_auto;          // opened for a focused text field (not by a button)
+    unsigned kb_close_at;  // ticks: close it then (a text field lost focus), 0 not
 };
 
 static uint32_t now_ms(void) {
@@ -237,10 +241,22 @@ static void new_decoration(struct wl_listener *l, void *data) {
 
 // ---------------------------------------------------------------- input from the panels
 
+static void panel_key(struct server *s, uint32_t code, bool pressed);
+
 static void handle_vr_event(const struct ft_event *e, void *data) {
     struct server *s = data;
     if (e->type == FT_QUIT) {
         wl_display_terminate(s->display);
+        return;
+    }
+    if (e->type == FT_KEY) {
+        panel_key(s, e->key, e->pressed);
+        return;
+    }
+    if (e->type == FT_KEYBOARD_CLOSED) {
+        if (s->kb_screen >= 0) wlr_log(WLR_INFO, "keyboard closed");
+        s->kb_screen = -1;
+        s->kb_close_at = 0;
         return;
     }
     if (e->screen < 0 || e->screen >= MAX_SCREENS || !s->screens[e->screen]) return;
@@ -313,6 +329,13 @@ static int tick(void *data) {
     struct server *s = data;
     ft_vr_poll(handle_vr_event, s);
     if (++s->ticks % 9 == 0) keys_update(s);
+    if (s->kb_close_at && s->ticks >= s->kb_close_at) {
+        s->kb_close_at = 0;
+        if (s->kb_screen >= 0) {
+            ft_vr_keyboard_hide();
+            s->kb_screen = -1;
+        }
+    }
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     for (int i = 0; i < MAX_SCREENS; ++i) {
@@ -344,6 +367,17 @@ static bool key_held(const struct wlr_keyboard *kb, uint32_t code) {
     return false;
 }
 
+// One key to the focused screen, through the seat's keyboard so its xkb state and
+// modifiers stay right.
+static void send_key(struct server *s, uint32_t code, int pressed) {
+    struct wlr_keyboard_key_event ev = {
+        .time_msec = now_ms(), .keycode = code, .update_state = true,
+        .state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED};
+    wlr_keyboard_notify_key(&s->keyboard, &ev);
+    wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
+    wlr_seat_keyboard_notify_key(s->seat, ev.time_msec, code, ev.state);
+}
+
 // Keys from the input relay (physical keyboards): "key <evdev code> <1 press|0 release>".
 // They go to the screen KWin has keyboard focus on (the last one clicked), while typing
 // goes to the desktop (keys_update). The release of a key the desktop got the press for
@@ -355,20 +389,67 @@ static void handle_key(struct server *s, uint32_t code, int value, char *reply, 
         if (!s->seat->keyboard_state.focused_surface) return (void)snprintf(reply, size, "ok no focus");
         if (!s->keys_desktop) return (void)snprintf(reply, size, "ok typing goes to Steam");
     }
-    struct wlr_keyboard_key_event ev = {
-        .time_msec = now_ms(), .keycode = code, .update_state = true,
-        .state = value ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED};
-    wlr_keyboard_notify_key(&s->keyboard, &ev);  // keeps the xkb state and modifiers
-    wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
-    wlr_seat_keyboard_notify_key(s->seat, ev.time_msec, code, ev.state);
+    send_key(s, code, value);
     snprintf(reply, size, "ok");
 }
 
+// Our keyboard (keyboard.cpp). The input relay sends "vrkeyboard show" when a text field
+// on the desktop gets focus (and its setting allows), "vrkeyboard hide" when it loses it,
+// and "vrkeyboard toggle" for a mapped button; ft-layout sends "vrkeyboard close" when it
+// resets the layout. It opens for the screen KWin has keyboard focus on. A hide closes only a keyboard a text field opened, and waits a moment, so
+// moving between text fields doesn't close and reopen it.
+static int focused_screen(struct server *s) {
+    struct wlr_surface *focus = s->seat->keyboard_state.focused_surface;
+    for (int i = 0; i < MAX_SCREENS; ++i)
+        if (s->screens[i] && s->screens[i]->toplevel->base->surface == focus) return i;
+    if (s->pointer_focus) return s->pointer_focus->index;
+    for (int i = 0; i < MAX_SCREENS; ++i)
+        if (s->screens[i]) return i;
+    return -1;
+}
+
+static void keyboard_command(struct server *s, const char *what, char *reply, int size) {
+    const bool open = s->kb_screen >= 0;
+    if (strcmp(what, "hide") == 0) {
+        if (open && s->kb_auto && !s->kb_close_at) s->kb_close_at = s->ticks + 30;  // ~1/3 s
+        return (void)snprintf(reply, size, "ok");
+    }
+    if (strcmp(what, "close") == 0) {  // however it opened, now (ft-layout apply: a reset)
+        if (open) wlr_log(WLR_INFO, "keyboard closed (reset)");
+        ft_vr_keyboard_hide();
+        s->kb_screen = -1;
+        s->kb_close_at = 0;
+        return (void)snprintf(reply, size, "ok");
+    }
+    const bool toggle = strcmp(what, "toggle") == 0;
+    if (!toggle && strcmp(what, "show") != 0) return (void)snprintf(reply, size, "error show|hide|toggle|close");
+    s->kb_close_at = 0;
+    if (open && toggle) {
+        ft_vr_keyboard_hide();
+        s->kb_screen = -1;
+        return (void)snprintf(reply, size, "ok closed");
+    }
+    if (open) return (void)snprintf(reply, size, "ok open");
+    if (!ft_vr_screens_shown()) return (void)snprintf(reply, size, "ok screens hidden");
+    const int screen = focused_screen(s);
+    if (screen < 0 || !ft_vr_keyboard_show(screen)) return (void)snprintf(reply, size, "error not shown");
+    wlr_log(WLR_INFO, "keyboard open for screen %d (%s)", screen + 1, toggle ? "button" : "text field");
+    s->kb_screen = screen;
+    s->kb_auto = !toggle;
+    snprintf(reply, size, "ok opened");
+}
+
+// A key from our keyboard, for the focused screen. Its release always goes through, so
+// no key stays held.
+static void panel_key(struct server *s, uint32_t code, bool pressed) {
+    if (pressed ? s->seat->keyboard_state.focused_surface != NULL : key_held(&s->keyboard, code))
+        send_key(s, code, pressed);
+}
 // Control socket: abstract datagram @ft_screens. Here: "size <screen> <w> <h>" (a new
 // resolution, live), "scale <screen> <s>" (KWin's scale for it, from ft-layout),
-// "key <code> <value>", and "click <overlay key>" (from the pointer
-// helper: a mouse click landed on that panel, "-" for none); the rest is in vr.cpp
-// (ft_vr_command).
+// "key <code> <value>", "vrkeyboard show|hide|toggle|close" (our keyboard, from the input
+// relay), and "click <overlay key>" (from the pointer helper: a mouse click landed on
+// that panel, "-" for none); the rest is in vr.cpp (ft_vr_command).
 static int control_readable(int fd, uint32_t mask, void *data) {
     struct server *s = data;
     char buf[512], reply[2048];
@@ -402,6 +483,8 @@ static int control_readable(int fd, uint32_t mask, void *data) {
             handle_key(s, code, value, reply, sizeof reply);
             len = sizeof from;
             continue;  // no reply: keys are fire-and-forget
+        } else if (strncmp(buf, "vrkeyboard ", 11) == 0) {
+            keyboard_command(s, buf + 11, reply, sizeof reply);
         } else if (strncmp(buf, "click ", 6) == 0) {
             // A click on another panel takes typing to Steam. Our own panels (the screens,
             // their controls) leave it: a click on a screen arrives as a panel event.
@@ -467,6 +550,7 @@ static bool setup_dmabuf(struct server *s) {
 int main(int argc, char **argv) {
     struct server s = {0};
     for (int i = 0; i < MAX_SCREENS; ++i) s.scale[i] = 1;
+    s.kb_screen = -1;
     const char *socket_name = "ft-screens-0";
     char **command = NULL;
     for (int i = 1; i < argc; ++i) {

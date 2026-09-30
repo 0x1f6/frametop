@@ -21,11 +21,15 @@ here=$(dirname "$(readlink -f "$0")")
 # it should see the system as a normal login does, so drop the client's runtime: its
 # LD_LIBRARY_PATH put Steam's own libraries ahead of the system's (Steam's libavcodec has no
 # H.264 decoder, so VLC couldn't play most videos), and its overlay and launch settings are
-# meant for games. SteamOS's own defaults (/usr/share/deckard/mesavars.sh) stay.
+# meant for games. SteamOS's own defaults (/usr/share/deckard/mesavars.sh) stay. The
+# gamescope session also puts QT_IM_MODULE=xim and GTK_IM_MODULE=xim in the systemd user
+# environment, and with those, Qt and GTK apps never tell KWin a text field has focus, so
+# Frametop's keyboard (input/ft-textinput) never opens for them.
 for var in $(compgen -e); do
   case $var in
     LD_LIBRARY_PATH | LD_PRELOAD | STEAM_* | Steam* | SRT_* | PRESSURE_VESSEL_* | MANGOHUD_* | \
-      ENABLE_VK_LAYER_VALVE_steam_overlay_* | STEAMVIDEOTOKEN) unset "$var" ;;
+      ENABLE_VK_LAYER_VALVE_steam_overlay_* | STEAMVIDEOTOKEN | QT_IM_MODULE | GTK_IM_MODULE | \
+      XMODIFIERS) unset "$var" ;;
   esac
 done
 
@@ -133,9 +137,13 @@ fi
 
 # plasma-session starts KWin through kwin_wayland_wrapper. Shadow it to add our outputs.
 # With ft-screens the size is only the starting one: ft-screens sets each screen's own.
+# Our input method tells the input relay when a text field has focus, for SteamVR's
+# keyboard (input/ft-textinput).
+textinput=$(readlink -f "$here/../input/ft-textinput")
 cat > "$runtime/bin/kwin_wayland_wrapper" <<EOF
 #!/bin/sh
-exec /usr/bin/kwin_wayland_wrapper --width $width --height $height --output-count $screens --no-lockscreen "\$@"
+exec /usr/bin/kwin_wayland_wrapper --width $width --height $height --output-count $screens --no-lockscreen \\
+  --inputmethod $textinput "\$@"
 EOF
 chmod +x "$runtime/bin/kwin_wayland_wrapper"
 export PATH=$runtime/bin:$PATH

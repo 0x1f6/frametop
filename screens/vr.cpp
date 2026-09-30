@@ -49,6 +49,7 @@
 #include "vr.h"
 
 #include "handcut.h"
+#include "keyboard.h"
 
 #include <drm_fourcc.h>
 #include <openvr.h>
@@ -931,6 +932,7 @@ void FinishDrag(Screen &s, int index) {
 // A button release on any of our panels ends that device's drags (it may be over another
 // screen by then).
 void EndDragsBy(vr::TrackedDeviceIndex_t dev) {
+    keyboard::EndDragBy(dev);
     for (auto &[index, s] : g_screens)
         if (s.drag != Drag::None && s.dragDevice == dev) FinishDrag(s, index);
 }
@@ -1142,6 +1144,37 @@ void UpdateCutouts() {
     }
 }
 
+// Steam in front: the dashboard (the Steam menu) is open, or Steam's own keyboard is up
+// (valve.steam.gamepadui.keyboard, for text fields in Steam and the dashboard). Our
+// keyboard steps aside then, and comes back where it was when Steam is out of the way; one
+// asked for meanwhile appears then. Checked every 9 ticks; Steam makes its keyboard's
+// overlay again now and then, so it's looked up each time.
+bool g_steamInFront = false;
+bool g_keyboardAside = false;   // ours is waiting for Steam to get out of the way
+Mat g_asidePose = Identity();   // ...and goes here then
+
+bool SteamInFront() {
+    vr::VROverlayHandle_t h = vr::k_ulOverlayHandleInvalid;
+    // In the dashboard mode the screens only show with the dashboard, so it doesn't count.
+    return (g_mode != Mode::Dashboard && vr::VROverlay()->IsDashboardVisible()) ||
+           (vr::VROverlay()->FindOverlay("valve.steam.gamepadui.keyboard", &h) == vr::VROverlayError_None &&
+            vr::VROverlay()->IsOverlayVisible(h));
+}
+
+void UpdateSteamInFront() {
+    const bool front = SteamInFront();
+    if (front == g_steamInFront) return;
+    g_steamInFront = front;
+    if (front && keyboard::Shown()) {
+        g_asidePose = keyboard::Pose();
+        keyboard::Hide();
+        g_keyboardAside = true;
+    } else if (!front && g_keyboardAside) {
+        g_keyboardAside = false;
+        keyboard::Show(g_asidePose);
+    }
+}
+
 }  // namespace
 
 extern "C" {
@@ -1173,6 +1206,7 @@ void ft_vr_shutdown(void) {
     for (auto &[dev, g] : g_guides)
         for (auto o : {g.ring.overlay, g.dot.overlay}) vr::VROverlay()->DestroyOverlay(o);
     for (auto &[k, h] : g_imports) vr::VRIPCResourceManager()->UnrefResource(h);
+    keyboard::Destroy();
     g_guides.clear();
     g_screens.clear();
     g_imports.clear();
@@ -1386,6 +1420,30 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         // A carrying controller that goes away drops its screen.
         if (ev.eventType == vr::VREvent_TrackedDeviceDeactivated) EndDragsBy(ev.trackedDeviceIndex);
     }
+    // Our keyboard: its keys, and its Close key. It goes when the screens do.
+    struct Forward {
+        void (*handle)(const struct ft_event *, void *);
+        void *data;
+    } forward{handle, data};
+    keyboard::Poll(
+        [](const keyboard::Event &k, void *f) {
+            ft_event e{};
+            e.screen = -1;
+            e.type = k.type == keyboard::Event::Key ? FT_KEY : FT_KEYBOARD_CLOSED;
+            e.key = k.code;
+            e.pressed = k.pressed;
+            static_cast<Forward *>(f)->handle(&e, static_cast<Forward *>(f)->data);
+        },
+        &forward);
+    if (g_tick % 9 == 0) UpdateSteamInFront();
+    if ((keyboard::Shown() || g_keyboardAside) && !ModeVisible()) {
+        g_keyboardAside = false;
+        keyboard::Hide();
+        ft_event e{};
+        e.type = FT_KEYBOARD_CLOSED;
+        e.screen = -1;
+        handle(&e, data);
+    }
     ++g_tick;
     UpdateGame();
     UpdateArrange();
@@ -1394,6 +1452,41 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateControls();
     UpdateGuides();
     UpdateCutouts();
+}
+
+// Our keyboard (keyboard.cpp) for a screen. It's placed where you'll reach it, not on the
+// screen: kKeyboardAhead in front of you (the way your head faces, level) and
+// kKeyboardBelow under your eyes, turned to face your eyes, and it stays where it opened
+// (or where its grab bar carries it). With Steam in front (UpdateSteamInFront), it waits.
+// Without a head pose (the headset is in standby, say) it doesn't open: anywhere else could
+// be out of sight or reach. The next text field opens it.
+constexpr double kKeyboardAhead = 0.7, kKeyboardBelow = 0.35;
+
+bool ft_vr_keyboard_show(int index) {
+    if (g_screens.find(index) == g_screens.end()) return false;
+    RefreshPoses();
+    Mat head;
+    if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head)) {
+        std::printf("keyboard: no head pose, not opened\n");
+        return false;
+    }
+    const double fx = -head.m[0][2], fz = -head.m[2][2], n = std::sqrt(fx * fx + fz * fz) + 1e-9;
+    const double at[3] = {head.m[0][3] + fx / n * kKeyboardAhead, head.m[1][3] - kKeyboardBelow,
+                          head.m[2][3] + fz / n * kKeyboardAhead};
+    keyboard::SetLasers(g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning));
+    g_steamInFront = SteamInFront();
+    if (g_steamInFront) {
+        g_asidePose = FacingPose(at, head);
+        g_keyboardAside = true;
+        std::printf("keyboard: waiting for Steam to close\n");
+        return true;
+    }
+    return keyboard::Show(FacingPose(at, head));
+}
+
+void ft_vr_keyboard_hide(void) {
+    g_keyboardAside = false;
+    keyboard::Hide();
 }
 
 // Control commands (datagrams on @ft_screens, replies to the sender):

@@ -17,7 +17,7 @@ struct ft_dmabuf {
     int fd[4];
 };
 
-enum ft_event_type { FT_MOTION, FT_BUTTON, FT_SCROLL, FT_LEAVE, FT_QUIT };
+enum ft_event_type { FT_MOTION, FT_BUTTON, FT_SCROLL, FT_LEAVE, FT_QUIT, FT_KEY, FT_KEYBOARD_CLOSED };
 
 struct ft_event {
     enum ft_event_type type;
@@ -26,6 +26,7 @@ struct ft_event {
     uint32_t button;  // FT_BUTTON: linux BTN_*
     bool pressed;
     double dx, dy;    // FT_SCROLL: notches (positive dy: scroll down)
+    uint32_t key;     // FT_KEY: linux KEY_* from our keyboard (pressed: down or up)
 };
 
 bool ft_vr_init(void);
@@ -44,6 +45,12 @@ bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *bu
 void ft_vr_forget(const void *key);
 // Poll panel input and SteamVR events.
 void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data);
+// Our keyboard (keyboard.cpp), for typing on screen `index`: its keys arrive as FT_KEY
+// events, and FT_KEYBOARD_CLOSED when its Close key is pressed or the screens hide. False if
+// it can't be shown or there's no head pose. With the Steam menu or Steam's own keyboard
+// up, it waits and appears when they're gone.
+bool ft_vr_keyboard_show(int index);
+void ft_vr_keyboard_hide(void);
 // A command from the control socket (@ft_screens); writes the reply (see vr.cpp).
 void ft_vr_command(const char *command, char *reply, int reply_size);
 

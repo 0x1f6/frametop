@@ -440,6 +440,10 @@ def apply_screens(wait=0):
                 sock.ask(f"pin {i + 1} {pin['hand']} " + " ".join(f"{v:.5f}" for v in pin["rel"]))
             except RuntimeError as e:
                 log(f"screen {i + 1}: {e}")  # that controller isn't on
+    try:
+        sock.ask("vrkeyboard close")  # the keyboard, if open, goes too: a reset starts over
+    except RuntimeError:
+        pass  # an older ft-screens
     log(f"arranged {count} screen(s)")
     return results
 

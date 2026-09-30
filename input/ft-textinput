@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""ft-textinput: Frametop's input method, which tells the input relay when a text field
+on the desktop has keyboard focus.
+
+KWin starts it (--inputmethod, from session/frametop-session.sh) and activates it
+whenever the focused app enables text input on a field (text-input v1/v2/v3: Qt, GTK,
+and Firefox apps do; Xwayland apps and most Electron apps don't). This only passes that
+on: "textfield 1" or "textfield 0" to the input relay (@frametop_relay), which opens or
+closes Frametop's keyboard (ft-screens' own key panel), depending on the keyboard setting
+in Frametop Input Settings. Typing on it reaches the app as key presses from ft-screens,
+not through this input method, so nothing typed passes through here.
+
+Speaks the Wayland wire protocol itself (zwp_input_method_v1 only), so it needs nothing
+but Python on the SteamOS host.
+"""
+import os
+import socket
+import struct
+import sys
+
+RELAY = "\0frametop_relay"
+DISPLAY, REGISTRY, INPUT_METHOD = 1, 2, 3  # our object ids
+
+
+def string(text):
+    data = text.encode() + b"\0"
+    return struct.pack("=I", len(data)) + data + b"\0" * (-len(data) % 4)
+
+
+def read_string(body, at):
+    """(text, offset after it) for a string argument at `at`."""
+    (length,) = struct.unpack_from("=I", body, at)
+    text = body[at + 4:at + 4 + length - 1].decode(errors="replace")
+    return text, at + 4 + length + (-length % 4)
+
+
+def main():
+    fd = os.environ.pop("WAYLAND_SOCKET", None)
+    if fd is None:
+        sys.exit("ft-textinput: no WAYLAND_SOCKET (KWin starts this as its input method)")
+    conn = socket.socket(fileno=int(fd))
+    relay = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+
+    def request(obj, opcode, payload=b""):
+        conn.sendall(struct.pack("=II", obj, (8 + len(payload)) << 16 | opcode) + payload)
+
+    def report(on):
+        try:
+            relay.sendto(f"textfield {int(on)}".encode(), RELAY)
+        except OSError:
+            pass  # the relay isn't running
+
+    request(DISPLAY, 1, struct.pack("=I", REGISTRY))  # wl_display.get_registry
+    contexts = set()  # KWin makes one per activation
+    buf = b""
+    while True:
+        data = conn.recv(65536)
+        if not data:
+            return  # KWin went away
+        buf += data
+        while len(buf) >= 8:
+            obj, word = struct.unpack_from("=II", buf)
+            size, opcode = word >> 16, word & 0xFFFF
+            if size < 8 or len(buf) < size:
+                break
+            body, buf = buf[8:size], buf[size:]
+            if obj == DISPLAY and opcode == 0:  # error
+                bad, code = struct.unpack_from("=II", body)
+                message, _ = read_string(body, 8)
+                sys.exit(f"ft-textinput: Wayland error {code} on object {bad}: {message}")
+            elif obj == REGISTRY and opcode == 0:  # global
+                (name,) = struct.unpack_from("=I", body)
+                interface, _ = read_string(body, 4)
+                if interface == "zwp_input_method_v1":
+                    request(REGISTRY, 0, struct.pack("=I", name) + string(interface) + struct.pack("=II", 1, INPUT_METHOD))
+            elif obj == INPUT_METHOD and opcode == 0:  # activate: a text field has focus
+                contexts.add(struct.unpack_from("=I", body)[0])
+                report(True)
+            elif obj == INPUT_METHOD and opcode == 1:  # deactivate: it lost focus
+                (context,) = struct.unpack_from("=I", body)
+                if context in contexts:
+                    contexts.discard(context)
+                    request(context, 0)  # zwp_input_method_context_v1.destroy
+                report(bool(contexts))
+            # Everything else (the contexts' surrounding text, content type, ...) is unused.
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

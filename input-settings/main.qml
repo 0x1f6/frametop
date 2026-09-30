@@ -19,6 +19,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: "Devices"; icon.name: "input-mouse"; onTriggered: root.show(devicesPage) },
             Kirigami.Action { text: "Buttons"; icon.name: "input-keyboard"; onTriggered: root.show(buttonsPage) },
             Kirigami.Action { text: "Controllers"; icon.name: "input-gamepad"; onTriggered: root.show(controllersPage) },
+            Kirigami.Action { text: "Keyboard"; icon.name: "input-keyboard-virtual"; onTriggered: root.show(keyboardPage) },
             Kirigami.Action { text: "Pointer"; icon.name: "transform-move"; onTriggered: root.show(pointerPage) },
             Kirigami.Action { text: "Ignored panels"; icon.name: "view-hidden"; onTriggered: root.show(ignorePage) },
             Kirigami.Action { text: "Gaze"; icon.name: "view-visible"; onTriggered: root.show(gazePage) },
@@ -55,9 +56,10 @@ Kirigami.ApplicationWindow {
         pageStack.push(page)
     }
 
-    // FT_INPUT_PAGE=buttons|controllers|pointer|ignore|gaze|bluetooth opens the app on that page.
-    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, pointer: pointerPage,
-                              ignore: ignorePage, gaze: gazePage, bluetooth: bluetoothPage })[startPage] || devicesPage
+    // FT_INPUT_PAGE=buttons|controllers|keyboard|pointer|ignore|gaze|bluetooth opens the app on that page.
+    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, keyboard: keyboardPage,
+                              pointer: pointerPage, ignore: ignorePage, gaze: gazePage,
+                              bluetooth: bluetoothPage })[startPage] || devicesPage
 
     Connections {
         target: backend
@@ -501,6 +503,54 @@ Kirigami.ApplicationWindow {
                           + "Clicks and scrolling go to the 3D pointer. The trigger and grip also move SteamVR's laser "
                           + "to that controller, so they're better left unmapped."
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Keyboard
+    Component {
+        id: keyboardPage
+        Kirigami.ScrollablePage {
+            id: kpage
+            title: "Keyboard"
+            // Pass-through keyboards connected now: with "no_keyboard", the keyboard waits for none.
+            // A program's uinput keyboard (frame-voice's, say) doesn't count.
+            property var keyboards: backend.devices.filter(d => d.connected && d.role === "passthrough"
+                                                                && d.kinds.indexOf("keyboard") >= 0 && !d.uinput)
+
+            Kirigami.FormLayout {
+                Controls.ComboBox {
+                    Kirigami.FormData.label: "Show the keyboard:"
+                    model: backend.vrKeyboardModes
+                    textRole: "text"
+                    valueRole: "value"
+                    Component.onCompleted: currentIndex = indexOfValue(backend.vrKeyboard)
+                    onActivated: backend.setVrKeyboard(currentValue)
+                }
+                Controls.Switch {
+                    Kirigami.FormData.label: "Keep it open:"
+                    text: "Until you press its Close key or your keyboard button, not only while the text field has focus"
+                    checked: backend.vrKeyboardPersist
+                    enabled: backend.vrKeyboard !== "never"
+                    onToggled: backend.setVrKeyboardPersist(checked)
+                }
+                Controls.Label {
+                    Kirigami.FormData.label: "Keyboards connected:"
+                    text: kpage.keyboards.length ? kpage.keyboards.map(d => d.name).join(", ") : "none"
+                }
+            }
+
+            footer: Controls.Label {
+                padding: Kirigami.Units.largeSpacing
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: "Frametop's keyboard opens in front of you, below your eyes, and closes with its Close key or a layout reset "
+                      + "(or when the text field loses focus, with Keep it open off). It steps aside while the Steam "
+                      + "menu or Steam's own keyboard is up. Type on it with a laser or the 3D mouse. It types into any "
+                      + "app, but only Qt, GTK and Firefox apps say when a text field is selected; for the rest "
+                      + "(Chromium, Electron and X11 apps), map Open/close keyboard to a button on the Buttons or "
+                      + "Controllers page. Keyboards set to Ignore, and keyboards other programs make (like "
+                      + "frame-voice's), don't count as connected."
             }
         }
     }

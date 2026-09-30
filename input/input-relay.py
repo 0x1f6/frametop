@@ -21,8 +21,8 @@ Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
 pointer_toggle, follow_toggle = head follow on or off, gaze_toggle = gaze mode on or off
 (the pointer goes where you look; see pointer/helper/ft-pointer.cpp), sens_up, sens_down,
-layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens, key = pass
-through as a key, none).
+layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
+keyboard_toggle = open or close Frametop's keyboard, key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
 rules file; any action but key). The controllers aren't input devices here, only SteamVR sees
@@ -47,6 +47,16 @@ a grabbed keyboard's keys also go out as "key <code> <value> <device name>" data
 It's off by default: any local process that binds that name first gets every key typed
 into the desktop.
 
+Frametop's keyboard (ft-screens' key panel): the desktop's input method (input/ft-textinput)
+says "textfield 1|0" when a text field on the desktop gains or loses keyboard focus, and
+the relay tells ft-screens to open ("vrkeyboard show") or close ("vrkeyboard hide") the
+keyboard, depending on "vr_keyboard" in the rules file: "always", "no_keyboard" (the
+default: only while no pass-through keyboard is connected; a program's uinput keyboard
+doesn't count), "button" (only the keyboard_toggle action opens it), or "never"
+(keyboard_toggle does nothing either). With "vr_keyboard_persist" (the default), it stays
+open when the text field loses focus, until its Close key, keyboard_toggle, or a layout reset
+(ft-layout apply) closes it.
+
 Volume keys, from every device that has them (the headset's own buttons included),
 are handled here: wpctl steps the default output. Nothing else may see a volume key,
 because gamescope aborts on one when no window has keyboard focus, which ends the
@@ -67,6 +77,7 @@ Control socket (abstract datagram @frametop_relay, JSON replies to the sender):
   vrcapture <s>     take every controller button for s seconds (0: stop), so the settings
                     app can capture one; watchers see them as events with id frame_controller
   vrbtn, vrhello, gazeawake   from the pointer helper (above)
+  textfield 1|0     from the desktop's input method (above)
 
 Runs on the Frame host as a user service (frametop-input-relay.service). The
 virtual devices are parked in systemd's file descriptor store, so a relay
@@ -156,7 +167,8 @@ VIRTUAL_PREFIX = "frametop virtual"
 RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle",
-           "key", "none")
+           "keyboard_toggle", "key", "none")
+VR_KEYBOARD_MODES = ("always", "no_keyboard", "button", "never")  # when Frametop's keyboard opens
 HELPER = "\0ft_pointer_helper"
 # Frame controller buttons the pointer helper can read (pointer/helper/vrbuttons.h).
 VR_BUTTONS = ("left/view", "left/dpad_up", "left/dpad_down", "left/dpad_left", "left/dpad_right", "left/bumper",
@@ -260,7 +272,8 @@ def read_config(path=os.path.expanduser("~/.config/frametop.conf")):
 
 def read_rules(path=RULES_PATH):
     """{"devices": {id: {"role", "name"}}, "buttons": {id: {"<code>": action}},
-    "controller_buttons": {"<hand>/<button>": action}}."""
+    "controller_buttons": {"<hand>/<button>": action}, "controller_in_games": bool,
+    "vr_keyboard": one of VR_KEYBOARD_MODES, "vr_keyboard_persist": bool}."""
     try:
         with open(path) as f:
             rules = json.load(f)
@@ -502,8 +515,9 @@ class Node:
     or any other device with volume keys (candidate False, role "volume")."""
 
     def __init__(self, path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard,
-                 candidate=True, volume_keys=False, only_volume=False):
+                 candidate=True, volume_keys=False, only_volume=False, uinput=False):
         self.path, self.fd, self.name = path, fd, name
+        self.uinput = uinput  # made by a program (frame-voice's keyboard, say), not a real device
         self.bus, self.vendor, self.product, self.uniq = bus, vendor, product, uniq
         self.is_mouse, self.is_keyboard = is_mouse, is_keyboard
         self.candidate, self.volume_keys, self.only_volume = candidate, volume_keys, only_volume
@@ -520,7 +534,7 @@ class Node:
         kinds = [k for k, on in (("mouse", self.is_mouse), ("keyboard", self.is_keyboard)) if on]
         return {"path": self.path, "name": self.name, "id": self.id, "uniq": self.uniq,
                 "bus": {BUS_USB: "usb", BUS_BLUETOOTH: "bluetooth"}.get(self.bus, str(self.bus)),
-                "kinds": kinds, "role": self.role, "grabbed": self.grabbed}
+                "kinds": kinds, "role": self.role, "grabbed": self.grabbed, "uinput": self.uinput}
 
 
 def probe(path):
@@ -552,8 +566,10 @@ def probe(path):
         volume_keys = bool(keys & VOLUME_CODES)  # stand-ins too: kept from before a relay restart
         if not (candidate or volume_keys):
             raise ValueError
+        # uinput devices live here (Bluetooth LE ones come through uhid, under virtual/misc).
+        sysfs = os.path.realpath(f"/sys/class/input/{os.path.basename(path)}/device")
         return Node(path, fd, name, bus, vendor, product, uniq, is_mouse, is_keyboard,
-                    candidate, volume_keys, keys <= VOLUME_CODES)
+                    candidate, volume_keys, keys <= VOLUME_CODES, sysfs.startswith("/sys/devices/virtual/input/"))
     except (OSError, ValueError):
         os.close(fd)
         return None
@@ -624,6 +640,35 @@ def main():
                              "type": "vr", "code": button, "value": value})
         action = state["rules"]["controller_buttons"].get(button)
         if state["pointer"] and action in ACTIONS and action not in ("key", "none"):
+            do_action(action, value, now)
+
+    def vr_keyboard_mode():
+        mode = state["rules"].get("vr_keyboard")
+        return mode if mode in VR_KEYBOARD_MODES else "no_keyboard"
+
+    def vr_keyboard(command):
+        """Open or close Frametop's keyboard (ft-screens)."""
+        try:
+            screens_sock.sendto(f"vrkeyboard {command}".encode(), SCREENS)
+        except OSError:
+            pass  # ft-screens not running
+
+    def text_field(focused):
+        """A text field on the desktop gained or lost keyboard focus (the input method)."""
+        mode = vr_keyboard_mode()
+        if not focused:
+            if not state["rules"].get("vr_keyboard_persist", True):
+                vr_keyboard("hide")  # ft-screens closes it only if it opened it for a text field
+        elif mode == "always" or (mode == "no_keyboard" and not any(
+                n.candidate and n.is_keyboard and n.role == "passthrough" and not n.uinput for n in nodes.values())):
+            vr_keyboard("show")
+
+    def do_action(action, value, now):
+        """A mapped mouse or controller button (pointer mode only)."""
+        if action == "keyboard_toggle":
+            if value == 1 and vr_keyboard_mode() != "never":
+                vr_keyboard("toggle")
+        else:
             state["pointer"].action(action, value, now)
 
 
@@ -789,6 +834,9 @@ def main():
             if cmd == "vrhello":
                 vr_bind(now)
                 continue
+            if cmd == "textfield" and len(words) == 2:
+                text_field(words[1] == "1")
+                continue
             if cmd == "gazeawake" and len(words) == 2:
                 if state["pointer"]:
                     state["pointer"].gaze_awake_until = now + 12.0 if words[1] == "1" else 0.0
@@ -930,7 +978,7 @@ def main():
                 if etype == EV_KEY:
                     action = buttons.get(str(code), DEFAULT_BUTTONS.get(code, "key"))
                     if pointer and action not in ("key", "none"):
-                        pointer.action(action, value, now)
+                        do_action(action, value, now)
                         continue
                     if action == "none":
                         continue

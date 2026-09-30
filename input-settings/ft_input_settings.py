@@ -62,8 +62,17 @@ ACTION_LABELS = {
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
     "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
-    "screens_toggle": "Hide/show desktop screens", "key": "Pass through as key",
+    "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
+    "key": "Pass through as key",
     "none": "Do nothing",
+}
+# When Frametop's keyboard opens ("vr_keyboard" in the rules; the relay's
+# VR_KEYBOARD_MODES). "no_keyboard" is the default.
+VR_KEYBOARD_MODES = {
+    "always": "When a text field is selected",
+    "no_keyboard": "When a text field is selected and no keyboard is connected",
+    "button": "Only with a mapped mouse or controller button",
+    "never": "Never",
 }
 ROLE_LABELS = {"pointer": "3D pointer", "passthrough": "Pass through", "ignore": "Ignore"}
 # Frame controller buttons the pointer helper can read (pointer/helper/vrbuttons.h). The
@@ -363,7 +372,8 @@ class Backend(QObject):
         grouped = {}
         for n in self._nodes:
             d = grouped.setdefault(n["id"], {"id": n["id"], "name": n["name"], "bus": n["bus"], "kinds": [],
-                                             "nodes": [], "role": n["role"], "grabbed": False})
+                                             "nodes": [], "role": n["role"], "grabbed": False,
+                                             "uinput": n.get("uinput", False)})
             d["nodes"].append(n["path"])
             d["kinds"] = sorted(set(d["kinds"]) | set(n["kinds"]))
             d["grabbed"] = d["grabbed"] or n["grabbed"]
@@ -600,6 +610,36 @@ class Backend(QObject):
     @Slot(str)
     def removeIgnore(self, pattern):
         self._save_ignore([p for p in self._ignore_list() if p != pattern], f"{pattern}: no longer ignored")
+
+    # --- Frametop's keyboard ---
+    @Property("QVariantList", constant=True)
+    def vrKeyboardModes(self):
+        return [{"value": k, "text": v} for k, v in VR_KEYBOARD_MODES.items()]
+
+    @Property(str, notify=mappingsChanged)
+    def vrKeyboard(self):
+        mode = read_json(RULES_PATH).get("vr_keyboard")
+        return mode if mode in VR_KEYBOARD_MODES else "no_keyboard"
+
+    @Property(bool, notify=mappingsChanged)
+    def vrKeyboardPersist(self):
+        return bool(read_json(RULES_PATH).get("vr_keyboard_persist", True))
+
+    @Slot(bool)
+    def setVrKeyboardPersist(self, on):
+        rules = read_json(RULES_PATH)
+        rules["vr_keyboard_persist"] = bool(on)
+        self._save_rules(rules)
+        self.message.emit("Keyboard: " + ("stays open until you hide it" if on else "closes with the text field"), False)
+
+    @Slot(str)
+    def setVrKeyboard(self, mode):
+        if mode not in VR_KEYBOARD_MODES:
+            return
+        rules = read_json(RULES_PATH)
+        rules["vr_keyboard"] = mode
+        self._save_rules(rules)
+        self.message.emit(f"Keyboard: {VR_KEYBOARD_MODES[mode].lower()}", False)
 
     # --- controllers ---
     @Property("QVariantList", constant=True)
