@@ -75,7 +75,7 @@ while kill -0 $xvnc 2>/dev/null; do
       xrandr --addmode VNC-0 "$size" 2>/dev/null || true
       xrandr --fb "$size" --output VNC-0 --mode "$size"
     fi
-    xfreerdp /v:127.0.0.1:"$rdp_port" /u:steamos /p:"$(cat "$creds/password")" \
+    xfreerdp /v:127.0.0.1:"$rdp_port" /u:"$(id -un)" /p:"$(cat "$creds/password")" \
       /cert:ignore /size:"${ww}x${wh}" -decorations +clipboard >/dev/null 2>&1 &
     rdp=$!
     # FreeRDP takes no negative position, so move its window once it is up.

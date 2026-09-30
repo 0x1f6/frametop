@@ -12,7 +12,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 . "$root/scripts/_env.sh"
 frame="$root/scripts/frame.sh"
 src=$FRAME_REPO/pointer/driver
-dest=/home/steamos/.local/share/frametop/ft_pointer
+dest='$HOME/.local/share/frametop/ft_pointer'  # expanded on the Frame, in the commands below
 reg='/opt/steamvr/bin/linuxarm64/vrpathreg'
 
 case ${1:-install} in
