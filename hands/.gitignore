@@ -1,0 +1,23 @@
+# Recordings (tens of GB) and the Python venv
+captures/
+.venv/
+__pycache__/
+# Upstream clones: ncnn (see trackd/README.md) and FrameEyeCameraFeed (MIT, adapted into camd/)
+vendor/
+# Disassembly of Valve's vrclient.so, for reverse engineering only
+re/*.dis
+# Downloadable model sources (tools/convert_models.py); the converted ncnn models are kept
+models/onnx/
+models/*.task
+# Build output
+camd/fh-camd
+camd/fh-camprobe
+trackd/fh-tracker
+trackd/fh-replay
+trackd/fh-ringplay
+trackd/nettest
+probes/fh-frametime
+probes/mgrvt
+probes/ptstate
+probes/refprobe
+probes/*.bin
