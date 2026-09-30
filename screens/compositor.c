@@ -657,6 +657,9 @@ int main(int argc, char **argv) {
     wlr_log(WLR_INFO, "stopping");
     if (s.child > 0) kill(s.child, SIGTERM);
     wl_display_destroy_clients(s.display);
+    // wlroots asserts that nothing still listens to its globals when they go.
+    wl_list_remove(&s.new_toplevel.link);
+    wl_list_remove(&s.new_decoration.link);
     ft_vr_shutdown();
     wl_display_destroy(s.display);
     return 0;
