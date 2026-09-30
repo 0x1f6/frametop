@@ -821,6 +821,91 @@ Kirigami.ApplicationWindow {
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
+                ColumnLayout {
+                    Kirigami.FormData.label: "Mouse left button:"
+                    Repeater {
+                        model: backend.gazeMouseChoices
+                        delegate: Controls.RadioButton {
+                            required property var modelData
+                            text: modelData.text
+                            checked: backend.gazeMouse === modelData.value
+                            onToggled: if (checked) backend.setGazeMouse(modelData.value)
+                        }
+                    }
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    text: "Controllers: map a button to Gaze precision (hold, point the controller to steer, release to "
+                          + "click) or Gaze drag (the same, pressed at once) on the Controllers page. Gaze pointer on/off "
+                          + "can go on a controller button, a mouse button, or a key combination below."
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
+                ColumnLayout {
+                    Kirigami.FormData.label: "Pointer takes the role:"
+                    Repeater {
+                        model: backend.pointerRoles
+                        delegate: Controls.RadioButton {
+                            required property var modelData
+                            text: modelData.text
+                            checked: backend.pointerRole === modelData.value
+                            onToggled: if (checked) backend.setPointerRole(modelData.value)
+                        }
+                    }
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    text: "A controller in your hand takes that hand's role, and then the pointer's clicks don't land. "
+                          + "Holding the right controller as the precision tool, give the pointer the left hand, or the "
+                          + "stylus role. It applies the next time the pointer wakes."
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
+
+                Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Key combinations" }
+
+                Repeater {
+                    model: backend.keyShortcuts
+                    delegate: RowLayout {
+                        required property var modelData
+                        Kirigami.FormData.label: modelData.label + ":"
+                        Controls.Label { text: modelData.actionLabel }
+                        Controls.ToolButton {
+                            icon.name: "edit-delete"
+                            display: Controls.AbstractButton.IconOnly
+                            text: "Remove"
+                            Controls.ToolTip.text: text
+                            Controls.ToolTip.visible: hovered
+                            onClicked: backend.removeShortcut(modelData.combo)
+                        }
+                    }
+                }
+                RowLayout {
+                    Kirigami.FormData.label: "New:"
+                    Controls.ComboBox {
+                        id: shortcutAction
+                        model: backend.shortcutActions
+                        textRole: "text"
+                        valueRole: "value"
+                        Component.onCompleted: currentIndex = indexOfValue("gaze_toggle")
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+                    }
+                    Controls.Button {
+                        text: backend.capturingShortcut ? "Press the keys… (Cancel)" : "Set keys…"
+                        onClicked: backend.capturingShortcut ? backend.cancelShortcutCapture()
+                                                             : backend.startShortcutCapture(shortcutAction.currentValue)
+                    }
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    text: "Hold the modifiers (Ctrl, Alt, Shift, Meta), then press the key, on any keyboard. The "
+                          + "combination's last key isn't typed; the modifiers still reach the app."
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
                 RowLayout {
                     Kirigami.FormData.label: "Eye tracker:"
                     Controls.RadioButton {

@@ -60,6 +60,8 @@ ACTION_LABELS = {
     "scroll_up": "Scroll up", "scroll_down": "Scroll down", "dashboard": "Toggle SteamVR dashboard",
     "recenter": "Recenter pointer", "pointer_toggle": "Pointer on/off",
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
+    "gaze_precision": "Gaze precision: hold to steer, release to click",
+    "gaze_drag": "Gaze drag: press where you look, steer, release",
     "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
@@ -92,7 +94,18 @@ GAZE_SETTINGS = [
     ("POINTER_GAZE_NUDGE_MAX", "Largest nudge to learn", 8, 1, 30, 0.5, "°"),
     ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
+    ("POINTER_PRECISION_GAIN", "Precision steering", 0.5, 0.1, 2.0, 0.05, "×"),
+    ("POINTER_PRECISION_DEADZONE", "Precision dead zone", 0.3, 0.0, 3.0, 0.1, "°"),
+    ("POINTER_GAZE_DRAG_GAIN", "Drag steering", 1.0, 0.1, 2.0, 0.05, "×"),
 ]
+# In gaze mode, what the mouse's left button does (POINTER_GAZE_MOUSE).
+GAZE_MOUSE = {"precision": "Gaze precision: hold to steer with the mouse, release to click",
+              "direct": "Click right away where the pointer is"}
+# The hand role the pointer's virtual controller takes (POINTER_ROLE).
+POINTER_ROLES = {"right": "Right hand", "left": "Left hand", "stylus": "Stylus (no hand)"}
+# Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
+MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
+MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
 # The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
 GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker (frame-eyes)"}
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
@@ -223,6 +236,7 @@ class Backend(QObject):
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
     capturedController = Signal(str, str)  # button, label
+    shortcutCaptureChanged = Signal()
     message = Signal(str, bool)  # text, is error
 
     def __init__(self):
@@ -234,6 +248,8 @@ class Backend(QObject):
         self._bluetooth = []
         self._relay_ok = False
         self._capture_vr = False
+        self._capture_combo = ""  # the action a key combination is being captured for
+        self._combo_mods = set()
         self._vr = {}  # the helper's vrstatus, {} when it doesn't answer
         self._vr_at = 0.0
         self._gaze = {}  # ft-gazed's status, {} when it isn't running
@@ -338,6 +354,17 @@ class Backend(QObject):
                     self._capture_vr = False
                     self._send("vrcapture 0")
                     self.capturedController.emit(msg["code"], CONTROLLER_BUTTONS[msg["code"]])
+            elif t == "event" and self._capture_combo and msg.get("type") == "key":
+                self.activity.emit(msg["id"])
+                code, value = int(msg["code"]), msg["value"]
+                if code in MODIFIER_CODES:
+                    (self._combo_mods.add if value else self._combo_mods.discard)(MODIFIER_CODES[code])
+                elif value == 1 and code < BTN_MISC:
+                    self._save_shortcut("+".join(str(c) for c in sorted(self._combo_mods) + [code]),
+                                        self._capture_combo)
+                    self._capture_combo = ""
+                    self._combo_mods = set()
+                    self.shortcutCaptureChanged.emit()
             elif t == "event":
                 self.activity.emit(msg["id"])
                 if (self._capture_id and msg["id"] == self._capture_id and msg["type"] == "key"
@@ -764,6 +791,85 @@ class Backend(QObject):
         self._send(f"gaze {'on' if on else 'off'}", HELPER)
         self.reload_timer.start()
         self.gazeChanged.emit()
+
+    @Property(str, notify=pointerChanged)
+    def gazeMouse(self):
+        v = read_conf().get("POINTER_GAZE_MOUSE", "precision")
+        return v if v in GAZE_MOUSE else "precision"
+
+    @Property("QVariantList", constant=True)
+    def gazeMouseChoices(self):
+        return [{"value": k, "text": v} for k, v in GAZE_MOUSE.items()]
+
+    @Slot(str)
+    def setGazeMouse(self, mode):
+        if mode in GAZE_MOUSE:
+            write_conf_value("POINTER_GAZE_MOUSE", mode)
+            self.reload_timer.start()
+            self.pointerChanged.emit()
+            self.message.emit(f"Mouse in gaze mode: {GAZE_MOUSE[mode].lower()}", False)
+
+    @Property(str, notify=pointerChanged)
+    def pointerRole(self):
+        v = read_conf().get("POINTER_ROLE", "right")
+        return v if v in POINTER_ROLES else "right"
+
+    @Property("QVariantList", constant=True)
+    def pointerRoles(self):
+        return [{"value": k, "text": v} for k, v in POINTER_ROLES.items()]
+
+    @Slot(str)
+    def setPointerRole(self, role):
+        if role in POINTER_ROLES:
+            write_conf_value("POINTER_ROLE", role)
+            self.reload_timer.start()
+            self.pointerChanged.emit()
+            self.message.emit(f"Pointer role: {POINTER_ROLES[role].lower()} (from its next wake)", False)
+
+    # --- key combinations ("key_bindings") ---
+    def comboName(self, combo):
+        parts = [int(c) for c in combo.split("+") if c.isdigit()]
+        return "+".join(MODIFIER_NAMES.get(c) or self.codeName(c).removeprefix("KEY_").title() for c in parts)
+
+    @Property("QVariantList", notify=mappingsChanged)
+    def keyShortcuts(self):
+        bound = read_json(RULES_PATH).get("key_bindings", {}) or {}
+        return [{"combo": c, "label": self.comboName(c), "action": a, "actionLabel": ACTION_LABELS.get(a, a)}
+                for c, a in sorted(bound.items())]
+
+    @Property("QVariantList", constant=True)
+    def shortcutActions(self):
+        return [{"value": a, "text": ACTION_LABELS[a]} for a in CONTROLLER_ACTIONS]
+
+    @Property(bool, notify=shortcutCaptureChanged)
+    def capturingShortcut(self):
+        return bool(self._capture_combo)
+
+    @Slot(str)
+    def startShortcutCapture(self, action):
+        if action in CONTROLLER_ACTIONS:
+            self._capture_combo = action
+            self._combo_mods = set()
+            self._send("watch 60")
+            self.shortcutCaptureChanged.emit()
+
+    @Slot()
+    def cancelShortcutCapture(self):
+        self._capture_combo = ""
+        self.shortcutCaptureChanged.emit()
+
+    def _save_shortcut(self, combo, action):
+        rules = read_json(RULES_PATH)
+        rules.setdefault("key_bindings", {})[combo] = action
+        self._save_rules(rules)
+        self.message.emit(f"{self.comboName(combo)} → {ACTION_LABELS[action]}", False)
+
+    @Slot(str)
+    def removeShortcut(self, combo):
+        rules = read_json(RULES_PATH)
+        (rules.get("key_bindings") or {}).pop(combo, None)
+        self._save_rules(rules)
+        self.message.emit(f"{self.comboName(combo)} removed", False)
 
     @Property(str, notify=gazeChanged)
     def gazeTracker(self):

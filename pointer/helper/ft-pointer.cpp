@@ -163,6 +163,25 @@
 // press dragged onto the target is the same: from the raw gaze at the press to the release. With no
 // fresh gaze (a blink, the service stopped, the headset off), the pointer stays put.
 //
+// Gaze precision (the relay's gaze_precision and gaze_drag actions, bound to a controller
+// button, a mouse button, or a key combination; "precision|gazedrag <source> 1|0" here): gaze
+// mode aims, the button makes it exact. Pressing gaze precision stops the pointer where you
+// look, as gaze mode's mouse press does; while it's held, the button's device steers the
+// pointer: a controller by where it points, at POINTER_PRECISION_GAIN (0.5: half its turn, for
+// precision) past POINTER_PRECISION_DEADZONE (0.3 deg, the press's own jolt), and the mouse by
+// its moves. Releasing clicks where the pointer is. A correction is a lesson for the gaze
+// tracker, as with the mouse. Gaze drag is the same with a real press at once, dragging until the
+// release (at POINTER_GAZE_DRAG_GAIN, 1), for title bars, grab bars, and selections. Without
+// gaze mode both still work from wherever the pointer is.
+//   In gaze mode the mouse's left button is a gaze precision button (POINTER_GAZE_MOUSE =
+// precision, the default), or clicks at once where the pointer is (direct). And in gaze mode a
+// moving controller doesn't take the pointer away (last used wins is off): the gaze points,
+// and the controllers are its tools.
+//   POINTER_ROLE (right, left, or stylus): the hand role our device takes while connected. A
+// Frame controller in your hand counts as used through its touch sensors and takes its hand's
+// role back, and then no click lands (see "no hand role" in the main loop): with a controller in
+// the right hand as the precision tool, the pointer needs the left hand, or the stylus role.
+//
 // Hands (POINTER_HANDS, off by default; needs hand tracking, hands/): ft-hands publishes
 // pinches and grips (hands/include/fh_gestures.h), read here every frame.
 //   A pinch works like gaze mode's mouse press: the pointer stops (where the gaze put it), and
@@ -240,6 +259,8 @@
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
 // POINTER_HANDS (0), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
 // POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.35 m), POINTER_PINCH_TYPING (1 s): hands, above.
+// POINTER_PRECISION_GAIN (0.5), POINTER_PRECISION_DEADZONE (0.3 deg), POINTER_GAZE_DRAG_GAIN (1),
+// POINTER_GAZE_MOUSE (precision), POINTER_ROLE (right): gaze precision, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -650,6 +671,12 @@ int main() {
     // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
     bool handsOn = false;
     double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, handBelow = 0.35, typingHold = 1.0;
+    // Gaze precision (see the top): POINTER_PRECISION_GAIN, POINTER_PRECISION_DEADZONE,
+    // POINTER_GAZE_DRAG_GAIN, POINTER_GAZE_MOUSE (precision: the mouse's left button holds
+    // back its press in gaze mode; direct: it clicks at once), POINTER_ROLE.
+    double precisionGain = 0.5, precisionDeadzone = 0.3, dragGain = 1.0;
+    bool gazeMousePrecision = true;
+    std::string role = "right";
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
     auto loadConfig = [&] {
@@ -680,6 +707,13 @@ int main() {
         gripGain = std::clamp(ConfDouble(conf, "POINTER_GRIP_GAIN", 1.0), 0.05, 3.0);
         handBelow = std::clamp(ConfDouble(conf, "POINTER_GRIP_BELOW", 0.35), 0.05, 1.0);
         typingHold = std::clamp(ConfDouble(conf, "POINTER_PINCH_TYPING", 1.0), 0.0, 5.0);
+        precisionGain = std::clamp(ConfDouble(conf, "POINTER_PRECISION_GAIN", 0.5), 0.05, 3.0);
+        precisionDeadzone = std::clamp(ConfDouble(conf, "POINTER_PRECISION_DEADZONE", 0.3), 0.0, 10.0);
+        dragGain = std::clamp(ConfDouble(conf, "POINTER_GAZE_DRAG_GAIN", 1.0), 0.05, 3.0);
+        const auto gm = conf.find("POINTER_GAZE_MOUSE");
+        gazeMousePrecision = gm == conf.end() || gm->second != "direct";
+        const auto ro = conf.find("POINTER_ROLE");
+        role = ro != conf.end() && (ro->second == "left" || ro->second == "stylus") ? ro->second : "right";
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
         const auto ig = conf.find("POINTER_IGNORE");
         ignore = ParseIgnore(ig == conf.end() ? "" : ig->second);
@@ -779,6 +813,7 @@ int main() {
         wokeAt = t;
         active = true;
         recenter = true;
+        SendTo(out, "ft_pointer", "role " + role);  // POINTER_ROLE, before it takes it
         SendTo(out, "ft_pointer", "show");
         claimPending = true;  // take the laser without clicking, once SteamVR has bound the device
         claimAt = t + std::chrono::milliseconds(300);
@@ -806,19 +841,31 @@ int main() {
     // the gaze the pointer again when the press or click is over.
     vr::TrackedDeviceIndex_t ours = vr::k_unTrackedDeviceIndexInvalid;
     bool aimHeld = false, clickPress = false, clickRelease = false, gazeBack = false;
-    bool aimHand = false;  // the held-back press is a pinch's: it never turns into a real press
+    bool aimHand = false;  // the held-back press is a hold's (below): it never turns into a real press
     Clock::time_point aimSince{}, clickReleaseAt{};
-    // Hands (see the top): the gesture being held (side -1: none), where its hand pointed
-    // from (origin: the eye when it began, in the room) and the pointer then.
+    // Holds (see "Gaze precision" and "Hands" at the top): a pinch or grip, or a gaze
+    // precision or gaze drag button, held now. What steers the pointer meanwhile (a hand, a
+    // controller's aim, or the mouse through its own moves), from where it pointed when the
+    // hold began (for a hand: seen from the eye then, in the room), and the pointer then.
     HandGestures handFile;
     PoseHistory poses;
-    struct HandHold {
-        int side = -1;
-        bool grip = false, engaged = false;
+    enum class Src { None, Hand, Controller, Mouse };
+    struct Hold {
+        Src src = Src::None;
+        int side = -1;          // a hand's side (0 left, 1 right)
+        bool grip = false;      // pressed at once and dragging (a grip, gaze drag), not a click on release
+        bool engaged = false;   // past the dead zone
+        bool pressed = false;   // a real press went out (a grip or gaze drag, or a pinch without gaze mode)
         Vec3 origin;
-        bool pressed = false;  // a real press went out (a grip, or a pinch without gaze mode)
+        vr::TrackedDeviceIndex_t ctrl = vr::k_unTrackedDeviceIndexInvalid;
         double refYaw = 0, refPitch = 0, startYaw = 0, startPitch = 0, lastYaw = 0, lastPitch = 0;
     } hold;
+    // "precision|gazedrag <source> 1|0" from the relay, done in the frame (see Holds).
+    struct DevicePress {
+        std::string source;
+        bool drag, down;
+    };
+    std::vector<DevicePress> devicePresses;
     uint32_t seenBegins[2][2] = {}, seenEnds[2][2] = {};  // [pinch, grip][side], as last read
     bool handBaseline = false;
     int handOpens = 0;
@@ -876,7 +923,8 @@ int main() {
     // the top).
     auto leftButton = [&](bool down) {
         if (down) {
-            if (gazeOn && gazeOwns && !aimHeld && !clickPress && !clickRelease) {
+            if (gazeOn && gazeMousePrecision && gazeOwns && !aimHeld && !clickPress && !clickRelease &&
+                hold.src == Src::None) {
                 // Hold the press back: the pointer stops where the gaze put it.
                 gazeOwns = false;
                 nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
@@ -888,7 +936,7 @@ int main() {
             pressLeft();
             return;
         }
-        if (aimHeld) {
+        if (aimHeld && !aimHand) {
             aimHeld = false;
             clickPress = true;  // after this frame's pose, so it lands where the pointer was moved to
             gazeBack = nudgeMoved < 0.2;
@@ -1115,6 +1163,17 @@ int main() {
                 gz = {g[0], g[1], g[2], g[3], Clock::now()};
                 continue;
             }
+            {
+                char kind[16], source[16];
+                int v;
+                if (std::sscanf(buf, "%15s %15s %d", kind, source, &v) == 3 &&
+                    (!std::strcmp(kind, "precision") || !std::strcmp(kind, "gazedrag"))) {
+                    lastMouse = Clock::now();
+                    if (!active) wake(Clock::now());
+                    devicePresses.push_back({source, !std::strcmp(kind, "gazedrag"), v != 0});
+                    continue;
+                }
+            }
             if (std::strcmp(buf, "typing") == 0) {  // not mouse input: it never wakes the pointer
                 lastTyping = Clock::now();
                 continue;
@@ -1308,7 +1367,9 @@ int main() {
         }
 
         // Last used wins: a real controller being moved releases the pointer (see the top).
-        if (active && tnow - lastMouse > std::chrono::milliseconds(500)) {
+        // Not in gaze mode: there the gaze points, and a controller is a tool for it (gaze
+        // precision), so moving one doesn't take the pointer away.
+        if (active && !gazeOn && hold.src == Src::None && tnow - lastMouse > std::chrono::milliseconds(500)) {
             for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
                 if (i == ours || !all[i].bPoseIsValid || all[i].eTrackingResult != vr::TrackingResult_Running_OK ||
                     sys->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) {
@@ -1403,19 +1464,54 @@ int main() {
                     gazeBack = nudgeMoved < 0.2;
                 }
             }
-            if (debug) std::printf("hand %s %s%s\n", hold.grip ? "grip" : "pinch", lost ? "lost" : "released",
-                                   hold.grip ? "" : lost ? " (no click)" : " (click)");
+            if (debug)
+                std::printf("hold %s %s%s\n", hold.src == Src::Hand ? (hold.grip ? "grip" : "pinch") : hold.grip ? "gaze drag" : "gaze precision",
+                            lost ? "lost" : "released", hold.pressed ? "" : lost ? " (no click)" : " (click)");
             if (debug) std::fflush(stdout);
-            hold.side = -1;
+            hold = {};
+        };
+        // The press, once a hold's source is set: a real press (dragging until the release), or
+        // held back like gaze mode's mouse press (see the top): the click comes on the release.
+        auto startHold = [&](bool press) {
+            hold.startYaw = hold.lastYaw = yaw, hold.startPitch = hold.lastPitch = pitch;
+            hold.pressed = press;
+            if (press) {
+                gazeBack = gazeOn && gazeOwns;
+                pressLeft();
+            } else {
+                gazeOwns = false;
+                nudging = gazeOn && haveHead && tnow - gz.at < std::chrono::milliseconds(200);
+                nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+                nudgeAt = aimSince = tnow, nudgeMoved = 0;
+                aimHeld = aimHand = true;
+                pulseAt = tnow;
+            }
+        };
+        // The hold's source moved to (hy, hp): past the dead zone, the pointer follows at the gain,
+        // from where it was when it got past.
+        auto steer = [&](double hy, double hp, double deadzone, double gain) {
+            const double dy = std::remainder(hy - hold.refYaw, 360.0), dp = hp - hold.refPitch;
+            if (!hold.engaged) {
+                if (std::hypot(dy, dp) <= deadzone) return;
+                hold.engaged = true;
+                hold.refYaw = hy, hold.refPitch = hp;
+                hold.startYaw = hold.lastYaw = yaw, hold.startPitch = hold.lastPitch = pitch;
+                return;
+            }
+            yaw = std::remainder(hold.startYaw + gain * dy, 360.0);
+            pitch = std::clamp(hold.startPitch + gain * dp, -85.0, 85.0);
+            if (!hold.pressed) nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
+            hold.lastYaw = yaw, hold.lastPitch = pitch;
+            lastMove = tnow;  // the dot shows while it moves (gaze mode)
         };
         auto beginHold = [&](int side, bool grip, const fh_pinch_t &g) {
             handUsed = tnow;
-            if (hold.side >= 0) {
+            if (hold.src != Src::None) {
                 // A grip takes over a pinch on the way to it (closing the hand passes through
-                // one); otherwise one gesture at a time.
-                if (!grip || hold.grip) return;
+                // one); otherwise one hold at a time.
+                if (hold.src != Src::Hand || !grip || hold.grip) return;
                 aimHeld = aimHand = false;
-                hold.side = -1;
+                hold = {};
             }
             if (leftHeld || aimHeld || clickPress || clickRelease) return;  // the mouse's button is busy
             if (!active) {
@@ -1433,30 +1529,69 @@ int main() {
                 return;
             }
             if (grip && Position(head).y - at.y > handBelow) {
-                if (debug) std::printf("hand %s ignored: %.2f m below the eyes\n", grip ? "grip" : "pinch", Position(head).y - at.y);
+                if (debug) std::printf("hand grip ignored: %.2f m below the eyes\n", Position(head).y - at.y);
                 return;
             }
-            hold = {side, grip, false, Position(head)};
-            if (!handAngles(g.begin_point, g.begin_ns, hold.origin, hold.refYaw, hold.refPitch)) return void(hold.side = -1);
-            hold.startYaw = yaw, hold.startPitch = pitch;
+            Hold h;
+            h.src = Src::Hand, h.side = side, h.grip = grip, h.origin = Position(head);
+            if (!handAngles(g.begin_point, g.begin_ns, h.origin, h.refYaw, h.refPitch)) return;
+            hold = h;
             // A grip, or a pinch without gaze mode: a real press where the pointer is (where
             // you look, in gaze mode), dragging with the hand until it opens.
-            hold.pressed = grip || !gazeOn;
-            if (hold.pressed) {
-                gazeBack = gazeOn && gazeOwns;
-                pressLeft();
-            } else {
-                // Held back like gaze mode's mouse press (see the top): the click comes on the release.
-                gazeOwns = false;
-                nudging = gazeOn && haveHead && tnow - gz.at < std::chrono::milliseconds(200);
-                nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
-                nudgeAt = aimSince = tnow, nudgeMoved = 0;
-                aimHeld = aimHand = true;
-                pulseAt = tnow;
-            }
+            startHold(grip || !gazeOn);
             if (debug) std::printf("hand %s %s began\n", side ? "right" : "left", grip ? "grip" : "pinch");
             if (debug) std::fflush(stdout);
         };
+        // A controller's aim: the yaw and pitch of its pointing direction, in the room.
+        auto controllerAngles = [&](vr::TrackedDeviceIndex_t i, double &cy, double &cp) {
+            if (i >= vr::k_unMaxTrackedDeviceCount || !all[i].bPoseIsValid) return false;
+            const auto &m = all[i].mDeviceToAbsoluteTracking.m;
+            const Vec3 f = Normalize({-m[0][2], -m[1][2], -m[2][2]});
+            cy = std::atan2(-f.x, -f.z) * 180 / M_PI;
+            cp = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
+            return true;
+        };
+        // The Frame controller in a hand (not our own device, which may hold that hand's role).
+        auto controllerFor = [&](const std::string &hand) {
+            const int32_t want = hand == "left" ? vr::TrackedControllerRole_LeftHand : vr::TrackedControllerRole_RightHand;
+            for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+                if (i == ours || sys->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) continue;
+                if (sys->GetInt32TrackedDeviceProperty(i, vr::Prop_ControllerRoleHint_Int32) == want ||
+                    sys->GetControllerRoleForTrackedDeviceIndex(i) == want)
+                    return i;
+            }
+            return vr::k_unTrackedDeviceIndexInvalid;
+        };
+        // Gaze precision and gaze drag buttons (see the top).
+        for (const DevicePress &p : devicePresses) {
+            const bool fromController = p.source == "left" || p.source == "right";
+            if (!p.down) {
+                if (hold.src == Src::Controller || hold.src == Src::Mouse) endHold(false);
+                continue;
+            }
+            if (hold.src != Src::None || leftHeld || aimHeld || clickPress || clickRelease) continue;
+            Hold h;
+            h.src = fromController ? Src::Controller : Src::Mouse, h.grip = p.drag;
+            if (fromController) {
+                h.ctrl = controllerFor(p.source);
+                if (!controllerAngles(h.ctrl, h.refYaw, h.refPitch)) {
+                    std::printf("gaze %s: no %s controller pose; the mouse steers instead\n", p.drag ? "drag" : "precision",
+                                p.source.c_str());
+                    std::fflush(stdout);
+                    h.src = Src::Mouse;
+                }
+            }
+            hold = h;
+            startHold(p.drag);
+            if (debug) std::printf("hold gaze %s began (%s)\n", p.drag ? "drag" : "precision", p.source.c_str());
+            if (debug) std::fflush(stdout);
+        }
+        devicePresses.clear();
+        if (hold.src == Src::Controller) {
+            double cy, cp;
+            if (controllerAngles(hold.ctrl, cy, cp))
+                steer(cy, cp, precisionDeadzone, hold.grip ? dragGain : precisionGain);
+        }
         fh_gestures_t hg;
         const bool handOk = handsOn && handFile.Read(hg);
         if (handOk && (hg.seq != handSeq || handFile.opens != handOpens)) {
@@ -1469,7 +1604,7 @@ int main() {
                 for (int s = 0; s < 2; ++s)
                     rebase = rebase || slots[k][s].begins < seenBegins[k][s] || slots[k][s].ends < seenEnds[k][s];
             if (rebase) {
-                if (hold.side >= 0) endHold(true);
+                if (hold.src == Src::Hand) endHold(true);
                 for (int k = 0; k < 2; ++k)
                     for (int s = 0; s < 2; ++s) seenBegins[k][s] = slots[k][s].begins, seenEnds[k][s] = slots[k][s].ends;
                 handBaseline = true, handOpens = handFile.opens;
@@ -1482,7 +1617,7 @@ int main() {
                     const bool began = g.begins != seenBegins[k][s], ended = g.ends != seenEnds[k][s];
                     const bool lost = g.flags & FH_PINCH_LOST;
                     seenBegins[k][s] = g.begins, seenEnds[k][s] = g.ends;
-                    auto holding = [&] { return hold.side == s && hold.grip == (k == 1); };
+                    auto holding = [&] { return hold.src == Src::Hand && hold.side == s && hold.grip == (k == 1); };
                     if (holding() && ended) endHold(lost);  // the one held ended (another may have begun)
                     if (began && allowed) {
                         beginHold(s, k == 1, g);
@@ -1492,30 +1627,18 @@ int main() {
                 }
             // The held gesture's hand moves the pointer: past the dead zone (a tap's jitter,
             // the pinch point shifting as the fingers close), then at the gain, from there.
-            if (hold.side >= 0) {
+            if (hold.src == Src::Hand) {
                 const fh_pinch_t &g = hold.grip ? hg.grip[hold.side] : hg.pinch[hold.side];
                 double hy, hp;
-                if ((g.flags & FH_PINCH_TRACKED) && handAngles(g.point, hg.capture_ns, hold.origin, hy, hp)) {
-                    const double dy = std::remainder(hy - hold.refYaw, 360.0), dp = hp - hold.refPitch;
-                    if (!hold.engaged && std::hypot(dy, dp) > (hold.grip ? 0.5 : pinchDeadzone)) {
-                        hold.engaged = true;
-                        hold.refYaw = hy, hold.refPitch = hp;
-                        hold.startYaw = hold.lastYaw = yaw, hold.startPitch = hold.lastPitch = pitch;
-                    } else if (hold.engaged) {
-                        const double gain = hold.grip ? gripGain : pinchGain;
-                        yaw = std::remainder(hold.startYaw + gain * dy, 360.0);
-                        pitch = std::clamp(hold.startPitch + gain * dp, -85.0, 85.0);
-                        if (!hold.grip) nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
-                        hold.lastYaw = yaw, hold.lastPitch = pitch;
-                        lastMove = tnow;  // the dot shows while it moves (gaze mode)
-                    }
-                }
+                if ((g.flags & FH_PINCH_TRACKED) && handAngles(g.point, hg.capture_ns, hold.origin, hy, hp))
+                    steer(hy, hp, hold.grip ? 0.5 : pinchDeadzone, hold.grip ? gripGain : pinchGain);
             }
         }
         // ft-hands stopped (or hung) with a gesture held: it's over, as lost.
         const uint64_t nowNs =
             uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow.time_since_epoch()).count());
-        if (hold.side >= 0 && (!handOk || !active || nowNs - handPublished > 1'500'000'000ull)) endHold(true);
+        if (hold.src == Src::Hand && (!handOk || !active || nowNs - handPublished > 1'500'000'000ull)) endHold(true);
+        if (hold.src != Src::None && hold.src != Src::Hand && !active) endHold(true);
 
         if (aimHeld || leftHeld || clickPress || clickRelease) lastHeld = tnow;
 

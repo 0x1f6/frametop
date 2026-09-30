@@ -20,12 +20,17 @@ keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
 pointer_toggle, follow_toggle = head follow on or off, gaze_toggle = gaze mode on or off
-(the pointer goes where you look; see pointer/helper/ft-pointer.cpp), sens_up, sens_down,
+(the pointer goes where you look; see pointer/helper/ft-pointer.cpp), gaze_precision = while
+held, the pointer stops where you look and the button's device (the mouse, or that
+controller's aim) steers it, and the release clicks there, gaze_drag = the same, but pressed
+at once, so it drags ("precision|gazedrag mouse|left|right|keyboard 1|0" to the helper), sens_up, sens_down,
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
 keyboard_toggle = open or close Frametop's keyboard, key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
-rules file; any action but key). The controllers aren't input devices here, only SteamVR sees
+rules file; any action but key). So can key combinations on any keyboard ("key_bindings":
+{"29+56+34": action}, evdev codes joined by "+", modifiers first and left-hand codes for
+either side, here Ctrl+Alt+G): the combination does the action, and its last key isn't typed. The controllers aren't input devices here, only SteamVR sees
 them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
 It only takes the buttons the relay tells it to ("vrbind <button>..." to @ft_pointer_helper,
 sent on start, reload, and when the helper says "vrhello"), and only while no game runs,
@@ -168,8 +173,10 @@ def eviocguniq(length):
 VIRTUAL_PREFIX = "frametop virtual"
 RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
-           "pointer_toggle", "follow_toggle", "gaze_toggle", "sens_up", "sens_down", "layout_reset", "screens_toggle",
-           "keyboard_toggle", "key", "none")
+           "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "sens_up", "sens_down",
+           "layout_reset", "screens_toggle", "keyboard_toggle", "key", "none")
+# Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
+MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 VR_KEYBOARD_MODES = ("always", "no_keyboard", "button", "never")  # when Frametop's keyboard opens
 HELPER = "\0ft_pointer_helper"
 # Frame controller buttons the pointer helper can read (pointer/helper/vrbuttons.h).
@@ -275,6 +282,7 @@ def read_config(path=os.path.expanduser("~/.config/frametop.conf")):
 def read_rules(path=RULES_PATH):
     """{"devices": {id: {"role", "name"}}, "buttons": {id: {"<code>": action}},
     "controller_buttons": {"<hand>/<button>": action}, "controller_in_games": bool,
+    "key_bindings": {"<code>+<code>...": action},
     "vr_keyboard": one of VR_KEYBOARD_MODES, "vr_keyboard_persist": bool}."""
     try:
         with open(path) as f:
@@ -284,6 +292,7 @@ def read_rules(path=RULES_PATH):
     rules.setdefault("devices", {})
     rules.setdefault("buttons", {})
     rules.setdefault("controller_buttons", {})
+    rules.setdefault("key_bindings", {})
     return rules
 
 
@@ -419,9 +428,16 @@ class Pointer:
             self.send(f"scroll 0 {1 if value > 0 else -1}")
             self.scroll_until = now + self.SCROLL_PULSE
 
-    def action(self, name, value, now):
-        """A mapped button: value 1 press, 0 release, 2 autorepeat (ignored)."""
+    def action(self, name, value, now, source="mouse"):
+        """A mapped button: value 1 press, 0 release, 2 autorepeat (ignored). source: what
+        pressed it (mouse, left, right for a controller, keyboard), for the gaze actions."""
         if value == 2:
+            return
+        if name in ("gaze_precision", "gaze_drag"):
+            if value == 1:
+                self.wake(now)
+            self.flush()
+            self.send(f"{'precision' if name == 'gaze_precision' else 'gazedrag'} {source} {value}")
             return
         driver = self.DRIVER_BUTTONS.get(name)
         if driver:
@@ -643,7 +659,7 @@ def main():
                              "type": "vr", "code": button, "value": value})
         action = state["rules"]["controller_buttons"].get(button)
         if state["pointer"] and action in ACTIONS and action not in ("key", "none"):
-            do_action(action, value, now)
+            do_action(action, value, now, button.split("/")[0])
 
     def vr_keyboard_mode():
         mode = state["rules"].get("vr_keyboard")
@@ -666,13 +682,39 @@ def main():
                 n.candidate and n.is_keyboard and n.role == "passthrough" and not n.uinput for n in nodes.values())):
             vr_keyboard("show")
 
-    def do_action(action, value, now):
-        """A mapped mouse or controller button (pointer mode only)."""
+    def do_action(action, value, now, source="mouse"):
+        """A mapped mouse or controller button, or key combination (pointer mode only)."""
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
         else:
-            state["pointer"].action(action, value, now)
+            state["pointer"].action(action, value, now, source)
+
+    held_modifiers = set()  # on any keyboard, folded (MODIFIERS)
+    combos_down = {}  # key code -> the action its combination started (released with it)
+
+    def key_binding(code, value, now):
+        """A key from a keyboard: does it complete a key combination ("key_bindings")? True if
+        it was taken for one (then it isn't typed)."""
+        if code in MODIFIERS:
+            (held_modifiers.add if value else held_modifiers.discard)(MODIFIERS[code])
+            return False
+        if value == 0 and code in combos_down:
+            action = combos_down.pop(code)
+            if state["pointer"]:
+                do_action(action, 0, now, "keyboard")
+            return True
+        if value != 1 or not state["rules"]["key_bindings"]:
+            return value == 2 and code in combos_down
+        combo = "+".join(str(c) for c in sorted(held_modifiers) + [code])
+        action = state["rules"]["key_bindings"].get(combo)
+        if action not in ACTIONS or action in ("key", "none"):
+            return False
+        combos_down[code] = action
+        if state["pointer"]:
+            do_action(action, 1, now, "keyboard")
+        log(f"key combination {combo}: {action}")
+        return True
 
 
     def to_screens(code, value):
@@ -959,6 +1001,8 @@ def main():
                 if node.role != "pointer":
                     # Observed only, unless typing goes to the desktop. With META_DASHBOARD=1,
                     # a Meta tap on any keyboard toggles the dashboard.
+                    if node.role == "passthrough" and etype == EV_KEY and code < BTN_MISC and key_binding(code, value, now):
+                        continue
                     if node.role == "passthrough" and etype == EV_KEY:
                         if value == 1 and code < BTN_MISC and now - last_typing >= 0.25:
                             last_typing = now

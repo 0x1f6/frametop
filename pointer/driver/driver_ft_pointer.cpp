@@ -17,6 +17,11 @@
 //   btn <name> <0|1>             name: trigger, b, x, system, joystick, a (a = claim the laser, no click)
 //   scroll <x> <y>               joystick deflection -1..1
 //   show | hide                  connect (take the hand role) or disconnect (give it back)
+//   role right|left|stylus       which role to hint while connected, from now on (the helper
+//                                sends POINTER_ROLE). A Frame controller in your hand takes
+//                                its hand's role back (it counts as used while held), so a
+//                                controller used beside the pointer needs the pointer on the
+//                                other hand, or on no hand at all
 //
 // The device starts disconnected, so it never holds a hand role at boot (holding
 // the right hand while SteamVR started left the Steam UI stuck loading). It
@@ -58,6 +63,7 @@ struct State {
 
     float yaw = 0.f, pitch = 0.f;  // degrees
     bool buttons[6] = {};
+    int32_t role = 0;  // "role": the hint while connected; 0 = the configured one
     float distance = 1.5f;
     float scrollX = 0.f, scrollY = 0.f;
 };
@@ -173,6 +179,7 @@ public:
             std::memcpy(snapshot.buttons, state_->buttons, sizeof snapshot.buttons);
             snapshot.scrollX = state_->scrollX;
             snapshot.scrollY = state_->scrollY;
+            snapshot.role = state_->role;
         }
 
         DriverPose_t pose{};
@@ -201,6 +208,10 @@ public:
             for (int i = 0; i < 3; ++i) pose.vecPosition[i] = eye[i];
             pose.qRotation = QuatFromYawPitch(float(std::atan2(-d[0], -d[2]) * 180.0 / M_PI),
                                               float(std::atan2(d[1], horizontal) * 180.0 / M_PI));
+        }
+        if (snapshot.role > 0 && snapshot.role != role_) {
+            role_ = snapshot.role;
+            if (hinted_) VRProperties()->SetInt32Property(container_, Prop_ControllerRoleHint_Int32, role_);
         }
         if (snapshot.visible != hinted_) {
             // Claim the hand before connecting; give it up when disconnecting.
@@ -328,6 +339,11 @@ private:
             state_.visible = false;
         } else if (std::strncmp(cmd, "show", 4) == 0) {
             state_.visible = true;
+        } else if (std::sscanf(cmd, "role %31s", name) == 1) {
+            state_.role = !std::strcmp(name, "left")     ? TrackedControllerRole_LeftHand
+                          : !std::strcmp(name, "right")  ? TrackedControllerRole_RightHand
+                          : !std::strcmp(name, "stylus") ? TrackedControllerRole_Stylus
+                                                         : state_.role;
         } else if (std::sscanf(cmd, "btn %31s %d", name, &v) == 2) {
             for (int i = 0; i < kButtons; ++i)
                 if (std::strcmp(name, kButtonNames[i]) == 0) state_.buttons[i] = v != 0;
