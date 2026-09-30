@@ -27,5 +27,13 @@ struct Camera {
 // name: slam_left, slam_right, upper_left, upper_right.
 bool load_calibration(std::map<std::string, Camera> &out, std::string &err);
 
+// The Arcturus color cameras (tracker/calib.py load_color has the conventions), for
+// fh-camd --with-color's images: luma at 1/scale size, recorded as color_video<N>. They're
+// keyed by those recorded names: left_node is passthrough_left, right_node
+// passthrough_right. crop_subtract: image x = sensor x - the calibration's cropRegion.x.
+// tools/check_color.py tells which node is which and which crop reading fits.
+bool load_color_calibration(std::map<std::string, Camera> &out, const std::string &left_node,
+                            const std::string &right_node, bool crop_subtract, int scale, std::string &err);
+
 // The point closest to several rays (weighted), and its rms distance to them.
 V3 triangulate(const V3 *origins, const V3 *dirs, const double *weights, int n, double *rms);

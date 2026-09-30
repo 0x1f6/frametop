@@ -56,6 +56,7 @@
 #define MAX_SLOTS   64
 #define MAX_INDEX   32
 #define NSAMP      512
+#define SEAM_LIMIT    2.0   /* seam_score above this: the frame carries the half-size copy */
 #define STALE_RELEARN 30    /* consecutive unchanged frames: the mapping changed      */
 #define MAX_RELEARNS  5     /* then assume XRService has new buffers, and exit        */
 #define RING_DIR   FH_RING_DIR
@@ -94,6 +95,10 @@ typedef struct {
     uint8_t        *ring_slots;
     uint64_t        frame_no;
     fh_ring_cam_t  *rc_dark;            /* --with-dark: its near-black frames */
+    bool            color;              /* Arcturus color: luma, downscaled, published */
+    unsigned        out_w, out_h;       /* image size in the ring                     */
+    uint64_t        last_pub_ns;        /* --color-fps pacing                         */
+    uint64_t        paced, seams;       /* color frames skipped: pacing, the half-size copy */
     uint8_t        *ring_dark;
     uint64_t        dark_no;
 
@@ -115,6 +120,9 @@ static const char *opt_sensor = "";
 static const char *opt_user   = NULL;
 static double      opt_dark   = 0.4;
 static bool        opt_with_dark;       /* also publish the near-black frames */
+static bool        opt_with_color;      /* also publish the Arcturus color cameras */
+static unsigned    opt_color_scale = 2; /* ... at 1/N size */
+static double      opt_color_fps = 30;  /* ... at most this often */
 static double      opt_status = 10.0;
 
 static volatile sig_atomic_t stop;
@@ -218,6 +226,9 @@ static void setup_camera(cam_t *c, xr_camera_t *cam, int pidfd)
     c->cam  = cam;
     xr_camera_layout(cam, &c->lay);
     c->need = (size_t)c->lay.pitch * c->lay.rows;
+    c->color = c->lay.fmt == XR_FMT_YUV420_10P;
+    c->out_w = c->color ? c->lay.width / opt_color_scale : c->lay.width;
+    c->out_h = c->color ? c->lay.height / opt_color_scale : c->lay.height;
 
     char sensor[XR_SENSOR_LEN];
     xr_slugify(cam->sensor, sensor, sizeof(sensor));
@@ -518,6 +529,60 @@ static int find_fresh(cam_t *c, uint64_t *out)
 
 /* ------------------------------------------------------------- publishing */
 
+/*
+ * A color frame's luma into the ring: the top 8 bits of every Nth pixel of every Nth row
+ * (MIPI RAW10 packs 4 pixels in 5 bytes, the high bytes first). Returns the mean of a
+ * sparse grid of the output.
+ */
+static double decode_luma(const cam_t *c, const uint8_t *src, uint8_t *dst, unsigned stride)
+{
+    unsigned s = opt_color_scale;
+    uint64_t sum = 0, n = 0;
+
+    for (unsigned y = 0; y < c->out_h; y++) {
+
+        const uint8_t *row = src + (size_t)y * s * c->lay.pitch;
+        uint8_t *out = dst + (size_t)y * stride;
+
+        for (unsigned x = 0; x < c->out_w; x++) {
+            unsigned sx = x * s;
+            out[x] = row[(sx >> 2) * 5 + (sx & 3)];
+        }
+
+        if (y % 8 == 0)
+            for (unsigned x = 0; x < c->out_w; x += 8, n++)
+                sum += out[x];
+    }
+
+    return n ? (double)sum / (double)n : 0.0;
+}
+
+/*
+ * The color module sometimes writes a warped half-size copy of the image into the
+ * top-left quarter of its buffers. Its bottom edge is a seam between the middle rows
+ * in the left half: this is ~1 for a clean frame and well above for one carrying the
+ * copy (from fh-camprobe --seam).
+ */
+static double seam_score(const cam_t *c, const uint8_t *p)
+{
+    const xr_layout_t *l = &c->lay;
+    unsigned r = l->height / 2 - 1;
+    double across = 0, below = 0;
+    int n = 0;
+
+    for (unsigned x = 8; x < l->width / 2 - 8; x += 2, n++) {
+
+        size_t off = (x / 4) * 5 + (x % 4);
+        int a = p[(size_t)r * l->pitch + off], b = p[(size_t)(r + 1) * l->pitch + off];
+        int d = p[(size_t)(r + 2) * l->pitch + off];
+
+        across += abs(a - b);
+        below  += abs(b - d);
+    }
+
+    return n ? (across / n + 0.5) / (below / n + 0.5) : 0;
+}
+
 /* Copy a frame into ring camera rc (the camera's own, or its dark twin). */
 static void publish(cam_t *c, fh_ring_cam_t *rc, uint8_t *slots, uint64_t *frame_no,
                     const uint8_t *src, uint32_t seq, uint64_t ts, uint64_t evtime, double mean)
@@ -532,8 +597,11 @@ static void publish(cam_t *c, fh_ring_cam_t *rc, uint8_t *slots, uint64_t *frame
 
     sample_words(src, c->need, before);
 
-    for (unsigned y = 0; y < c->lay.height; y++)
-        memcpy(dst + (size_t)y * rc->stride, src + (size_t)y * c->lay.pitch, c->lay.width);
+    if (c->color)
+        mean = decode_luma(c, src, dst, rc->stride);
+    else
+        for (unsigned y = 0; y < c->lay.height; y++)
+            memcpy(dst + (size_t)y * rc->stride, src + (size_t)y * c->lay.pitch, c->lay.width);
 
     sample_words(src, c->need, after);
 
@@ -575,6 +643,12 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
     }
 
     int slot = c->slot_of[index];
+
+    /* color runs at 60 fps: skip frames early enough that --color-fps holds, before any sync */
+    if (c->color && opt_color_fps > 0 && evtime - c->last_pub_ns < (uint64_t)(1e9 / opt_color_fps) - 3000000) {
+        c->paced++;
+        return;
+    }
 
     static uint64_t cur[NSAMP];
     uint64_t t0 = mono_ns();
@@ -619,6 +693,21 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
     memcpy(c->hist[0], cur, sizeof(cur));
     *filled_at(c, slot) = ++nfilled;
 
+    if (c->color) {     /* no dark frames here; skip the ones carrying the half-size copy */
+        if (seam_score(c, c->map[slot]) > SEAM_LIMIT) {
+            c->seams++;
+            c->rc->dropped++;
+        } else {
+            uint64_t t1 = mono_ns();
+            publish(c, c->rc, c->ring_slots, &c->frame_no, c->map[slot], seq, ts, evtime, 0);
+            c->copy_ns += mono_ns() - t1;
+            c->bright++;
+            c->last_pub_ns = evtime;
+        }
+        buf_sync(c->fd[slot], DMA_BUF_SYNC_END);
+        return;
+    }
+
     /*
      * The cameras alternate a normal exposure with a near-black one, so judge
      * each frame against this camera's recent brightest.
@@ -661,6 +750,29 @@ static void on_sample(void *ctx, const tp_sample_t *s)
 
 /* ------------------------------------------------------------ ring + user */
 
+/*
+ * Ring cameras: every camera (mono and color) at its own index, then with --with-dark a
+ * dark twin for each mono camera. Returns how many, with which camera each one shows.
+ */
+static int ring_layout(int cam_of[], bool dark_of[], int max)
+{
+    int n = 0;
+
+    for (int i = 0; i < ncams; i++) {
+        if (n < max) { cam_of[n] = i; dark_of[n] = false; }
+        n++;
+    }
+
+    if (opt_with_dark)
+        for (int i = 0; i < ncams; i++)
+            if (!cams[i].color) {
+                if (n < max) { cam_of[n] = i; dark_of[n] = true; }
+                n++;
+            }
+
+    return n;
+}
+
 /* The ring lives in a root-owned directory, so nobody can plant a file or link there. */
 static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
 {
@@ -673,11 +785,13 @@ static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
         die("%s must be a directory owned by root and writable only by root", RING_DIR);
 
     size_t len = sizeof(fh_ring_hdr_t);
-    int nring = opt_with_dark ? 2 * ncams : ncams;
+    int cam_of[FH_RING_MAX_CAMS];
+    bool dark_of[FH_RING_MAX_CAMS];
+    int nring = ring_layout(cam_of, dark_of, FH_RING_MAX_CAMS);
 
     for (int i = 0; i < nring; i++) {
-        cam_t *c = &cams[i % ncams];
-        size_t slot = sizeof(fh_ring_slot_t) + (size_t)c->lay.width * c->lay.height;
+        cam_t *c = &cams[cam_of[i]];
+        size_t slot = sizeof(fh_ring_slot_t) + (size_t)c->out_w * c->out_h;
         len += FH_RING_SLOTS * ((slot + 63) & ~(size_t)63);
     }
 
@@ -703,18 +817,18 @@ static uint8_t *ring_create(uid_t uid, gid_t gid, size_t *len_out)
 
     for (int i = 0; i < nring; i++) {
 
-        cam_t *c = &cams[i % ncams];
+        cam_t *c = &cams[cam_of[i]];
         fh_ring_cam_t *rc = &h->cams[i];
-        bool dark = i >= ncams;
+        bool dark = dark_of[i];
 
         snprintf(rc->sensor, sizeof(rc->sensor), "%s", c->cam->sensor);
         snprintf(rc->name, sizeof(rc->name), "%.26s%s", c->slug, dark ? "-dark" : "");
-        rc->flags       = dark ? FH_CAM_DARK : 0;
+        rc->flags       = dark ? FH_CAM_DARK : c->color ? FH_CAM_COLOR : 0;
         rc->node        = c->cam->node;
         rc->format      = FH_FMT_GREY8;
-        rc->width       = c->lay.width;
-        rc->height      = c->lay.height;
-        rc->stride      = c->lay.width;
+        rc->width       = c->out_w;
+        rc->height      = c->out_h;
+        rc->stride      = c->out_w;
         rc->nslots      = FH_RING_SLOTS;
         rc->slot_offset = off;
         rc->slot_bytes  = (sizeof(fh_ring_slot_t) + (size_t)rc->stride * rc->height + 63) & ~(size_t)63;
@@ -779,6 +893,15 @@ static void status(double secs)
 
     for (int i = 0; i < ncams; i++) {
         cam_t *c = &cams[i];
+        if (c->color) {
+            printf("  %s %s%.1f fps (paced %llu half-size copy %llu stale %llu torn %llu, sync %.2f ms decode %.2f ms)",
+                   c->slug, c->mapped ? "" : "learning ", (double)(c->bright - c->last_bright) / opt_status,
+                   (unsigned long long)c->paced, (unsigned long long)c->seams, (unsigned long long)c->stale,
+                   (unsigned long long)c->torn, c->nsync ? c->sync_ns / 1e6 / c->nsync : 0.0,
+                   c->bright ? c->copy_ns / 1e6 / c->bright : 0.0);
+            c->last_bright = c->bright;
+            continue;
+        }
         printf("  %s %s%.1f fps (dark %llu stale %llu torn %llu remapped %llu, sync %.2f ms copy %.2f ms)",
                c->slug, c->mapped ? "" : "learning ", (double)(c->bright - c->last_bright) / opt_status,
                (unsigned long long)c->dark, (unsigned long long)c->stale, (unsigned long long)c->torn,
@@ -804,6 +927,9 @@ static void usage(const char *argv0)
            "  --sensor S     only cameras whose sensor name contains S (default: all mono cameras)\n"
            "  --dark R       a frame dimmer than R x the camera's recent brightest is dark (default 0.4)\n"
            "  --with-dark    also publish the dark frames, as extra ring cameras flagged FH_CAM_DARK\n"
+           "  --with-color   also publish the Arcturus color cameras' luma, flagged FH_CAM_COLOR\n"
+           "  --color-scale N  ... at 1/N size (default 2: 986x1232)\n"
+           "  --color-fps F  ... at most F frames a second (default 30; they run at 60)\n"
            "  --status S     print a status line every S seconds, 0 for never (default 10)\n"
            "Frames go to " RING_FILE " (layout in fhring.h).\n", argv0);
 }
@@ -820,6 +946,12 @@ int main(int argc, char **argv)
             opt_dark = atof(argv[++i]);
         else if (!strcmp(argv[i], "--with-dark"))
             opt_with_dark = true;
+        else if (!strcmp(argv[i], "--with-color"))
+            opt_with_color = true;
+        else if (!strcmp(argv[i], "--color-scale") && i + 1 < argc && atoi(argv[i + 1]) >= 1)
+            opt_color_scale = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--color-fps") && i + 1 < argc)
+            opt_color_fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--status") && i + 1 < argc)
             opt_status = atof(argv[++i]);
         else {
@@ -858,6 +990,8 @@ int main(int argc, char **argv)
 
     printf("XRService pid %d\ncameras:\n", xr.pid);
 
+    int nmono = 0;
+
     for (int i = 0; i < xr.ncameras && ncams < MAX_CAMS; i++) {
 
         xr_camera_t *cam = &xr.cameras[i];
@@ -866,15 +1000,21 @@ int main(int argc, char **argv)
         xr_camera_layout(cam, &lay);
 
         if (lay.fmt == XR_FMT_GREY8 && strstr(cam->sensor, opt_sensor))
+            setup_camera(&cams[ncams++], cam, pidfd), nmono++;
+        else if (lay.fmt == XR_FMT_YUV420_10P && opt_with_color)
             setup_camera(&cams[ncams++], cam, pidfd);
     }
 
-    if (!ncams)
+    if (!nmono)
         die("no mono camera matches '%s'", opt_sensor);
 
-    if (opt_with_dark && 2 * ncams > FH_RING_MAX_CAMS)
-        die("--with-dark needs a ring camera per dark stream too: pick at most %d cameras with --sensor",
-            FH_RING_MAX_CAMS / 2);
+    int cam_of[FH_RING_MAX_CAMS];
+    bool dark_of[FH_RING_MAX_CAMS];
+    int nring = ring_layout(cam_of, dark_of, FH_RING_MAX_CAMS);
+
+    if (nring > FH_RING_MAX_CAMS)
+        die("%d ring cameras (mono, color, dark twins) but the ring holds %d: drop --with-dark or --with-color, "
+            "or pick cameras with --sensor", nring, FH_RING_MAX_CAMS);
 
     static tp_t tp;     /* large: pending-sample pool */
     tp_event_t *evs[1] = { &ev_dqbuf };

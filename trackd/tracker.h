@@ -90,6 +90,9 @@ public:
     // bright rooms the camera exposes for the room, the hands come out dim, and presence
     // dips under 0.5 for a frame at a time.
     void set_keep_presence(double p) { keep_presence_ = p; }
+    // One view's 3D hand: each landmark along its ray, as far as how big the palm looks says
+    // for a hand `scale` times the model's (Hand::scale). False if the palm is degenerate.
+    bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) const;
 
 private:
     struct View {
@@ -107,7 +110,6 @@ private:
         double size, rotation, weight, credit = 0;
     };
     void run_landmarks(const std::map<std::string, Image> &images, std::vector<View *> &views);
-    bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) const;
     bool hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns);
     double pair_cost(const View &a, const View &b) const;
     double size_misfit(const std::vector<const View *> &views, const V3 *pts) const;

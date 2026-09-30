@@ -5,6 +5,7 @@
 //   fh-tracker [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N]
 //              [--no-publish] [--record DIR] [--swap-sides] ... (--help lists them all)
 #include "io.h"
+#include "pinch.h"
 #include "record.h"
 
 #include <sched.h>
@@ -63,6 +64,7 @@ int main(int argc, char **argv) {
     // dim recording), but makes the landmarks jitter, so they get plain crops.
     Contrast palm_contrast, hand_contrast{Contrast::None};
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
+    PinchParams pinch_params;
     double record_for = 120;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -74,6 +76,9 @@ int main(int argc, char **argv) {
         else if (a == "--nice" && more) niceness = std::atoi(argv[++i]);
         else if (a == "--int8") int8 = true;
         else if (a == "--no-publish") publish = false;
+        else if (a == "--pinch-begin" && more) pinch_params.begin_m = std::atof(argv[++i]);
+        else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
+        else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
         else if (a == "--swap-sides") swap_sides = true;
         else if (a == "--record-only") track = publish = false;
         else if (a == "--ring" && more) ring_path = argv[++i];
@@ -96,11 +101,12 @@ int main(int argc, char **argv) {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (fh-camd's, or fh-ringplay's)\n"
+                        "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated]\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
                         "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for fh-replay; SIGUSR1\n"
                         "starts one in captures/rec-<time> next to trackd. --record-only records without tracking, so it\n"
                         "can run beside a tracking fh-tracker. With fh-camd --with-dark, recordings also get each\n"
-                        "camera's newest dark frame, as <name>_dk.\n",
+                        "camera's newest dark frame, as <name>_dk; with --with-color, the color cameras' as color_video<N>.\n",
                         argv[0]);
             return a == "--help" ? 0 : 1;
         }
@@ -115,6 +121,8 @@ int main(int argc, char **argv) {
     Ring ring;
     Nets nets;
     Publisher pub;
+    GesturePublisher gestures;
+    Pinch pinch(pinch_params);
     std::unique_ptr<Recorder> rec;
     uint64_t rec_start = 0;
     auto start_recording = [&](const std::string &dir, std::string &e) {
@@ -126,18 +134,23 @@ int main(int argc, char **argv) {
         return true;
     };
     if (!load_calibration(calib, err) || !ring.open(ring_path.c_str(), err) || !nets.load(models, int8, err) ||
-        (publish && !pub.open(err)) || (!record.empty() && !start_recording(record, err))) {
+        (publish && (!pub.open(err) || !gestures.open(pinch, err))) || (!record.empty() && !start_recording(record, err))) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
     if (!ring.alive()) return std::fprintf(stderr, "fh-camd isn't running (no heartbeat)\n"), 1;
 
     std::map<std::string, int> index;   // calibration name -> ring camera
-    // "<name>_dk" -> ring camera (fh-camd --with-dark): recorded only. Recorded names hold 15
-    // characters, so "upper_right_dark" wouldn't fit.
+    // Recorded only, not tracked: "<name>_dk" (fh-camd --with-dark) and "color_video<N>"
+    // (--with-color; which is left and right is up to tools/check_color.py). Recorded names
+    // hold 15 characters, so "upper_right_dark" wouldn't fit.
     std::map<std::string, int> dark;
     std::map<std::string, Camera> used;
     for (int i = 0; i < ring.cameras(); ++i) {
+        if (ring.camera(i).flags & FH_CAM_COLOR) {
+            dark["color_video" + std::to_string(ring.camera(i).node)] = i;
+            continue;
+        }
         // fh-camd's cameras by capture pipe; fh-ringplay's (no device) by the name it gives
         const char *name = camera_for_pipe(ring.camera(i).node);
         if (!name && ring.camera(i).node < 0) name = ring.camera(i).name;
@@ -231,9 +244,9 @@ int main(int argc, char **argv) {
             std::string e;
             if (!start_recording(dir + "/" + name, e)) std::fprintf(stderr, "%s\n", e.c_str());
         }
-        if (rec) {   // about 80 MB/s, twice that with dark frames
+        if (rec) {   // about 80 MB/s; dark frames double that, color frames add 70 MB/s
             if ((mono_ns() - rec_start) / 1e9 < record_for) {
-                for (auto &[name, i] : dark) {   // the newest dark frame of each camera, as it is
+                for (auto &[name, i] : dark) {   // the newest dark and color frames, as they are
                     fh_ring_slot_t meta;
                     const uint64_t n = ring.latest(i);
                     const auto &c = ring.camera(i);
@@ -256,8 +269,16 @@ int main(int argc, char **argv) {
         }
         if (!track || tmin < next_ns) continue;   // not needed yet at the current rate
         const auto hands = tracker.step(images, int64_t(tmin));
-        next_ns = tmin + uint64_t((tracker.interval() - 0.005) * 1e9);
-        if (publish) pub.write(hands, uint64_t(int64_t(tmin) - raw_minus_mono_ns()));
+        const uint64_t capture = uint64_t(int64_t(tmin) - raw_minus_mono_ns());   // CLOCK_MONOTONIC
+        pinch.update(hands, tracker.views_now(), int64_t(capture));
+        // a pinch down or closing gets the full rate, even while the palm holds still
+        next_ns = tmin + uint64_t((std::min(tracker.interval(), pinch.engaged() ? 1 / 30.0 : 1.0) - 0.005) * 1e9);
+        if (publish) pub.write(hands, capture), gestures.write(pinch, capture);
+        for (const Pinch::Event &e : pinch.events) {
+            std::printf("pinch %s %-5s d %.3f m at %+.3f %+.3f %+.3f\n", e.side ? "right" : "left ", e.what, e.distance,
+                        e.point[0], e.point[1], e.point[2]);
+            std::fflush(stdout);
+        }
         lat.push_back((mono_ns() - dq) / 1e6);
         hands_sum += double(hands.size());
         bool on_left = false, on_right = false;   // by where the wrist is, not the model's label
@@ -285,6 +306,12 @@ int main(int argc, char **argv) {
                             s.handoff_miss, s.dups, s.splits, s.created, s.merged, s.forgotten,
                             !rec ? "" : ("  recorded " + std::to_string(rec->written()) + " dropped " +
                                          std::to_string(rec->dropped())).c_str());
+            std::printf("        pinches: left %u right %u", pinch.side(0).begins, pinch.side(1).begins);
+            for (int k = 0; k < 2; ++k)
+                if (pinch.side(k).flags & FH_PINCH_TRACKED)
+                    std::printf("  %s %s d %.3f", k ? "right" : "left", pinch.side(k).flags & FH_PINCH_DOWN ? "DOWN" : "open",
+                                pinch.side(k).distance);
+            std::printf("\n");
             for (const Hand *h : hands)
                 std::printf("        hand %d %-5s views %d wrist %+.3f %+.3f %+.3f m  scale %.2f  speed %.2f m/s\n", h->id,
                             h->right() ? "right" : "left", h->nviews, h->pts[0][0], h->pts[0][1], h->pts[0][2], h->scale,
@@ -295,6 +322,10 @@ int main(int argc, char **argv) {
             lat.clear(), hands_sum = 0, resid_sum = 0, resid_n = 0, left_sets = right_sets = both_sets = 0;
         }
     }
-    if (publish) pub.write({}, mono_ns());
+    if (publish) {
+        pub.write({}, mono_ns());
+        pinch.release(int64_t(mono_ns()));   // a drag in progress ends, as lost
+        gestures.write(pinch, mono_ns());
+    }
     return 0;
 }

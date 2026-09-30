@@ -34,6 +34,10 @@ enum {
 enum {
     FH_CAM_DARK = 1u << 0,          /* the near-black exposures between this node's */
                                     /* normal frames (fh-camd --with-dark)          */
+    FH_CAM_COLOR = 1u << 1,         /* an Arcturus color camera's luma, downscaled  */
+                                    /* (fh-camd --with-color). Not synced with the  */
+                                    /* mono cameras, and capture_ns is on its own   */
+                                    /* clock: line it up with them by dqbuf_ns      */
 };
 
 typedef struct {

@@ -23,6 +23,7 @@ Options:
 - `--record-only`: record without tracking or publishing, so it can run beside the live tracker. Give it `--record DIR`; SIGUSR1 would reach both trackers. With `fh-camd --with-dark`, recordings also hold each camera's newest dark frame as `<name>_dk`, which doubles the rate.
 - `--keep-presence P`: the landmark presence a tracked view needs to stay tracked. New views always need 0.5. Default 0.5. Lowering it to 0.2 barely helped in the bright recording, because lost hands drop to near-zero presence.
 - `--ring PATH`: read frames from another ring, such as `fh-ringplay`'s.
+- Recording from a ring with color cameras (`fh-camd --with-color`) also saves each color camera's newest frame with every set, as `color_video<N>`. That adds about 70 MB/s. Run the recorder at normal I/O priority (not under `frame-job`, whose `ionice -c 3` stalled a 165 MB/s recording).
 
 The status line also says how often a hand was on each side (by where the wrist is), and why views and hands came and went: views lost (the landmark model stopped seeing the hand), handoff misses (a crop projected from the hand's 3D position found nothing), duplicates, splits (two views disagreed in 3D), and hands created, merged and forgotten.
 
@@ -35,6 +36,17 @@ fh-tracker started as a port of `tracker/hands.py`. Replaying recordings (below)
 - **Smoothing.** The published landmarks go through a One Euro filter: it smooths hard while the hand is still (tracking noise is several mm per frame) and hardly at all while it moves fast. The palm speed that sets the update rate (15 or 30 Hz) is the filtered one; the raw speed read about 0.25 m/s from noise alone.
 - **Capsules.** Forearms follow the hand's own axis, and nothing within 12 cm in front of the eyes is published.
 
+## Pinch
+
+For input, the Vision Pro way: look at something and pinch to click, pinch and move to drag, with the eye tracker doing the looking. fh-tracker detects a pinch per hand (`pinch.h`) and publishes it to `$XDG_RUNTIME_DIR/frame-hands/gestures`, next to the hands file. The layout, and how to read it without missing quick taps, is in `include/fh_gestures.h`.
+
+- A pinch begins when the thumb and index tips come within `--pinch-begin` (default 0.020 m). It ends when they open past `--pinch-end` (0.035 m) for 2 processed frames in a row, or when the hand stays lost for 0.25 s (flagged lost). While a pinch is down or closing, the tracker runs at the full 30 Hz.
+- The distance comes from MediaPipe's world landmarks (the model's own 3D hand pose, averaged over the hand's views, at the user's hand size). `--pinch-triangulated` uses the triangulated tips instead. On the two recordings without deliberate pinches, the world landmarks came under 2 cm in 0.2-1% of frames, against 3.3-4.5% for the triangulated tips. Typing still gave 2 pinches a minute, so a consumer should only act on a pinch while the gaze is on a target.
+- The pinch point is midway between the thumb and index tips. A drag is the pinch point now, minus where it was when the pinch began, both turned into the room with the HMD pose at their capture times.
+- `tools/watch_gestures.py` prints begins, ends and drag offsets live, and `--distance` prints each hand's distance. `fh-replay` runs the same detector and reports pinch counts. Its `--timeline` gets each begin, end and lost event, and both distance measures per set.
+
+Frametop's pointer helper is the natural consumer. Its gaze mode already treats a press as "stop where the gaze put it, drag onto the target, click on release", and "hold still for half a second, then move" as a drag. A pinch begin would be the press, the end the release, and the pinch point's movement the drag.
+
 ## Replay
 
 `fh-replay DIR` runs a recording through the tracker with the live scheduling and reports how well it kept the hands: hands per set, left and right coverage, track lengths, and the same reasons as the status line.
@@ -46,6 +58,8 @@ trackd/fh-replay captures/rec-20260929-120000 --oracle 10 --timeline /tmp/tl.txt
 - `--oracle N`: every N-th set, also search every tile of every camera, and report how often the tracker had the hands that full search could find.
 - `--slow F`: live, the tracker skips sets that arrive while it's busy. Replay counts each step's time times F as busy (default 1; the headset is busier live).
 - `--timeline FILE`: a line per processed set and hand.
+- `--cams mono|color|all`: which cameras to track with (default `mono`). `color` tracks with the Arcturus pair alone, for comparing it with the IR cameras on the same recording. It needs a recording made with `fh-camd --with-color`. `--color-left NODE` (`color_video0` or `color_video3`) and `--color-crop subtract|none` say how the module's calibration maps onto the images; `tools/check_color.py` finds out. Color frames repeat across sets (the newest one is saved with each), and repeats are skipped.
+- `--depth FILE`: a line per hand per processed set for `tools/depth_report.py`, which measures the depth without ground truth. It reports how the hands were seen (by the two lower cameras, a lower and an upper one, or one camera), the noise along the line of sight against across it, each camera's one-view distance against the triangulated one, and what a camera dropping out would do to the distance.
 
 ## Playing a recording live
 

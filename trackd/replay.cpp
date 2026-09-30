@@ -13,8 +13,19 @@
 // --timeline: per processed set, a line per hand (time, id, side, views, wrist) and per view
 //             (hand, camera, presence, next crop, set index).
 // --keep-presence P: landmark presence a tracked view needs to stay (default 0.5, as new ones).
+// --pinch-begin M, --pinch-end M, --pinch-triangulated: the pinch detector (trackd/pinch.h);
+//             the timeline gets its begin/end/lost events and both distance measures per set.
+// --cams mono|color|all: which cameras to track with (default mono). color and all need a
+//             recording made with fh-camd --with-color; --color-left NODE (color_video0 or
+//             color_video3) and --color-crop subtract|none say how its calibration maps
+//             (tools/check_color.py).
 // --contrast: how the palm search's and the landmark model's crops are equalized
 //             (default clahe:2/none, as fh-tracker).
+// --depth FILE: per processed set, a line per hand for tools/depth_report.py: its views'
+//             cameras, triangulation residual, hand scale, measured and published palm, and
+//             each view's one-view palm (Tracker::single_view at the hand's scale). The
+//             header has each camera's centre and focal length.
+#include "pinch.h"
 #include "record.h"
 #include "tracker.h"
 
@@ -57,17 +68,26 @@ int main(int argc, char **argv) {
     bool cost = false;
     Contrast palm_contrast, hand_contrast{Contrast::None};   // as fh-tracker's
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
-    std::string timeline, models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
+    PinchParams pinch_params;
+    std::string use = "mono", color_left = "color_video0", color_crop = "subtract";
+    std::string timeline, depth, models =std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         const bool more = i + 1 < argc;
         if (a == "--oracle" && more) oracle = std::atoi(argv[++i]);
         else if (a == "--slow" && more) slow = std::atof(argv[++i]);
         else if (a == "--timeline" && more) timeline = argv[++i];
+        else if (a == "--depth" && more) depth = argv[++i];
         else if (a == "--threads" && more) threads = std::atoi(argv[++i]);
         else if (a == "--models" && more) models = argv[++i];
         else if (a == "--cost") cost = true;
         else if (a == "--keep-presence" && more) keep_presence = std::atof(argv[++i]);
+        else if (a == "--cams" && more) use = argv[++i];
+        else if (a == "--pinch-begin" && more) pinch_params.begin_m = std::atof(argv[++i]);
+        else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
+        else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
+        else if (a == "--color-left" && more) color_left = argv[++i];
+        else if (a == "--color-crop" && more) color_crop = argv[++i];
         else if (a == "--contrast" && more) {
             if (!Contrast::parse_pair(argv[++i], palm_contrast, hand_contrast))
                 return std::fprintf(stderr, "--contrast MODE or PALM/HAND, each clahe[:CLIP]|none|stretch\n"), 1;
@@ -88,14 +108,30 @@ int main(int argc, char **argv) {
     std::vector<fh_set_cam_t> cams;
     std::vector<std::vector<uint8_t>> px;
     if (!in.next(cams, px)) return std::fprintf(stderr, "%s: no sets\n", dir.c_str()), 1;
+    if (use != "mono" && use != "color" && use != "all") return std::fprintf(stderr, "--cams mono|color|all\n"), 1;
+    if (use != "mono") {
+        std::vector<std::string> nodes;
+        for (auto &c : cams)
+            if (std::string(c.name).rfind("color_video", 0) == 0) nodes.push_back(c.name);
+        if (nodes.size() != 2) return std::fprintf(stderr, "%s: no color cameras (fh-camd --with-color)\n", dir.c_str()), 1;
+        const std::string right = nodes[0] == color_left ? nodes[1] : nodes[0];
+        if (!load_color_calibration(calib, color_left, right, color_crop == "subtract", 2, err))
+            return std::fprintf(stderr, "%s\n", err.c_str()), 1;
+    }
     std::map<std::string, Camera> used;
-    for (auto &c : cams)
-        if (calib.count(c.name)) used[c.name] = calib[c.name];
+    for (auto &c : cams) {
+        const bool color = std::string(c.name).rfind("color_", 0) == 0;
+        if (calib.count(c.name) && (use == "all" || color == (use == "color"))) used[c.name] = calib[c.name];
+    }
     Pool pool(threads, {2, 3, 4});
     Tracker tracker(used, nets, pool);
     tracker.set_keep_presence(keep_presence);
+    FILE *dp = depth.empty() ? nullptr : std::fopen(depth.c_str(), "w");
+    if (dp)
+        for (auto &[name, c] : used)
+            std::fprintf(dp, "# cam %s %.4f %.4f %.4f %.1f\n", name.c_str(), c.origin[0], c.origin[1], c.origin[2], c.fx);
 
-    uint64_t t0 = 0, busy_until = 0, next_ns = 0;
+    uint64_t t0 = 0, busy_until = 0, next_ns = 0, t_prev = 0;
     int index = -1;   // of the set in the recording
     int nsets = 0, processed = 0, left = 0, right = 0, both = 0, hist[3] = {};
     std::map<int, Track> tracks;
@@ -108,14 +144,27 @@ int main(int argc, char **argv) {
     // mm (steady motion cancels out; what's left is noise and real acceleration)
     std::vector<double> jit_raw, jit_sm;
     int near_face = 0, hand_updates = 0;   // published palms within 20 cm of the eyes
+    Pinch pinch(pinch_params);
+    double pinch_begin_ts[2] = {0, 0};
+    std::vector<double> pinch_len[2];   // seconds, per side
+    int pinch_lost = 0;
     do {
         std::map<std::string, Image> images;
-        uint64_t t = UINT64_MAX;
+        // the set's time: the mono cameras' when they're used (the color ones run on another
+        // clock); color frames can repeat across sets, so a set that doesn't move time on is skipped
+        uint64_t t = UINT64_MAX, t_color = UINT64_MAX;
         for (size_t i = 0; i < cams.size(); ++i) {
             if (!used.count(cams[i].name)) continue;
             images[cams[i].name] = {px[i].data(), int(cams[i].width), int(cams[i].height), int(cams[i].width)};
-            t = std::min(t, cams[i].capture_ns);
+            uint64_t &ti = std::string(cams[i].name).rfind("color_", 0) == 0 ? t_color : t;
+            ti = std::min(ti, cams[i].capture_ns);
         }
+        if (t == UINT64_MAX) t = t_color;
+        if (t <= t_prev) {
+            ++index;
+            continue;
+        }
+        t_prev = t;
         if (!t0) t0 = t;
         const double ts = (t - t0) / 1e9;
         ++index;
@@ -134,7 +183,18 @@ int main(int argc, char **argv) {
             }
             busy_ms += ms;
             busy_until = t + uint64_t(ms * slow * 1e6) + 3'000'000;   // + the ring hand-off
-            next_ns = t + uint64_t((tracker.interval() - 0.005) * 1e9);
+            const std::vector<Seen> seen = tracker.views_now();
+            pinch.update(out, seen, int64_t(t));
+            next_ns = t + uint64_t((std::min(tracker.interval(), pinch.engaged() ? 1 / 30.0 : 1.0) - 0.005) * 1e9);
+            for (const Pinch::Event &e : pinch.events) {
+                if (std::string(e.what) == "begin") pinch_begin_ts[e.side] = ts;
+                else pinch_len[e.side].push_back(ts - pinch_begin_ts[e.side]), pinch_lost += std::string(e.what) == "lost";
+                if (tl) std::fprintf(tl, "%.3f pinch %s %s d %.3f point %+.3f %+.3f %+.3f\n", ts, e.side ? "R" : "L", e.what,
+                                     e.distance, e.point[0], e.point[1], e.point[2]);
+            }
+            if (tl && (pinch.world_d[0] >= 0 || pinch.world_d[1] >= 0))   // both measures, for choosing one
+                std::fprintf(tl, "%.3f pinchd L world %.3f tri %.3f R world %.3f tri %.3f\n", ts, pinch.world_d[0],
+                             pinch.tri_d[0], pinch.world_d[1], pinch.tri_d[1]);
             ++processed;
             last_out = out;
             bool l = false, r = false;
@@ -158,10 +218,28 @@ int main(int argc, char **argv) {
                 if (tl)
                     std::fprintf(tl, "%.3f %d %s %d %+.3f %+.3f %+.3f\n", ts, h->id, h->pts[0][0] < 0 ? "L" : "R", h->nviews,
                                  h->pts[0][0], h->pts[0][1], h->pts[0][2]);
+                if (dp) {
+                    std::vector<const Seen *> vs;
+                    for (const Seen &v : seen)
+                        if (v.hand == h->id) vs.push_back(&v);
+                    std::sort(vs.begin(), vs.end(), [](const Seen *a, const Seen *b) { return a->cam < b->cam; });
+                    std::string names;
+                    for (const Seen *v : vs) names += (names.empty() ? "" : "+") + v->cam;
+                    std::fprintf(dp, "%.4f %d %s %d %s %.4f %.3f %.4f %.4f %.4f %.4f %.4f %.4f", ts, h->id,
+                                 h->pts[0][0] < 0 ? "L" : "R", h->nviews, names.empty() ? "-" : names.c_str(), h->residual,
+                                 h->scale, raw[0], raw[1], raw[2], sm[0], sm[1], sm[2]);
+                    for (const Seen *v : vs) {
+                        V3 mono[21];
+                        const bool ok = tracker.single_view(used.at(v->cam), v->lm, h->scale, mono);
+                        const V3 p = ok ? palm(mono) : V3{NAN, NAN, NAN};
+                        std::fprintf(dp, " %s %.2f %.4f %.4f %.4f", v->cam.c_str(), v->lm.presence, p[0], p[1], p[2]);
+                    }
+                    std::fputc('\n', dp);
+                }
             }
             if (tl && out.empty()) std::fprintf(tl, "%.3f -\n", ts);
             if (tl)
-                for (const Seen &v : tracker.views_now())
+                for (const Seen &v : seen)
                     std::fprintf(tl, "%.3f   view %d %s presence %.2f roi %.0f %.0f %.0f %.3f  set %d\n", ts, v.hand, v.cam.c_str(),
                                  v.lm.presence, v.roi.center[0], v.roi.center[1], v.roi.size, v.roi.rotation, index);
             left += l, right += r, both += l && r;
@@ -187,6 +265,7 @@ int main(int argc, char **argv) {
         }
     } while (in.next(cams, px));
     if (tl) std::fclose(tl);
+    if (dp) std::fclose(dp);
 
     const double secs = nsets > 1 ? nsets / 30.0 : 0;
     const Stats &s = tracker.stats;
@@ -221,6 +300,11 @@ int main(int argc, char **argv) {
                         r[r.size() / 10], r[r.size() / 2], r[r.size() * 9 / 10], step[step.size() / 2], step[step.size() * 9 / 10]);
     }
     std::printf("palms within 20 cm of the eyes: %d of %d hand updates\n", near_face, hand_updates);
+    for (int k = 0; k < 2; ++k) std::sort(pinch_len[k].begin(), pinch_len[k].end());
+    std::printf("pinches (%s, %.3f/%.3f m): left %zu (median %.2f s), right %zu (median %.2f s), %d ended by losing the hand\n",
+                pinch_params.triangulated ? "triangulated tips" : "world landmarks", pinch_params.begin_m, pinch_params.end_m,
+                pinch_len[0].size(), pinch_len[0].empty() ? 0 : pinch_len[0][pinch_len[0].size() / 2], pinch_len[1].size(),
+                pinch_len[1].empty() ? 0 : pinch_len[1][pinch_len[1].size() / 2], pinch_lost);
     std::sort(jit_raw.begin(), jit_raw.end());
     std::sort(jit_sm.begin(), jit_sm.end());
     if (!jit_raw.empty())

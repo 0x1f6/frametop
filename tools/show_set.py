@@ -6,7 +6,8 @@ SET is a set index (fh-replay's timeline gives them). With --timeline (fh-replay
 --timeline), each camera shows the tracker's views at that set: the crop for the next
 frame, labelled with the hand and presence. Recordings made with fh-camd --with-dark get
 a second row: each camera's latest dark frame (<name>_dk), stretched to be visible and
-labelled with its mean brightness. Writes OUT/set_<n>.jpg (default /tmp).
+labelled with its mean brightness. Recordings made with fh-camd --with-color get a row of
+the color cameras (color_video<N>). Writes OUT/set_<n>.jpg (default /tmp).
 """
 import argparse
 import os
@@ -72,31 +73,39 @@ def dark_tile(frame, shape, name):
     return img
 
 
+def view_tile(px, name, views):
+    """A frame, CLAHE'd, with the tracker's views on it, 512 px high."""
+    img = cv2.cvtColor(cv2.createCLAHE(2.0, (8, 8)).apply(px), cv2.COLOR_GRAY2BGR)
+    for v in views:
+        if v['cam'] != name:
+            continue
+        c, s, r = v['c'], v['size'], v['rot']
+        box = cv2.boxPoints(((c[0], c[1]), (s, s), np.degrees(r)))
+        col = (0, 255, 0) if v['presence'] >= 0.5 else (0, 0, 255)
+        cv2.polylines(img, [box.astype(np.int32)], True, col, 2)
+        cv2.putText(img, 'h%d %.2f' % (v['hand'], v['presence']), (int(c[0] - s / 2), int(c[1] - s / 2) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+    cv2.putText(img, name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+    scale = 512 / img.shape[0]
+    return cv2.resize(img, (int(img.shape[1] * scale), 512))
+
+
 def draw(images, views):
+    """Rows: the mono cameras; their dark frames, if recorded; the color cameras, if recorded."""
     tiles, dark = [], []
     for name in ORDER:
         if name not in images:
             continue
-        px = images[name][0]
-        clahe = cv2.createCLAHE(2.0, (8, 8)).apply(px)
-        img = cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)
-        for v in views:
-            if v['cam'] != name:
-                continue
-            c, s, r = v['c'], v['size'], v['rot']
-            box = cv2.boxPoints(((c[0], c[1]), (s, s), np.degrees(r)))
-            col = (0, 255, 0) if v['presence'] >= 0.5 else (0, 0, 255)
-            cv2.polylines(img, [box.astype(np.int32)], True, col, 2)
-            cv2.putText(img, 'h%d %.2f' % (v['hand'], v['presence']), (int(c[0] - s / 2), int(c[1] - s / 2) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
-        cv2.putText(img, name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
-        scale = 512 / img.shape[0]
-        tiles.append(cv2.resize(img, (int(img.shape[1] * scale), 512)))
+        tiles.append(view_tile(images[name][0], name, views))
         dark.append(dark_tile(images.get(name + '_dk'), tiles[-1].shape[:2], name))
-    out = np.hstack(tiles)
+    rows = [np.hstack(tiles)]
     if any(k.endswith('_dk') for k in images):
-        out = np.vstack([out, np.hstack(dark)])
-    return out
+        rows.append(np.hstack(dark))
+    color = sorted(k for k in images if k.startswith('color_'))
+    if color:
+        rows.append(np.hstack([view_tile(images[k][0], k, views) for k in color]))
+    width = max(r.shape[1] for r in rows)
+    return np.vstack([np.pad(r, ((0, 0), (0, width - r.shape[1]), (0, 0))) for r in rows])
 
 
 def main():

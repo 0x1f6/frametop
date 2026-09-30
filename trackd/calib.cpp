@@ -6,6 +6,8 @@
 #include <algorithm>
 
 #include <fstream>
+#include <iterator>
+#include <memory>
 
 namespace {
 
@@ -127,6 +129,55 @@ bool load_calibration(std::map<std::string, Camera> &out, std::string &err) {
     }
     if (out.empty()) err = "no cameras in /persist/xrservice.json";
     return !out.empty();
+}
+
+bool load_color_calibration(std::map<std::string, Camera> &out, const std::string &left_node,
+                            const std::string &right_node, bool crop_subtract, int scale, std::string &err) {
+    // The module's EEPROM: some binary, then the calibration as JSON (world-readable)
+    const std::string path = device_path("/sys/devices/platform/soc@0/ac15000.cci/i2c-0/0-0050/eeprom");
+    std::ifstream f(path, std::ios::binary);
+    const std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const size_t key = raw.find("\"alignment_method\"");
+    const size_t start = key == std::string::npos ? key : raw.rfind('{', key);
+    Json::Value rig, dev;
+    std::string e;
+    std::unique_ptr<Json::CharReader> reader(Json::CharReaderBuilder().newCharReader());
+    if (start == std::string::npos || !reader->parse(raw.data() + start, raw.data() + raw.size(), &rig, &e))
+        return err = path + ": no calibration JSON " + e, false;
+    if (!read_json(device_path("/persist/device_config.json").c_str(), dev, err)) return false;
+    double cad_from_head[4][4], head_from_cad[4][4];
+    pose(dev["head"], 1.0, cad_from_head);
+    invert_rigid(cad_from_head, head_from_cad);
+    constexpr int kValidWidth = 1972;   // pixels per row XRService's buffers deliver (of 2464)
+    int n = 0;
+    for (const Json::Value &c : rig["cameras"]) {
+        const std::string source = c["sourceCamera"].asString();
+        const std::string name = source == "passthrough_left" ? left_node : source == "passthrough_right" ? right_node : "";
+        if (name.empty()) continue;
+        Camera cam;
+        cam.name = name;
+        cam.width = kValidWidth / scale, cam.height = c["height"].asInt() / scale;
+        const double dx = crop_subtract ? c["cropRegion"]["x"].asDouble() : 0, dy = crop_subtract ? c["cropRegion"]["y"].asDouble() : 0;
+        for (const Json::Value &in : c["intrinsics"]) {
+            if (in["cameraModel"].asString() != "kb") continue;
+            // integer pixel centres: sensor u -> image (u - crop + 0.5) / scale - 0.5
+            cam.fx = in["fx"].asDouble() / scale, cam.fy = in["fy"].asDouble() / scale;
+            cam.cx = (in["cx"].asDouble() - dx + 0.5) / scale - 0.5, cam.cy = (in["cy"].asDouble() - dy + 0.5) / scale - 0.5;
+            cam.k[0] = in["k1"].asDouble(), cam.k[1] = in["k2"].asDouble();
+            cam.k[2] = in["k3"].asDouble(), cam.k[3] = in["k4"].asDouble();
+        }
+        double cad_from_cam[4][4], head_from_cam[4][4];
+        pose(c["extrinsics"], 1e-3, cad_from_cam);
+        mul(head_from_cad, cad_from_cam, head_from_cam);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) cam.R[i][j] = head_from_cam[i][j];
+            cam.origin[i] = head_from_cam[i][3];
+        }
+        out[name] = cam;
+        ++n;
+    }
+    if (n != 2) err = path + ": expected passthrough_left and passthrough_right";
+    return n == 2;
 }
 
 V3 triangulate(const V3 *origins, const V3 *dirs, const double *weights, int n, double *rms) {

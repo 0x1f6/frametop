@@ -33,7 +33,9 @@ double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
 }
 
-bool is_slam(const Camera &c) { return c.name.rfind("slam", 0) == 0; }
+bool is_color(const Camera &c) { return c.name.rfind("color", 0) == 0; }   // Arcturus, 145 degree image circle
+// The wide cameras: the side ones and the color ones
+bool is_slam(const Camera &c) { return c.name.rfind("slam", 0) == 0 || is_color(c); }
 
 V2 palm_centre(const Landmarks &lm) { return lm.pts[9]; }
 
@@ -139,7 +141,7 @@ double Tracker::interval() const {
 bool Tracker::inside(const Camera &cam, V2 uv) const {
     const double m = 0.12;
     return uv[0] >= m * cam.width && uv[0] <= (1 - m) * cam.width && uv[1] >= m * cam.height &&
-           uv[1] <= (1 - m) * cam.height && cam.off_axis(uv) < (is_slam(cam) ? 80.0 : 75.0);
+           uv[1] <= (1 - m) * cam.height && cam.off_axis(uv) < (is_color(cam) ? 70.0 : is_slam(cam) ? 80.0 : 75.0);
 }
 
 void Tracker::run_landmarks(const std::map<std::string, Image> &images, std::vector<View *> &views) {

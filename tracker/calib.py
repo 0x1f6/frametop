@@ -18,6 +18,9 @@ import numpy as np
 
 XRSERVICE_JSON = '/persist/xrservice.json'
 DEVICE_JSON = '/persist/device_config.json'
+# The Arcturus color module's EEPROM: some binary, then its calibration as JSON (world-readable)
+ARCTURUS_EEPROM = '/sys/devices/platform/soc@0/ac15000.cci/i2c-0/0-0050/eeprom'
+ARCTURUS_WIDTH = 1972   # valid pixels per row that XRService's buffers deliver (of 2464)
 
 
 def _pose(d, scale=1.0):
@@ -102,6 +105,36 @@ def load(xrservice=XRSERVICE_JSON, device=DEVICE_JSON):
         cam0_from_cam = _pose(c['extrinsics'], 1e-3)
         cams[c['sourceCamera']] = Camera(c['sourceCamera'], c['width'], c['height'], kb,
                                          head_from_cad @ cad_from_cam0 @ cam0_from_cam)
+    return cams
+
+
+def load_color(eeprom=ARCTURUS_EEPROM, device=DEVICE_JSON, scale=2, crop='subtract'):
+    """{"passthrough_left"/"passthrough_right": Camera} for the Arcturus color cameras, posed in
+    the head frame, for fh-camd --with-color's images (luma at 1/scale size).
+
+    Their calibration is in the CAD frame (mm) with pixel coordinates on the full 2464x2464
+    sensor; each camera also has a cropRegion. crop says how that maps to the delivered
+    image: 'subtract' (image x = sensor x - cropRegion.x) or 'none'. tools/check_color.py
+    tells which fits.
+    """
+    with open(eeprom, 'rb') as f:
+        raw = f.read()
+    i = raw.rfind(b'{', 0, raw.find(b'"alignment_method"'))
+    rig, _ = json.JSONDecoder().raw_decode(raw[i:].decode('latin1'))
+    with open(device) as f:
+        dev = json.load(f)
+    head_from_cad = np.linalg.inv(_pose(dev['head']))
+    cams = {}
+    for c in rig['cameras']:
+        kb = dict(next(k for k in c['intrinsics'] if k['cameraModel'] == 'kb'))
+        region = c.get('cropRegion', {}) if crop == 'subtract' else {}
+        # integer pixel centres: sensor u -> image (u - crop + 0.5) / scale - 0.5
+        kb['cx'] = (kb['cx'] - region.get('x', 0) + 0.5) / scale - 0.5
+        kb['cy'] = (kb['cy'] - region.get('y', 0) + 0.5) / scale - 0.5
+        kb['fx'] /= scale
+        kb['fy'] /= scale
+        cams[c['sourceCamera']] = Camera(c['sourceCamera'], ARCTURUS_WIDTH // scale, c['height'] // scale, kb,
+                                         head_from_cad @ _pose(c['extrinsics'], 1e-3))
     return cams
 
 
