@@ -24,7 +24,7 @@ packages=(
   # Frametop Input Settings app (Kirigami, PySide6)
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)
-  krdp freerdp tigervnc-x11-server
+  krdp freerdp tigervnc-x11-server xrandr
   # diagnostics and remote UI testing
   wayland-utils xorg-x11-server-Xvfb ImageMagick xdotool
 )

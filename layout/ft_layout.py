@@ -50,6 +50,7 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout scale                    per-screen scale, positions (as the screens are around
                                      you), and primary to KWin
   ft-layout screen-args              ft-screens' --screen arguments for the session script
+  ft-layout remote-view              the primary screen's place in the workspace, for the VNC bridge
   ft-layout toggle                   hide or show all screens (ft-screens)
   ft-layout pin all|N left|right|head  pin screens to a wrist or your head as they are;
                                      unpin all|N
@@ -754,6 +755,13 @@ def send_scales(outs):
         log(f"scale: {e}")
 
 
+def logical_size(o):
+    """An output's size in logical units. kscreen's "size" is in pixels (already turned for a
+    rotation); positions are logical, the pixels divided by the scale (KWin rounds up)."""
+    s = float(o.get("scale", 1))
+    return (math.ceil(o["size"]["width"] / s - 1e-6), math.ceil(o["size"]["height"] / s - 1e-6))
+
+
 def apply_scales():
     """Per-screen scale and rotation, positions side by side, and the primary screen (the
     taskbar goes there) to KWin, which keeps them in the session's config."""
@@ -780,11 +788,7 @@ def apply_scales():
     # the pointer and dragged windows cross to the screen you see next to this one.
     outs = outputs(env)
     send_scales(outs)
-    # kscreen's "size" is in pixels (already turned for a rotation); positions are in
-    # logical units, the pixels divided by the scale (KWin rounds up).
-    sizes = [(math.ceil(o["size"]["width"] / float(o.get("scale", 1)) - 1e-6),
-              math.ceil(o["size"]["height"] / float(o.get("scale", 1)) - 1e-6))
-             for o in outs if o.get("size")]
+    sizes = [logical_size(o) for o in outs if o.get("size")]
     if len(sizes) == len(outs) and outs:
         columns = arrangement(len(outs))
         if not columns or sorted(i for c in columns for i in c) != list(range(len(outs))):
@@ -818,6 +822,24 @@ def kwin_follow():
         log(f"kwin: {e}")
 
 
+def remote_view():
+    """Where the primary screen sits in the workspace (all screens' bounding box), in
+    logical units: "x y width height workspace_width workspace_height". The VNC bridge
+    (session/vnc-bridge.sh) shows that part of krdp's workspace stream."""
+    env = nested_env()
+    if not env:
+        raise RuntimeError("the Frametop desktop isn't running")
+    outs = [o for o in outputs(env) if o.get("enabled", True) and o.get("size") and o.get("pos")]
+    if not outs:
+        raise RuntimeError("the Frametop desktop has no screens yet")
+    rects = [(o["pos"]["x"], o["pos"]["y"], *logical_size(o)) for o in outs]
+    left, top = min(r[0] for r in rects), min(r[1] for r in rects)
+    right, bottom = max(r[0] + r[2] for r in rects), max(r[1] + r[3] for r in rects)
+    p = next((i for i, o in enumerate(outs) if o.get("priority") == 1), 0)
+    x, y, w, h = rects[p]
+    return f"{x - left} {y - top} {w} {h} {right - left} {bottom - top}"
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print(__doc__.split("Usage")[1].split("\n", 1)[1])
@@ -829,6 +851,8 @@ def main(argv):
             print(json.dumps(plan(layout, screen_count(layout))))
         elif cmd == "screen-args":
             print(screen_args())
+        elif cmd == "remote-view":
+            print(remote_view())
         elif cmd == "toggle":
             log(screens_socket().ask("toggle"))
         elif cmd == "layouts":

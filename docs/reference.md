@@ -185,13 +185,13 @@ Details, options, and the recording and replay tools are in [hands/README.md](..
 
 ## Remote desktop over VNC
 
-With `REMOTE=1` in the config (`desktops.sh remote on`), the desktop is also served over VNC, for RealVNC Viewer or macOS Screen Sharing. `desktops.sh remote info` prints the address and password.
+With `REMOTE=1` in the config (`desktops.sh remote on`), the desktop's primary screen (the one with the taskbar) is also served over VNC, at that screen's resolution, for RealVNC Viewer or macOS Screen Sharing. `desktops.sh remote info` prints the address and password.
 
 It listens on port 5900 on the Frame's Tailscale address only, not the LAN, so it needs Tailscale on the Frame ([deck-tailscale](https://github.com/tailscale-dev/deck-tailscale)). VNC authentication has no encryption of its own, so viewers warn about it, but the tailnet encrypts the traffic. The password is in `~/.config/frametop-remote/vnc-password` and VNC limits it to 8 characters. To change it, delete that folder and restart the desktop.
 
-No VNC server can capture KWin on SteamOS directly: `krfb` needs `xdg-desktop-portal-kde`, which SteamOS doesn't ship, and `wayvnc` only works with wlroots compositors. So `session/remote-desktop.sh` captures the desktop with KDE's `krdpserver --plasma` on `127.0.0.1:3390`, and `session/vnc-bridge.sh` runs TigerVNC's `Xvnc` on display `:20` with a full-screen FreeRDP client inside it and serves that. Both run in the `dev` container, and the extra hop adds a little latency.
+No VNC server can capture KWin on SteamOS directly: `krfb` needs `xdg-desktop-portal-kde`, which SteamOS doesn't ship, and `wayvnc` only works with wlroots compositors. So `session/remote-desktop.sh` captures the desktop with KDE's `krdpserver --plasma` on `127.0.0.1:3390`, and `session/vnc-bridge.sh` runs TigerVNC's `Xvnc` on display `:20` with a FreeRDP client inside it and serves that. Both run in the `dev` container, and the extra hop adds a little latency. krdp streams every screen; the VNC screen is the primary's size, and the FreeRDP window is shifted so the primary fills it (`ft-layout remote-view` gives the offset). krdp's own `--monitor` would stream just one screen, but it maps the pointer as if that screen sat at 0,0, so clicks would miss. When the layout changes, the VNC screen resizes and FreeRDP reconnects within a few seconds.
 
-With remote access on, the nested KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1`, so any app in the Frametop desktop could capture its screen or inject input. This applies only to that desktop, not the stock one. Port 3389 is SteamOS's own `xrdp`, which starts a separate X11 session rather than showing the VR desktop.
+With remote access on, the nested KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1` and `KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1`, so any app in the Frametop desktop could capture its screens or inject input. The second one lets scripts take screenshots through KWin's `org.kde.KWin.ScreenShot2` D-Bus interface. This applies only to that desktop, not the stock one. Port 3389 is SteamOS's own `xrdp`, which starts a separate X11 session rather than showing the VR desktop.
 
 ## Limits
 
