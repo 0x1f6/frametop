@@ -3,7 +3,7 @@
 The correction models (Correction: the calibration fitted from calibration dots;
 LiveCorrection: what clicks teach on the fly, on top of it), the smoothing filters, the
 blink and dropout filter for one look at a spot, EyeFallback (the gaze from one eye while
-the tracker has lost the other), and SteamEyeLog, which follows SteamVR's eye tracking log. Angles are head-relative degrees (yaw +left, pitch +up), as ft-gaze
+the tracker has lost the other), EyeWeights (how much each eye counts), and SteamEyeLog, which follows SteamVR's eye tracking log. Angles are head-relative degrees (yaw +left, pitch +up), as ft-gaze
 reports them.
 """
 
@@ -473,6 +473,62 @@ class EyeFallback:
             return None
         oy, op = self.offset(eye, ey, ep)
         return ey + oy, ep + op
+
+
+class EyeWeights:
+    """How much each eye (0 left, 1 right) counts in the gaze, for ft-gazed's eye bias.
+
+    Two eyes beat either one: their errors partly cancel. On 306 live clicks with our own
+    tracker (frame-eyes, 2026-09-29) the eyes' sideways errors were correlated -0.37, and
+    the mean of both was 0.65 degrees off (median), the left eye alone 0.96, the right 1.11.
+    So a bias leans instead of choosing: "left" or "right" counts that eye LEAN times the
+    other (on those clicks, 2:1 toward the better eye cost about 0.03 degrees, toward the
+    worse one about 0.13). "auto" weights each
+    by the inverse square of its RMS miss at the last KEEP lessons, once both have MIN, and
+    alike until then. Each miss is measured before its lesson teaches anything, so each is a
+    fresh test. On SteamVR's own test (2026-09-29) its calibration dots said the left eye was
+    the better one and new spots said the right, so the misses come from lessons, not the fit.
+    An eye that isn't seen (None) drops out, and the other carries the gaze alone."""
+
+    LEAN = 2.0
+    KEEP = 20
+    MIN = 5
+    FLOOR = 0.3   # degrees: so one lucky run can't give an eye all the weight
+    STALE = 8.0   # degrees: a miss this big is the headset moved, not the eye's accuracy
+
+    def __init__(self, bias="auto", misses=None):
+        self.bias = bias
+        self.misses = [list(m) for m in (misses or ([], []))]
+
+    def add(self, miss):
+        """One lesson's miss per eye (degrees, None where it wasn't seen)."""
+        if any(m is not None and m > self.STALE for m in miss):
+            return
+        for k, m in enumerate(miss):
+            if m is not None:
+                self.misses[k] = (self.misses[k] + [m])[-self.KEEP:]
+
+    def rms(self):
+        return [math.sqrt(sum(m * m for m in ms) / len(ms)) if ms else None for ms in self.misses]
+
+    def weights(self):
+        """(left, right), summing to 1."""
+        if self.bias in ("left", "right"):
+            w = [self.LEAN, 1.0] if self.bias == "left" else [1.0, self.LEAN]
+        elif all(len(ms) >= self.MIN for ms in self.misses):
+            w = [1.0 / max(r, self.FLOOR) ** 2 for r in self.rms()]
+        else:
+            w = [1.0, 1.0]
+        return w[0] / sum(w), w[1] / sum(w)
+
+    def combine(self, eyes):
+        """The weighted gaze from [(yaw, pitch) or None, (yaw, pitch) or None], or None."""
+        w = [wk for wk, e in zip(self.weights(), eyes) if e is not None]
+        seen = [e for e in eyes if e is not None]
+        if not seen:
+            return None
+        total = sum(w)
+        return (sum(wk * e[0] for wk, e in zip(w, seen)) / total, sum(wk * e[1] for wk, e in zip(w, seen)) / total)
 
 
 class SteamEyeLog:

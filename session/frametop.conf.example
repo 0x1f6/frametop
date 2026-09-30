@@ -30,6 +30,8 @@ POINTER_GAZE_RETAKE=5      # gaze mode: how far (degrees) you look away from the
 POINTER_GAZE_NUDGE_MAX=8   # gaze mode: a mouse nudge up to this far (degrees) before a click is learned as the eye tracker's error
 POINTER_GAZE_HOLD=0.5      # gaze mode: a press held this long (s) without moving becomes a real press (to drag); moved or released sooner, it clicks where you let go
 POINTER_GAZE_SHOW=1        # gaze mode: the dot shows this long (s) after the mouse moves it; also while a press is held, and a pulse per click
+GAZE_TRACKER=steam         # gaze service: steam = SteamVR's eye tracker | own = our own (frame-eyes' fe-trackd, calibrated in the gaze probe with Own tracker)
+GAZE_EYE=auto              # gaze service: eye bias. auto = each eye weighted by how far off it was at your recent nudges | left | right = that eye counts twice
 META_DASHBOARD=0   # 1 = a Meta tap on a pass-through keyboard toggles the SteamVR dashboard (pointer mode only)
 SHARE_KEYS=0       # 1 = keys of keyboards grabbed for the desktop also go to @frametop_keys, for hotkey tools (any local process can listen)
 DISPLAY_OFF_MIN=0  # minutes without use before frametop-power turns the displays off, even if the headset seems worn (0 = never)

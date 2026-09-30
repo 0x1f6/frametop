@@ -771,6 +771,61 @@ Kirigami.ApplicationWindow {
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
+                RowLayout {
+                    Kirigami.FormData.label: "Eye tracker:"
+                    Controls.RadioButton {
+                        text: "SteamVR"
+                        checked: backend.gazeTracker === "steam"
+                        onToggled: if (checked) backend.setGazeTracker("steam")
+                    }
+                    Controls.RadioButton {
+                        text: "Own tracker (frame-eyes)"
+                        checked: backend.gazeTracker === "own"
+                        onToggled: if (checked) backend.setGazeTracker("own")
+                    }
+                }
+                Controls.Label {
+                    // Ours runs apart from Frametop (frame-eyes: tools/fe-live) and keeps its own calibration.
+                    visible: backend.gazeTracker === "own" && backend.gazeServiceRunning
+                             && (!gpage.status.own_running || gpage.status.own_reseat || !gpage.status.calibration_samples)
+                    text: !gpage.status.own_running ? "Not running: start it in frame-eyes (tools/fe-live), then calibrate"
+                          : !gpage.status.calibration_samples ? "Not calibrated: use Calibrate… with Own tracker"
+                          : "The headset was off: your first nudge and click resets where it sits"
+                    color: gpage.status.own_running ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
+                    font: Kirigami.Theme.smallFont
+                }
+                RowLayout {
+                    Kirigami.FormData.label: "Eye bias:"
+                    Controls.RadioButton {
+                        text: "Auto"
+                        checked: backend.gazeEye === "auto"
+                        onToggled: if (checked) backend.setGazeEye("auto")
+                    }
+                    Controls.RadioButton {
+                        text: "Left"
+                        checked: backend.gazeEye === "left"
+                        onToggled: if (checked) backend.setGazeEye("left")
+                    }
+                    Controls.RadioButton {
+                        text: "Right"
+                        checked: backend.gazeEye === "right"
+                        onToggled: if (checked) backend.setGazeEye("right")
+                    }
+                }
+                Controls.Label {
+                    // What the bias comes to now; on auto, from how far off each eye was at the last nudges.
+                    property var w: gpage.status.eye_weights
+                    property var n: gpage.status.eye_misses || [0, 0]
+                    property var rms: gpage.status.eye_rms || [null, null]
+                    visible: backend.gazeServiceRunning && w !== undefined
+                    text: w === undefined ? "" : "Left " + Math.round(w[0] * 100) + "% · right " + Math.round(w[1] * 100) + "%"
+                          + (backend.gazeEye !== "auto" ? ""
+                             : n[0] >= 5 && n[1] >= 5
+                               ? " (off by " + rms[0].toFixed(1) + "° and " + rms[1].toFixed(1) + "° at your last nudges)"
+                               : " (even until each eye has 5 nudges: " + n[0] + " and " + n[1] + " so far)")
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
                 Repeater {
                     model: backend.gazeSettings
                     delegate: RowLayout {
@@ -843,7 +898,9 @@ Kirigami.ApplicationWindow {
                     visible: backend.gazeServiceRunning
                     Kirigami.FormData.label: "Calibration:"
                     text: gpage.status.calibration_samples > 0
-                          ? gpage.status.calibration_samples + " points (" + gpage.status.model + ")"
+                          ? gpage.status.calibration_samples + " points ("
+                            + (gpage.status.tracker === "own" ? "Own tracker, " + gpage.status.calibration_made
+                               : gpage.status.kind === "eyes" ? gpage.status.model + ", each eye" : gpage.status.model) + ")"
                           : "none yet: use Calibrate…"
                 }
                 Controls.Label {
@@ -863,7 +920,10 @@ Kirigami.ApplicationWindow {
                       + "with the button held and let go there. Hold still to drag: hold a press this long without moving "
                       + "to drag something instead. Look away to hand back: how far from the pointer you look before the "
                       + "gaze takes it back from the mouse. Largest nudge to learn: bigger mouse moves before a click "
-                      + "are treated as using the mouse, not correcting the gaze."
+                      + "are treated as using the mouse, not correcting the gaze. Eye tracker: SteamVR's, or our own "
+                      + "(frame-eyes), which keeps its own calibration (Calibrate… with Own tracker). Eye bias: the gaze "
+                      + "combines both eyes, since their errors partly cancel; Left or Right counts that eye twice as "
+                      + "much, and Auto weights each by how far off it was at your recent nudges."
             }
         }
     }

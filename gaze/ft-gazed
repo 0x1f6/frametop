@@ -1,34 +1,56 @@
 #!/usr/bin/python3
 """ft-gazed: the gaze service. The headset's eye tracking, corrected, for the pointer.
 
+Two settings in ~/.config/frametop.conf (the Gaze page of Frametop Input Settings), read
+again when the file changes:
+  GAZE_TRACKER=steam|own   SteamVR's eye tracker (default), or our own (frame-eyes' fe-trackd,
+                           ft-gaze's source "own", when it's running)
+  GAZE_EYE=auto|left|right the eye bias (gazecal.EyeWeights): auto weights each eye by how far
+                           off it was at your recent nudges; left or right counts that eye twice
+                           as much as the other. Either eye alone carries the gaze when the
+                           other isn't seen.
+
 Runs ft-gaze (in the dev container), and for every eye tracker sample (90 Hz):
 
   1. drops blinks: both eyes' openness under half its running median (each eye its own),
-     or both lost (the tracker's variance for them, ft-gaze's "unc", over EYE_LOST). With
-     one eye lost or closed, the gaze comes from the other (EyeFallback: that eye's own
-     reading from set 2, plus what it usually reads against the combined gaze, learned
-     while both are seen). SteamVR's combined gaze (set 1) keeps going on one eye too, but
-     holds the lost eye's yaw, so it moves half as far sideways as the eyes do. Before the
-     fallback has learned an eye, set 1 is used as it is; set 2's combined direction is
-     the mean of the eyes' own (off by half of whatever the lost eye reads), so with set 2
-     that sample is dropped, as is one where the angle between the eyes jumps more than
-     1.5 degrees from its median;
+     or both lost (the tracker's variance for them, ft-gaze's "unc", over EYE_LOST);
      Looks down past the screens (pitch under KEYBOARD_PITCH, on no Frametop screen: at the
      keyboard, through the gap by the nose) aren't sent, so the pointer stays where it was
      instead of following you down; the tracker often loses an eye there (the lids come
      down), and that isn't counted as a lost eye either;
-  2. smooths it with a fixation lock (the running mean of the current fixation, 1 degree);
-  3. corrects it: the calibration from ft-gazeprobe (calibration.json, reloaded when the
-     probe changes it) plus what the pointer's corrections have taught since (LiveCorrection,
-     saved in pointer-lessons.json);
+  2. combines the eyes, each corrected on its own. With SteamVR, that's each eye's own
+     reading (set 2, ft-gaze's "left" and "right"), corrected by its calibration from
+     ft-gazeprobe (calibration.json, reloaded when the probe changes it) plus what the
+     pointer's corrections have taught that eye since (LiveCorrection, saved in
+     pointer-lessons.json), then weighted by the eye bias. A lost or closed eye drops out.
+     Our own tracker keeps its own calibration, so its eyes are used as they come;
+  3. smooths it with a fixation lock (the running mean of the current fixation, 1 degree);
   4. sends it to the pointer helper: "gz <yaw> <pitch> <raw yaw> <raw pitch>", head-relative
      degrees (yaw +left, pitch +up). The helper uses it only in gaze mode.
+
+Without per-eye calibrations (a calibration from before the probe had the eyes as sources),
+or with --source, it's the older path: one source, SteamVR's combined gaze (mmap set 1) by
+default, corrected as a whole. There, with one eye lost or closed, the gaze comes from the
+other (EyeFallback: that eye's own reading from set 2, plus what it usually reads against
+the combined gaze, learned while both are seen). SteamVR's combined gaze (set 1) keeps going
+on one eye too, but holds the lost eye's yaw, so it moves half as far sideways as the eyes
+do. Before the fallback has learned an eye, set 1 is used as it is; set 2's combined
+direction is the mean of the eyes' own (off by half of whatever the lost eye reads), so with
+set 2 that sample is dropped, as is one where the angle between the eyes jumps more than 1.5
+degrees from its median.
 
 Lessons come back from the helper: when you nudge the gaze-placed pointer with the mouse and
 click, it sends "lesson <raw yaw> <raw pitch> <true yaw> <true pitch>": where the raw gaze
 was when the mouse took over, and where the pointer was when you clicked (you were looking
-there). The gap is the tracker's error there, and it's learned, unless it's more than
-LESSON_MAX degrees past the correction (then it wasn't a nudge onto what you looked at).
+there). The gap is the tracker's error there. The raw gaze is the one sent, so it also says
+when that look was (the history of what was sent), and so what each eye read then:
+  - SteamVR: each eye learns its own error, unless the gaze was more than LESSON_MAX degrees
+    past the correction (then it wasn't a nudge onto what you looked at);
+  - our tracker: the look goes to it as a click ("click T YAW PITCH" on @frame_eyes), as the
+    probe's clicks do, and it learns how far the headset has moved on your face. That's
+    what it gets wrong, and after the headset was off, the first click resets it;
+  - either way, how far off each eye was (before the lesson taught it anything) goes to the
+    eye bias, for auto.
 
 SteamVR's eye tracking log is followed for the headset going on (its eye model starts over,
 and the error moves): lessons from before count less then, so the first few after it
@@ -41,16 +63,18 @@ Control socket: abstract unix datagram "@ft_gazed":
   lesson <rhy> <rhp> <thy> <thp>   from the pointer helper (see above)
   status                           reply: one JSON object
   forget                           drop what the lessons taught (the calibration stays)
-  reload                           read calibration.json again
+  reload                           read calibration.json and the settings again
 
-Options: --source action|mmap1|mmap2 (default mmap1; set 2 was a little quieter in the probe,
-but loses the pointer whenever the tracker loses an eye), -v (a status line every
-5 s on stderr), --to NAME (send the gaze to the abstract socket @NAME instead of the pointer
-helper; for testing: a helper without gaze mode forwards what it doesn't know to its driver).
+Options: --source action|mmap1|mmap2 (the older one-source path with that source, whatever
+the settings say; set 2 was a little quieter in the probe, but loses the pointer whenever
+the tracker loses an eye), -v (a status line every 5 s on stderr), --to NAME (send the gaze
+to the abstract socket @NAME instead of the pointer helper; for testing: a helper without
+gaze mode forwards what it doesn't know to its driver).
 """
 
 import argparse
 import json
+import math
 import os
 import selectors
 import signal
@@ -64,16 +88,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gazecal import (DEFAULT_MODEL, EYE_FOUND, EYE_LOST, MODELS, STATE, Correction, EyeFallback,  # noqa: E402
-                     Fixation, LiveCorrection, SteamEyeLog)
+                     EyeWeights, Fixation, LiveCorrection, SteamEyeLog)
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
 ME = "\0ft_gazed"
 POINTER = "\0ft_pointer_helper"
+FRAME_EYES = "\0frame_eyes"  # our own tracker's control socket (frame-eyes fe-trackd)
+CONF = Path.home() / ".config" / "frametop.conf"
 CALIBRATION = STATE / "calibration.json"
 LESSONS = STATE / "pointer-lessons.json"
 LESSON_LOG = STATE / "pointer-lessons.jsonl"
+SOURCES = ("action", "mmap1", "mmap2", "left", "right")  # the ones with a calibration here
+EYES = ("left", "right")  # ft-gaze's order, and the sources for each eye alone
+TRACKERS = ("steam", "own")
+BIASES = ("auto", "left", "right")
 LESSON_MAX = 8.0  # degrees past the correction
+OWN_LESSON_MAX = 25.0  # our tracker: after the headset was off, its first clicks can be 10-17 off
+HISTORY = 12.0    # seconds of the gaze sent, to find a lesson's look (the helper sends it up to 10 s later)
+LOOK = 0.3        # seconds of samples before that moment make the look (the probe's fixation)
 RETRY = 3.0       # seconds before starting ft-gaze again
 SETTLE = 0.3      # seconds after an eye is found again before the fallback learns from it
 KEYBOARD_PITCH = -20.0  # degrees: gaze under this, on no screen, is a look at the keyboard
@@ -95,21 +128,47 @@ def log(msg):
     print(f"ft-gazed: {msg}", file=sys.stderr, flush=True)
 
 
+def read_settings():
+    """(tracker, eye bias) from frametop.conf, defaults for anything missing or unknown."""
+    conf = {}
+    try:
+        for line in CONF.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                conf[k.strip()] = v.strip().lower()
+    except OSError:
+        pass
+    tracker = conf.get("GAZE_TRACKER", "steam")
+    bias = conf.get("GAZE_EYE", "auto")
+    return tracker if tracker in TRACKERS else "steam", bias if bias in BIASES else "auto"
+
+
+def mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 class Service:
     def __init__(self, source, verbose, to=POINTER):
-        self.source, self.verbose, self.to = source, verbose, to
+        self.override, self.verbose, self.to = source, verbose, to
+        self.source = source or "mmap1"  # the older path's source
         STATE.mkdir(parents=True, exist_ok=True)
-        self.base = Correction()
+        self.tracker, self.bias = read_settings()
+        self.conf_mtime = mtime(CONF)
+        self.models = {name: Correction() for name in SOURCES}
         self.mode = DEFAULT_MODEL
         self.cal_mtime = None
-        self.live = PointerLessons()
+        self.lives = {name: PointerLessons() for name in SOURCES}
+        self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
         self.dirty = False
         self.load_calibration()
         self.load_lessons()
         self.steam = SteamEyeLog()
         self.steam.poll()
-        self.live.wear_time = self.steam.worn()
-        self.live.refit(self.base, self.mode)
+        self.refit()
         self.fix = Fixation(radius=1.0)
         self.opens = (deque(maxlen=90), deque(maxlen=90))  # left, right
         self.vergence = deque(maxlen=90)
@@ -120,64 +179,161 @@ class Service:
                        "lost_right": 0, "looking_down": 0, "dropped": 0, "lessons_taken": 0, "refused": 0}
         self.last_sample = 0.0
         self.last = None
+        self.last_kind = None
+        # What was sent, for finding a lesson's look: (sample time, raw as sent, each eye's reading).
+        self.history = deque()
+        self.own = {}        # our tracker's last status reply
+        self.own_at = 0.0
 
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK)
         self.sock.bind(ME)
         self.out = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK)
+        # To our tracker, with an address of its own, so its replies don't land on @ft_gazed.
+        self.eyes_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK)
+        self.eyes_sock.bind("")
         self.sel = selectors.DefaultSelector()
         self.sel.register(self.sock, selectors.EVENT_READ, "control")
+        self.sel.register(self.eyes_sock, selectors.EVENT_READ, "own")
         self.proc = None
         self.buf = b""
         self.restart_at = 0.0
         self.running = True
 
-    # --- Calibration and lessons ---
+    @property
+    def kind(self):
+        """"own" (our tracker), "eyes" (SteamVR's eyes, each corrected), or "source" (the
+        older path: one SteamVR source, corrected as a whole)."""
+        if self.override:
+            return "source"
+        if self.tracker == "own":
+            return "own"
+        return "eyes" if all(self.models[e].samples for e in EYES) else "source"
+
+    # --- Settings, calibration and lessons ---
+
+    def load_settings(self):
+        self.conf_mtime = mtime(CONF)
+        tracker, bias = read_settings()
+        if (tracker, bias) != (self.tracker, self.bias):
+            log(f"tracker {tracker}, eye bias {bias}" + (f" (--source {self.override} wins)" if self.override else ""))
+            self.tracker, self.bias = tracker, bias
+            for w in self.weights.values():
+                w.bias = bias
+            self.fix.reset()
 
     def load_calibration(self):
         try:
-            mtime = CALIBRATION.stat().st_mtime
+            mt = CALIBRATION.stat().st_mtime
             d = json.loads(CALIBRATION.read_text())
         except (OSError, ValueError):
             return
-        self.cal_mtime = mtime
-        if self.source in d:
-            self.base.from_json(d[self.source])
+        self.cal_mtime = mt
+        for name in SOURCES:
+            if name in d:
+                self.models[name].from_json(d[name])
         mode = d.get("_meta", {}).get("model")
         self.mode = mode if mode in MODELS else DEFAULT_MODEL
-        log(f"calibration: {self.mode}, {self.base.samples} samples")
+        log(f"calibration: {self.mode}, " + ", ".join(f"{n} {self.models[n].samples}" for n in (self.source,) + EYES)
+            + " samples")
 
     def load_lessons(self):
         try:
             d = json.loads(LESSONS.read_text())
-            if d.get("source") == self.source:
-                self.live.samples = d.get("samples", [])[-PointerLessons.KEEP:]
         except (OSError, ValueError):
-            pass
-        log(f"{len(self.live.samples)} lessons")
+            d = {}
+        # The first version kept one source's: {"source": NAME, "samples": [...]}.
+        sources = d.get("sources") or ({d["source"]: d.get("samples", [])} if "source" in d else {})
+        for name, samples in sources.items():
+            if name in self.lives:
+                self.lives[name].samples = samples[-PointerLessons.KEEP:]
+        for t, misses in (d.get("misses") or {}).items():
+            if t in self.weights:
+                self.weights[t] = EyeWeights(self.bias, misses)
+        log(", ".join(f"{n} {len(self.lives[n].samples)}" for n in (self.source,) + EYES) + " lessons")
 
     def save_lessons(self):
         tmp = LESSONS.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"source": self.source, "samples": self.live.samples}))
+        tmp.write_text(json.dumps({"version": 2, "sources": {n: lv.samples for n, lv in self.lives.items() if lv.samples},
+                                   "misses": {t: w.misses for t, w in self.weights.items()}}))
         tmp.replace(LESSONS)
         self.dirty = False
 
-    def correction(self, hy, hp):
-        by, bp = self.base.get(hy, hp, self.mode)
-        ly, lp = self.live.get(hy, hp)
+    def refit(self):
+        for name, live in self.lives.items():
+            live.wear_time = self.steam.worn()
+            live.refit(self.models[name], self.mode)
+
+    def correction(self, name, hy, hp):
+        by, bp = self.models[name].get(hy, hp, self.mode)
+        ly, lp = self.lives[name].get(hy, hp)
         return by + ly, bp + lp
 
+    def look(self, ry, rp):
+        """When the gaze sent as raw (ry, rp) was last sent, and each eye's median reading over
+        the LOOK before it: (t, [(yaw, pitch) or None] * 2), or (None, None)."""
+        key = f"{ry:.3f} {rp:.3f}"
+        t = next((h[0] for h in reversed(self.history) if h[1] == key), None)
+        if t is None:
+            return None, None
+        eyes = []
+        for k in (0, 1):
+            seen = [h[2][k] for h in self.history if t - LOOK <= h[0] <= t and h[2] and h[2][k]]
+            eyes.append((statistics.median(e[0] for e in seen), statistics.median(e[1] for e in seen)) if seen else None)
+        return t, eyes
+
     def lesson(self, rhy, rhp, thy, thp):
-        dy, dp = thy - rhy, thp - rhp  # the whole error there
-        cy, cp = self.correction(rhy, rhp)
-        left = ((dy - cy) ** 2 + (dp - cp) ** 2) ** 0.5
-        rec = {"time": time.time(), "source": self.source, "model": self.mode, "raw": [rhy, rhp],
-               "true": [thy, thp], "correction": [cy, cp], "lesson_deg": left, "wear": self.steam.worn()}
-        if left > LESSON_MAX:
-            rec["refused"] = f"more than {LESSON_MAX} deg past the correction"
+        kind = self.kind
+        rec = {"time": time.time(), "kind": kind, "raw": [rhy, rhp], "true": [thy, thp], "wear": self.steam.worn()}
+        if kind == "source":
+            dy, dp = thy - rhy, thp - rhp  # the whole error there
+            cy, cp = self.correction(self.source, rhy, rhp)
+            left = math.hypot(dy - cy, dp - cp)
+            rec.update(source=self.source, model=self.mode, correction=[cy, cp], lesson_deg=left)
+            if left > LESSON_MAX:
+                rec["refused"] = f"more than {LESSON_MAX} deg past the correction"
+            else:
+                self.lives[self.source].add({"time": rec["time"], "hy": rhy, "hp": rhp, "dy": dy, "dp": dp,
+                                             "wy": 1.0, "wp": 1.0, "how": "pointer"}, self.models[self.source], self.mode)
+            return self.taken(rec)
+        # The raw gaze sent here is the corrected, combined one: its whole error is left.
+        left = math.hypot(thy - rhy, thp - rhp)
+        t, eyes = self.look(rhy, rhp)
+        weights = self.weights[self.tracker if kind == "own" else "steam"]
+        rec.update(tracker=self.tracker if kind == "own" else "steam", bias=self.bias, lesson_deg=left, look_t=t,
+                   eyes=eyes, weights=[round(w, 3) for w in weights.weights()])
+        limit = OWN_LESSON_MAX if kind == "own" else LESSON_MAX
+        if t is None:
+            rec["refused"] = "that gaze isn't in the last few seconds sent"
+        elif left > limit:
+            rec["refused"] = f"more than {limit} deg off"
+        if "refused" in rec:
+            return self.taken(rec)
+        if kind == "own":
+            # Its eyes come calibrated: how far off each was is its miss. The click goes to it.
+            miss = [math.hypot(thy - e[0], thp - e[1]) if e else None for e in eyes]
+            try:
+                self.eyes_sock.sendto(f"click {t:.6f} {thy:.4f} {thp:.4f}".encode(), FRAME_EYES)
+            except OSError as e:
+                rec["refused"] = f"our tracker isn't running ({e})"
+                return self.taken(rec)
+        else:
+            miss = []
+            for name, e in zip(EYES, eyes):
+                if not e:
+                    miss.append(None)
+                    continue
+                cy, cp = self.correction(name, *e)
+                miss.append(math.hypot(thy - e[0] - cy, thp - e[1] - cp))
+                self.lives[name].add({"time": rec["time"], "hy": e[0], "hp": e[1], "dy": thy - e[0], "dp": thp - e[1],
+                                      "wy": 1.0, "wp": 1.0, "how": "pointer"}, self.models[name], self.mode)
+        rec["miss"] = miss
+        weights.add(miss)
+        return self.taken(rec)
+
+    def taken(self, rec):
+        if "refused" in rec:
             self.counts["refused"] += 1
         else:
-            self.live.add({"time": rec["time"], "hy": rhy, "hp": rhp, "dy": dy, "dp": dp, "wy": 1.0, "wp": 1.0,
-                           "how": "pointer"}, self.base, self.mode)
             self.counts["lessons_taken"] += 1
             self.dirty = True
         try:
@@ -255,19 +411,13 @@ class Service:
             if line.strip():
                 log(line)
 
-    def on_sample(self, s):
-        src = s["src"].get(self.source) or {}
-        if "hy" not in src:
-            return
-        self.counts["samples"] += 1
-        self.last_sample = time.monotonic()
-        m1 = s["src"].get("mmap1") or {}
-        o = m1.get("open")
-        lr = src.get("lr", m1.get("lr"))
-        # Blinks and lost eyes, judged against the last second (see steady_samples: relative,
-        # because the lids come down looking down, and the vergence depends on distance).
-        # An eye's floor comes from its good readings, so a lost eye doesn't drag it to 0.
+    def judge_eyes(self, m1, down):
+        """Which eyes (left, right) are closed, from SteamVR's openness (set 1); updates
+        self.lost from its variances. Blinks and lost eyes are judged against the last second
+        (see steady_samples: relative, because the lids come down looking down). An eye's
+        floor comes from its good readings, so a lost eye doesn't drag it to 0."""
         low = [False, False]
+        o = m1.get("open")
         if o and len(o) == 2:
             for k in (0, 1):
                 hist = self.opens[k]
@@ -276,13 +426,78 @@ class Service:
                 low[k] = o[k] < floor
                 hist.append(o[k])
         unc = m1.get("unc")
-        down = src["hp"] < KEYBOARD_PITCH and not src.get("hit")
         if unc and len(unc) == 2:
             for k in (0, 1):
                 self.lost[k] = unc[k] > (EYE_FOUND if self.lost[k] else EYE_LOST)
             if not down:
                 self.counts["lost_left"] += self.lost[0]
                 self.counts["lost_right"] += self.lost[1]
+        return low
+
+    def on_sample(self, s):
+        kind = self.kind
+        if kind != self.last_kind:
+            log({"own": "our own tracker", "eyes": "SteamVR's eyes, each calibrated",
+                 "source": f"SteamVR's {self.source}, calibrated as a whole"}[kind]
+                + (f", eye bias {self.bias}" if kind != "source" else ""))
+            self.last_kind = kind
+            self.fix.reset()
+        if kind == "source":
+            self.on_source_sample(s)
+        else:
+            self.on_eyes_sample(s, kind == "own")
+
+    def on_eyes_sample(self, s, own):
+        m1 = s["src"].get("mmap1") or {}
+        if own:
+            src = s["src"].get("own") or {}
+            if "hy" not in src:
+                return
+            eyes = [tuple(e) if e else None for e in (src.get("eyes") or [None, None])]
+            hp, hit = src["hp"], src.get("hit")
+        else:
+            per = [s["src"].get(name) or {} for name in EYES]
+            eyes = [(p["hy"], p["hp"]) if "hy" in p else None for p in per]
+            if not any(eyes):
+                return
+            hp, hit = next(e[1] for e in eyes if e), m1.get("hit")
+        self.counts["samples"] += 1
+        self.last_sample = time.monotonic()
+        down = hp < KEYBOARD_PITCH and not hit
+        low = self.judge_eyes(m1, down)
+        if down:
+            self.counts["looking_down"] += 1
+            return
+        # Our tracker finds the pupils itself; SteamVR's openness still marks the blinks.
+        bad = [eyes[k] is None or low[k] or (not own and self.lost[k]) for k in (0, 1)]
+        if all(bad):
+            self.counts["blinks"] += 1
+            return
+        if any(bad):
+            self.counts["one_eye"] += 1
+            self.counts["one_eye_used"] += 1
+        seen = [None if bad[k] else eyes[k] for k in (0, 1)]
+        if own:
+            corrected = seen
+        else:
+            corrected = []
+            for name, e in zip(EYES, seen):
+                c = self.correction(name, *e) if e else None
+                corrected.append((e[0] + c[0], e[1] + c[1]) if e else None)
+        gy, gp = self.weights["own" if own else "steam"].combine(corrected)
+        fy, fp = self.fix(gy, gp, s["t"], 1.0)
+        self.send(s["t"], fy, fp, fy, fp, seen)
+
+    def on_source_sample(self, s):
+        src = s["src"].get(self.source) or {}
+        if "hy" not in src:
+            return
+        self.counts["samples"] += 1
+        self.last_sample = time.monotonic()
+        m1 = s["src"].get("mmap1") or {}
+        lr = src.get("lr", m1.get("lr"))
+        down = src["hp"] < KEYBOARD_PITCH and not src.get("hit")
+        low = self.judge_eyes(m1, down)
         if down:
             self.counts["looking_down"] += 1
             for k in (0, 1):
@@ -323,10 +538,17 @@ class Service:
                     self.fallback.update(k, eyes[k][0], eyes[k][1], hy, hp)
         # The fixation lock works in degrees here (1 degree per "pixel").
         fy, fp = self.fix(hy, hp, s["t"], 1.0)
-        cy, cp = self.correction(fy, fp)
-        self.last = (fy + cy, fp + cp, fy, fp)
+        cy, cp = self.correction(self.source, fy, fp)
+        self.send(s["t"], fy + cy, fp + cp, fy, fp, None)
+
+    def send(self, t, hy, hp, rhy, rhp, eyes):
+        self.last = (hy, hp, rhy, rhp)
+        raw = f"{rhy:.3f} {rhp:.3f}"
+        self.history.append((t, raw, eyes))
+        while self.history and self.history[0][0] < t - HISTORY:
+            self.history.popleft()
         try:
-            self.out.sendto(f"gz {fy + cy:.3f} {fp + cp:.3f} {fy:.3f} {fp:.3f}".encode(), self.to)
+            self.out.sendto(f"gz {hy:.3f} {hp:.3f} {raw}".encode(), self.to)
             self.counts["sent"] += 1
         except OSError:
             pass  # the pointer helper isn't running
@@ -346,19 +568,23 @@ class Service:
                     rec = self.lesson(*map(float, words[1:]))
                     reply = "refused" if "refused" in rec else f"ok {rec['lesson_deg']:.2f}"
                     log(f"lesson {rec['lesson_deg']:.2f} deg at {rec['raw'][0]:+.1f},{rec['raw'][1]:+.1f}"
+                        + (f", eyes off {', '.join('-' if m is None else f'{m:.2f}' for m in rec['miss'])}"
+                           if rec.get("miss") else "")
                         + (f": {rec['refused']}" if "refused" in rec else ""))
                 except ValueError:
                     reply = "error bad lesson"
             elif words[:1] == ["status"]:
                 reply = json.dumps(self.status())
             elif words[:1] == ["forget"]:
-                self.live = PointerLessons()
-                self.live.wear_time = self.steam.worn()
+                self.lives = {name: PointerLessons() for name in SOURCES}
+                self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
+                self.refit()
                 self.save_lessons()
                 reply = "ok"
             elif words[:1] == ["reload"]:
+                self.load_settings()
                 self.load_calibration()
-                self.live.refit(self.base, self.mode)
+                self.refit()
                 reply = "ok"
             else:
                 reply = "error unknown command"
@@ -368,28 +594,65 @@ class Service:
                 except OSError:
                     pass
 
+    def on_own(self):
+        """Replies from our tracker: its status (JSON), or a click's "ok ..."/"fail ..."."""
+        while True:
+            try:
+                data = self.eyes_sock.recv(4096).decode("utf-8", "replace")
+            except (BlockingIOError, OSError):
+                return
+            if data.startswith("{"):
+                try:
+                    self.own, self.own_at = json.loads(data), time.monotonic()
+                except ValueError:
+                    pass
+            else:
+                log(f"our tracker: {data}")
+
     def status(self):
-        ly, lp = self.live.offset()
-        return {"source": self.source, "model": self.mode, "calibration_samples": self.base.samples,
-                "lessons": len(self.live.samples), "lesson_offset": [round(ly, 3), round(lp, 3)],
-                "ft_gaze": self.proc is not None, "sample_age_s": round(time.monotonic() - self.last_sample, 2)
-                if self.last_sample else None, "headset_on": self.steam.wearing(), "headset_on_since": self.steam.worn(),
-                "last": [round(v, 2) for v in self.last] if self.last else None,
-                "eyes_lost": self.lost, "fallback_ready": [self.fallback.ready(0), self.fallback.ready(1)], **self.counts}
+        kind = self.kind
+        tracker = "own" if kind == "own" else "steam"
+        w = self.weights[tracker]
+        st = {"tracker": tracker, "kind": kind, "source": "own" if kind == "own" else self.source if kind == "source"
+              else "left+right", "model": self.mode, "eye_bias": self.bias}
+        if kind == "source":
+            ly, lp = self.lives[self.source].offset()
+            st.update(calibration_samples=self.models[self.source].samples, lessons=len(self.lives[self.source].samples),
+                      lesson_offset=[round(ly, 3), round(lp, 3)])
+        else:
+            st.update(eye_weights=[round(v, 3) for v in w.weights()], eye_misses=[len(m) for m in w.misses],
+                      eye_rms=[None if r is None else round(r, 2) for r in w.rms()])
+        if kind == "eyes":
+            st.update(calibration_samples=min(self.models[e].samples for e in EYES),
+                      lessons=max(len(self.lives[e].samples) for e in EYES))
+        if kind == "own":
+            own = self.own if time.monotonic() - self.own_at < 5 else {}
+            cal = own.get("calibration") or {}
+            st.update(calibration_samples=cal.get("dots", 0), calibration_made=cal.get("made"),
+                      lessons=max(len(m) for m in w.misses), own_running=bool(own),
+                      own_reseat=any(e.get("reseat") for e in own.get("eyes", {}).values()))
+        st.update({"ft_gaze": self.proc is not None, "sample_age_s": round(time.monotonic() - self.last_sample, 2)
+                   if self.last_sample else None, "headset_on": self.steam.wearing(),
+                   "headset_on_since": self.steam.worn(), "last": [round(v, 2) for v in self.last] if self.last else None,
+                   "eyes_lost": self.lost, "fallback_ready": [self.fallback.ready(0), self.fallback.ready(1)],
+                   **self.counts})
+        return st
 
     def periodic(self):
-        if self.steam.poll() or self.steam.worn() != self.live.wear_time:
-            if self.steam.worn() != self.live.wear_time:
+        if self.steam.poll() or any(lv.wear_time != self.steam.worn() for lv in self.lives.values()):
+            if any(lv.wear_time != self.steam.worn() for lv in self.lives.values()):
                 log("headset on again: older lessons count less until new ones come in")
-            self.live.wear_time = self.steam.worn()
-            self.live.refit(self.base, self.mode)
-        try:
-            mtime = CALIBRATION.stat().st_mtime
-        except OSError:
-            mtime = None
-        if mtime != self.cal_mtime:
+            self.refit()
+        if mtime(CALIBRATION) != self.cal_mtime:
             self.load_calibration()
-            self.live.refit(self.base, self.mode)
+            self.refit()
+        if mtime(CONF) != self.conf_mtime:
+            self.load_settings()
+        if self.tracker == "own":
+            try:
+                self.eyes_sock.sendto(b"status", FRAME_EYES)
+            except OSError:
+                pass  # not running: status() says so once the last answer is old
         if self.dirty:
             self.save_lessons()
 
@@ -403,6 +666,8 @@ class Service:
             for key, _ in self.sel.select(timeout=0.5):
                 if key.data == "control":
                     self.on_control()
+                elif key.data == "own":
+                    self.on_own()
                 elif key.data == "stdout" and self.proc:
                     self.read_stdout()
                 elif key.data == "stderr" and self.proc:
@@ -420,7 +685,8 @@ class Service:
 
 def main():
     ap = argparse.ArgumentParser(description="The gaze service: corrected eye tracking for the pointer")
-    ap.add_argument("--source", choices=["action", "mmap1", "mmap2"], default="mmap1")
+    ap.add_argument("--source", choices=["action", "mmap1", "mmap2"],
+                    help="the older one-source path with this SteamVR source, whatever the settings say")
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--to", default="ft_pointer_helper", help="abstract socket to send the gaze to")
     args = ap.parse_args()

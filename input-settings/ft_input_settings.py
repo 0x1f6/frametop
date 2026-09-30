@@ -13,7 +13,8 @@ to the input relay over its control socket (@frametop_relay):
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
-    (gaze/ft-gazed, @ft_gazed: status, forget, reload).
+    (gaze/ft-gazed, @ft_gazed: status, forget, reload), with its eye tracker (SteamVR's or
+    our own) and eye bias (GAZE_TRACKER, GAZE_EYE in frametop.conf).
   - Bluetooth: paired devices, and re-applying the Bluetooth LE fixes after pairing.
   - A warning on every page when SteamVR won't load the ft_pointer driver (blocked after a
     crash, disabled, or SteamVR in safe mode) or hasn't loaded it (@ft_pointer doesn't answer
@@ -83,6 +84,9 @@ GAZE_SETTINGS = [
     ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
 ]
+# The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
+GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker (frame-eyes)"}
+GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [
     ("POINTER_SENSITIVITY", "Speed", 0.03, 0.005, 0.12, 0.001, "°/count"),
@@ -719,6 +723,36 @@ class Backend(QObject):
         write_conf_value("POINTER_GAZE", "1" if on else "0")
         self._send(f"gaze {'on' if on else 'off'}", HELPER)
         self.reload_timer.start()
+        self.gazeChanged.emit()
+
+    @Property(str, notify=gazeChanged)
+    def gazeTracker(self):
+        """Whose eye tracking the gaze service uses: "steam" or "own" (GAZE_TRACKER)."""
+        v = read_conf().get("GAZE_TRACKER", "steam")
+        return v if v in GAZE_TRACKERS else "steam"
+
+    @Property(str, notify=gazeChanged)
+    def gazeEye(self):
+        """The eye bias: "auto", "left" or "right" (GAZE_EYE)."""
+        v = read_conf().get("GAZE_EYE", "auto")
+        return v if v in GAZE_EYES else "auto"
+
+    @Slot(str)
+    def setGazeTracker(self, tracker):
+        if tracker in GAZE_TRACKERS:
+            self._set_gaze("GAZE_TRACKER", tracker, f"Gaze from {GAZE_TRACKERS[tracker]}")
+
+    @Slot(str)
+    def setGazeEye(self, eye):
+        if eye in GAZE_EYES:
+            self._set_gaze("GAZE_EYE", eye, f"Eye bias: {GAZE_EYES[eye]}")
+
+    def _set_gaze(self, key, value, done):
+        """ft-gazed reads these from frametop.conf; "reload" makes it do so now."""
+        write_conf_value(key, value)
+        running = self._send("reload", GAZED)
+        self.message.emit(done if running else f"{done} (the gaze service isn't running: it takes it when it starts)",
+                          False)
         self.gazeChanged.emit()
 
     @Property("QVariantList", notify=pointerChanged)
