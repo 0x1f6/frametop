@@ -42,11 +42,17 @@ Wherever ft-screens needs to know where a laser points (showing the controls, th
 
 `ComputeOverlayIntersection` ignores `SetOverlayIntersectionMask`, and a control can't be allowed to cover part of its screen, so the resize tab sits entirely outside the corner.
 
-### Wrist pinning
+### Pinning
 
 Pinning started as "bring the screen to your wrist", which doesn't work for big screens, because their centre is far from the edge you bring close. It became aiming: while a screen is carried, the line from the carrying device to its bar is tested against the other hand controllers. Crossing a controller's 6 cm ring arms the pin (leaving past 9 cm, so it doesn't flicker), and crossing it again disarms it. The pin happens on release, with the screen's pose at that moment, so you can arm it and then turn the screen. An earlier version pinned the moment the laser touched the wrist, which left the screen at whatever angle the carrying hand had while pointing there.
 
 A pinned screen's alpha follows the angle between its front and the direction to your head, fully visible inside the wrist angle and fading over the last 10°.
+
+A head pin is the same pin on the headset (device index 0): the screen's transform is relative to the headset, so SteamVR keeps it rigidly in your view with no lag from us. It skips the facing rule, since a screen on your head always faces you the way it did when pinned. There's no aiming gesture for it: the line from the carrying device can't sensibly pass through your own head, and a ring in front of your face would be in the way. So it's set from Frametop Display Settings or `ft-layout`, and it pins the screen where it is. Carrying a head-pinned screen re-pins it on release, like a wrist pin, so it can be adjusted in VR.
+
+### Named layouts
+
+A named layout is the custom arrangement under a name: each screen's pose relative to your head, width, curve, and pin, but not its resolution or scale, which need a desktop restart or belong to KWin. Using one copies it into the custom arrangement, so everything that applies the layout (desktop start, Meta+Shift+R, Arrange now) works unchanged, and `active` remembers which name it came from. Saving without a name (`ft-layout capture`) clears `active`, because the screens have been placed by hand since. Layouts are kept per screen number, so one saved with a different screen count still applies: missing screens keep their last saved place or the preset's.
 
 ### Visibility and VR games
 

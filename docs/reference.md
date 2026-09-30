@@ -39,7 +39,9 @@ The controls are sized from both the screen's width and its distance from you, f
 
 To pin a screen to a wrist, carry it by its bar and sweep the laser across your other controller. A ring around that controller marks the target, and a dot shows where the laser passes. Crossing the ring arms the pin, and the ring and bar turn blue; crossing it again disarms it. When you let go while armed, the screen rides on that controller at the size, distance, and angle it had, so you can arm the pin first and then turn the screen the way you want. Grab a pinned screen's bar to adjust it; it goes back to the same wrist when you let go unless you disarm it. A pinned screen shows only while you're looking at its front, within the wrist angle, and fades out over the last 10°.
 
-The Visibility & wrist tab of Frametop Display Settings decides when the screens show:
+To pin a screen to your head, like a HUD, set it to On your head on the Visibility & pins tab of Frametop Display Settings (or `ft-layout pin N head`). It rides on the headset where it is at that moment, so place it first, and it shows whenever the screens do. Grab its bar to move it; it goes back on your head where you let go. Sweeping across a wrist ring while you carry it moves it to that wrist, and sweeping across again leaves it in the room. The 3D mouse's dot stays in the room, so a head-pinned screen moves away from it when you turn your head, unless head follow is on.
+
+The Visibility & pins tab of Frametop Display Settings decides when the screens show:
 
 - Always. Meta+Shift+H, the Hide/Show Screens menu entry, or a mapped mouse button hides them.
 - Only while the SteamVR dashboard is open.
@@ -59,7 +61,7 @@ ft-screens listens for datagrams on the abstract socket `@ft_screens` and replie
 
 ```
 place N x y z yaw pitch roll     width N metres          curve N radius|on|off
-pin N|all left|right [matrix]    unpin N|all             size N w h
+pin N|all left|right|head [matrix]    unpin N|all        size N w h
 get N    screens    head    state    key code value    scale N s
 visibility always|dashboard|gesture|toggle    wrist degrees    gesture left|right degrees
 hide | show | toggle    controllers always|outside_games|dashboard    ingames hide|visible
@@ -120,13 +122,13 @@ Device rules are saved in `~/.config/frametop-input.json`. `input-settings/insta
 
 When the desktop starts, its screens arrange themselves around where you're facing. You can move them by hand at any time and put them back with Meta+Shift+R, the Reset Screen Layout menu entry, Arrange now in the app, or a mouse button mapped to Reset desktop screen layout.
 
-The desktop's own screen arrangement follows where the screens are around you, whatever their numbers: a screen you see to the left of another is to its left in Plasma too, so the pointer and dragged windows cross straight to it. Screens one above the other stack, and screens pinned to a wrist come last. It's updated at startup, after arranging or saving the layout, and half a second after you let go of a screen you moved. With the headset off there's no head pose to go by, and the arrangement stays as it was.
+The desktop's own screen arrangement follows where the screens are around you, whatever their numbers: a screen you see to the left of another is to its left in Plasma too, so the pointer and dragged windows cross straight to it. Screens one above the other stack, and screens pinned to a wrist or your head come last. It's updated at startup, after arranging or saving the layout, and half a second after you let go of a screen you moved. With the headset off there's no head pose to go by, and the arrangement stays as it was.
 
-Frametop Display Settings has four tabs (three with the gamescope backend, which has no Visibility & wrist):
+Frametop Display Settings has four tabs (three with the gamescope backend, which has no Visibility & pins):
 
 - Screens: add and remove screens, and set each one's resolution (presets from 1080p to 4K, ultrawide, super ultrawide, portrait, or custom), its width in VR (0.5 to 6 m), its scale, whether it's curved, and whether it has the taskbar. Resolution, width, and curve apply at once. Adding or removing a screen takes a desktop restart, which the app offers.
-- Layout: a curve around you, with the screens hinged edge to edge like monitors on a desk and each turned to face you, or a flat wall. Both take rows, distance, gap, and height. Save current arrangement keeps the positions and sizes you set by hand instead. A preview shows the layout from above and from the front, and a switch turns auto-arrange at startup on or off.
-- Visibility & wrist: the visibility, game, and controller settings described above, the wrist angle, and buttons to pin all screens to a wrist or unpin them.
+- Layout: a curve around you, with the screens hinged edge to edge like monitors on a desk and each turned to face you, or a flat wall. Both take rows, distance, gap, and height. Save current arrangement saves the positions, sizes, curves, and pins you set by hand under a name instead. Named layouts are listed with the presets: pick one and Arrange now to switch to it, and rename or delete it with the buttons next to the list. A layout saved with fewer screens than you have now leaves the others where they were saved last, or where the preset would put them. A preview shows the layout from above and from the front, and a switch turns auto-arrange at startup on or off.
+- Visibility & pins: the visibility, game, and controller settings described above, the wrist angle, where each screen is pinned (in the room, a wrist, or your head), and buttons to pin all screens or unpin them.
 - Power: when the displays turn off while the headset isn't used, their state now, Turn displays off now (to try it), and Stay awake while plugged in. See [Displays off and sleep](#displays-off-and-sleep).
 
 `layout/ft-layout` does the arranging. It's a Python script that uses only the standard library and runs on the host:
@@ -134,6 +136,10 @@ Frametop Display Settings has four tabs (three with the gamescope backend, which
 ```
 layout/ft-layout apply      # arrange every screen
 layout/ft-layout capture    # save the current arrangement and sizes as the layout
+layout/ft-layout save NAME  # ...under a name too, and use it
+layout/ft-layout use NAME   # switch to a named layout and arrange the screens in it
+layout/ft-layout layouts    # list the named layouts (* = in use); rename OLD NEW, delete NAME
+layout/ft-layout pin N|all left|right|head   # pin as they are now; unpin N|all
 layout/ft-layout plan       # print the arrangement as JSON (no VR needed)
 layout/ft-layout scale      # per-screen scale, positions (as the screens are around you), and taskbar screen, to KWin
 layout/ft-layout toggle     # hide or show all screens
@@ -175,7 +181,6 @@ With remote access on, the nested KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHE
 
 ## Limits
 
-- There's no way yet to pin a screen to your head like a HUD.
 - A controller button can't show hidden screens; a mapped mouse or keyboard button can.
 - KWin's cursor isn't drawn on the screens, because KWin draws it as a host cursor, which ft-screens doesn't render. The 3D mouse's dot and SteamVR's laser dot show where you're pointing.
 - The old gamescope backend (`BACKEND=gamescope`) still works, but it gives every screen the same resolution, at most 1920×1080 pixels' worth, and arranging screens borrows the pointer for a few seconds.

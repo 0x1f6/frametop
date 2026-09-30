@@ -15,6 +15,9 @@ you face (yaw only), like a recenter. It lives in ~/.config/frametop-layout.json
    "mode": "preset" | "custom",
    "preset": {"kind": "arc" | "flat", "rows": 1, "distance": 2.0, "gap": 0.05, "height": 0},
    "primary": 2,                      the screen with the taskbar (1-based; default: the biggest)
+   "layouts": {"Work": [{"pos": ..., "face": ..., "roll": ..., "metres": ..., "curve": ...,
+                         "pin": ...}, ...]},   named layouts: each screen's place (SPATIAL)
+   "active": "Work",                  the named layout the custom arrangement came from
    "visibility": {"mode": "always",   ft-screens: always | dashboard (only with the SteamVR
                   "wrist_angle": 60,    dashboard open) | gesture (while you look at a controller)
                   "gesture_hand": "left", "gesture_angle": 20},   | toggle (hidden until shown);
@@ -23,6 +26,7 @@ you face (yaw only), like a recenter. It lives in ~/.config/frametop-layout.json
    "screens": [{"size": [w, h], "metres": 3.6,        ft-screens: pixels, and width in VR
                 "curve": 0,                           ft-screens: cylinder radius in metres, 0 = flat
                 "pin": {"hand": "left", "rel": [12]},  ft-screens: riding on that controller
+                                                      (left | right), or on the headset (head)
                 "scale": 1.0,                         KWin output scale (1.0 = 100%)
                 "pos": [x, y, z], "face": [yaw, pitch], "roll": 0,   custom layout
                 "rotation": "normal" | "left" | "right"}, ...],      gamescope only
@@ -38,12 +42,17 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout apply [--wait SECONDS]   arrange every screen; --wait is for desktop start:
                                      wait for the screens, skip if "auto" is off
   ft-layout capture                  save the current arrangement as the custom layout
+  ft-layout save NAME                save it as a named layout too, and use that
+  ft-layout use NAME                 switch to a named layout and arrange the screens in it
+  ft-layout layouts                  list the named layouts (* = the one in use)
+  ft-layout rename OLD NEW | delete NAME
   ft-layout plan                     print the arrangement as JSON (no VR needed)
   ft-layout scale                    per-screen scale, positions (as the screens are around
                                      you), and primary to KWin
   ft-layout screen-args              ft-screens' --screen arguments for the session script
   ft-layout toggle                   hide or show all screens (ft-screens)
-  ft-layout pin all|N left|right     pin screens to a wrist as they are; unpin all|N
+  ft-layout pin all|N left|right|head  pin screens to a wrist or your head as they are;
+                                     unpin all|N
 """
 import fcntl
 import json
@@ -68,6 +77,7 @@ PIXELS_PER_METRE = 800         # ft-screens: a new screen's default size in VR (
 # or leaves them up (visible).
 VISIBILITY = {"mode": "always", "wrist_angle": 60, "gesture_hand": "left", "gesture_angle": 20,
               "controllers": "outside_games", "in_games": "hide"}
+SPATIAL = ("pos", "face", "roll", "metres", "curve", "pin")  # what a named layout keeps of a screen
 DEFAULTS = {"auto": True, "mode": "preset",
             "preset": {"kind": "arc", "rows": 1, "distance": 2.0, "gap": 0.05, "height": 0.0},
             "screens": [], "panel_size": list(DEFAULT_PANEL)}
@@ -574,7 +584,82 @@ def apply(wait=0):
 
 
 def capture():
-    return capture_screens() if backend() == "screens" else capture_gamescope()
+    """Where the screens are now as the custom layout. It's no longer a named one's until
+    `save NAME` (placed by hand since)."""
+    screens = capture_screens() if backend() == "screens" else capture_gamescope()
+    layout = load_layout()
+    if layout.pop("active", None) is not None:
+        save_layout(layout)
+    return screens
+
+
+# ---------------------------------------------------------------- named layouts
+
+def layout_names(layout):
+    return sorted(layout.get("layouts", {}), key=str.casefold)
+
+
+def check_name(name):
+    name = " ".join(name.split())
+    if not name or len(name) > 40:
+        raise RuntimeError("a layout's name needs 1 to 40 characters")
+    return name
+
+
+def save_named(layout, name):
+    """The custom arrangement (as captured) under `name`, replacing one of that name, and
+    in use."""
+    name = check_name(name)
+    screens = [s for s in layout.get("screens", [])[:screen_count(layout)] if "pos" in s]
+    if not screens:
+        raise RuntimeError("nothing to save: no arrangement captured")
+    layout.setdefault("layouts", {})[name] = [{k: s[k] for k in SPATIAL if k in s} for s in screens]
+    layout["mode"], layout["active"] = "custom", name
+    return name
+
+
+def use_named(layout, name):
+    """Make a named layout the custom arrangement (not arranged yet). A layout saved with
+    fewer screens leaves the others where the preset would put them, or where they were
+    saved last; one saved with more keeps its extra screens for later."""
+    saved = layout.get("layouts", {}).get(name)
+    if saved is None:
+        raise RuntimeError(f"no layout called {name!r}")
+    count = screen_count(layout)
+    preset = plan(dict(layout, mode="preset"), count)
+    screens = layout.setdefault("screens", [])
+    while len(screens) < count:
+        screens.append({})
+    for i in range(count):
+        if i < len(saved):
+            for k in SPATIAL:
+                screens[i].pop(k, None)
+            screens[i].update(json.loads(json.dumps(saved[i])))
+        elif "pos" not in screens[i]:
+            screens[i].update({"pos": list(preset[i]["pos"]), "face": list(preset[i]["face"]),
+                               "roll": preset[i]["roll"]})
+    layout["mode"], layout["active"] = "custom", name
+
+
+def rename_named(layout, old, new):
+    new = check_name(new)
+    named = layout.get("layouts", {})
+    if old not in named:
+        raise RuntimeError(f"no layout called {old!r}")
+    if new != old and new in named:
+        raise RuntimeError(f"there's already a layout called {new!r}")
+    named[new] = named.pop(old)
+    if layout.get("active") == old:
+        layout["active"] = new
+    return new
+
+
+def delete_named(layout, name):
+    """The screens stay where the layout put them, as an unnamed custom arrangement."""
+    if layout.get("layouts", {}).pop(name, None) is None:
+        raise RuntimeError(f"no layout called {name!r}")
+    if layout.get("active") == name:
+        layout.pop("active")
 
 
 # ---------------------------------------------------------------- KWin (scale, positions, primary)
@@ -737,10 +822,21 @@ def main(argv):
             print(screen_args())
         elif cmd == "toggle":
             log(screens_socket().ask("toggle"))
+        elif cmd == "layouts":
+            layout = load_layout()
+            for name in layout_names(layout):
+                print(("* " if name == layout.get("active") and layout.get("mode") == "custom" else "  ") + name)
+        elif cmd in ("rename", "delete") and len(argv) == (4 if cmd == "rename" else 3):
+            layout = load_layout()
+            if cmd == "rename":
+                rename_named(layout, argv[2], argv[3])
+            else:
+                delete_named(layout, argv[2])
+            save_layout(layout)
         elif cmd in ("pin", "unpin") and len(argv) >= 3:
             log(screens_socket().ask(" ".join(argv[1:])))
             kwin_follow()  # pinned screens go last
-        elif cmd in ("apply", "capture", "scale"):
+        elif cmd in ("apply", "capture", "scale") or (cmd in ("save", "use") and len(argv) == 3):
             with open(LOCK_PATH, "w") as lock:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -779,6 +875,24 @@ def main(argv):
                     for i, s in enumerate(capture()):
                         log(f"screen {i + 1}: {s}")
                     kwin_follow()
+                elif cmd == "save":
+                    check_name(argv[2])
+                    capture()
+                    layout = load_layout()
+                    log(f"saved layout {save_named(layout, argv[2])!r}")
+                    save_layout(layout)
+                    kwin_follow()
+                elif cmd == "use":
+                    layout = load_layout()
+                    use_named(layout, argv[2])
+                    save_layout(layout)
+                    log(f"using layout {argv[2]!r}")
+                    try:
+                        apply()
+                    except RuntimeError as e:
+                        log(f"not arranged now: {e}")
+                    else:
+                        kwin_follow()
                 else:
                     changes = apply_scales()
                     log("kwin: " + (" ".join(changes) if changes else "unchanged"))
