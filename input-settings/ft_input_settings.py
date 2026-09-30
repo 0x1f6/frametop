@@ -85,7 +85,7 @@ GAZE_SETTINGS = [
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
 ]
 # The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
-GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker (frame-eyes)"}
+GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker"}
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [

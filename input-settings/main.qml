@@ -779,16 +779,18 @@ Kirigami.ApplicationWindow {
                         onToggled: if (checked) backend.setGazeTracker("steam")
                     }
                     Controls.RadioButton {
-                        text: "Own tracker (frame-eyes)"
+                        text: "Own tracker"
                         checked: backend.gazeTracker === "own"
                         onToggled: if (checked) backend.setGazeTracker("own")
                     }
                 }
                 Controls.Label {
-                    // Ours runs apart from Frametop (frame-eyes: tools/fe-live) and keeps its own calibration.
+                    // The gaze service runs ours (gaze/tracker/ft-eyes); it needs the frame grabber
+                    // (gaze/tracker/install.sh, root) and keeps its own calibration.
                     visible: backend.gazeTracker === "own" && backend.gazeServiceRunning
                              && (!gpage.status.own_running || gpage.status.own_reseat || !gpage.status.calibration_samples)
-                    text: !gpage.status.own_running ? "Not running: start it in frame-eyes (tools/fe-live), then calibrate"
+                    text: !gpage.status.eyegrab ? "Needs its frame grabber: run gaze/tracker/install.sh (asks for sudo)"
+                          : !gpage.status.own_running ? "Starting…"
                           : !gpage.status.calibration_samples ? "Not calibrated: use Calibrate… with Own tracker"
                           : "The headset was off: your first nudge and click resets where it sits"
                     color: gpage.status.own_running ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
@@ -921,7 +923,7 @@ Kirigami.ApplicationWindow {
                       + "to drag something instead. Look away to hand back: how far from the pointer you look before the "
                       + "gaze takes it back from the mouse. Largest nudge to learn: bigger mouse moves before a click "
                       + "are treated as using the mouse, not correcting the gaze. Eye tracker: SteamVR's, or our own "
-                      + "(frame-eyes), which keeps its own calibration (Calibrate… with Own tracker). Eye bias: the gaze "
+                      + "(gaze/tracker), which keeps its own calibration (Calibrate… with Own tracker). Eye bias: the gaze "
                       + "combines both eyes, since their errors partly cancel; Left or Right counts that eye twice as "
                       + "much, and Auto weights each by how far off it was at your recent nudges."
             }

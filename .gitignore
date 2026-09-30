@@ -5,3 +5,9 @@ target/
 captures/
 __pycache__/
 frametop-report-*.txt
+# Eye-camera recordings (biometric) never go in the repo: they live in
+# ~/.local/share/frametop/eyes/captures. These catch strays (frame dumps, a lab venv).
+*.raw
+*.pgm
+.venv/
+.frame-job.d/

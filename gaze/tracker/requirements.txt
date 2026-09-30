@@ -1,0 +1,5 @@
+# ft-eyes and the lab tools (gaze/tracker/build.sh puts them in build/venv, in the dev
+# container; frame-job's SETUP does the same on the PC). Fedora's python3-opencv would pull in
+# VTK, GDAL, and over a gigabyte of map data; these wheels are about 165 MB.
+numpy==2.5.3
+opencv-python-headless==5.0.0.93
