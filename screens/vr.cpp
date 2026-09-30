@@ -206,6 +206,7 @@ constexpr double kRollStep = 5;      // degrees per scroll notch on the roll but
 constexpr float kChromeIdle = 0.55f; // the controls' opacity without a laser on them
 constexpr long kControlsLinger = 35; // ticks (~0.4 s) the controls stay after a laser leaves
 long g_tick = 0;                     // ft_vr_poll calls
+bool g_vr = false;                   // connected to SteamVR (ft-screens --no-vr runs without it)
 constexpr vr::TrackedDeviceIndex_t kNone = vr::k_unTrackedDeviceIndexInvalid;
 
 struct Screen {
@@ -1150,6 +1151,7 @@ bool ft_vr_init(void) {
         std::fprintf(stderr, "openvr: no IVRIPCResourceManagerClient (SteamVR too old?)\n");
         return false;
     }
+    g_vr = true;
     RefreshPoses();
     // The catcher (see UpdateCatcher): clear and invisible, but the laser lands on it, and
     // it keeps SteamVR's laser mouse on while it's up.
@@ -1165,6 +1167,7 @@ bool ft_vr_init(void) {
 }
 
 void ft_vr_shutdown(void) {
+    if (!g_vr) return;
     if (g_catcher != vr::k_ulOverlayHandleInvalid) vr::VROverlay()->DestroyOverlay(g_catcher);
     g_catcher = vr::k_ulOverlayHandleInvalid;
     for (auto &[i, s] : g_screens)
@@ -1179,14 +1182,20 @@ void ft_vr_shutdown(void) {
 }
 
 int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
+    if (!g_vr) {  // --no-vr: nothing imports the buffers, so any layout KWin can draw
+        if (max < 1) return 0;
+        out[0] = 0;  // DRM_FORMAT_MOD_LINEAR
+        return 1;
+    }
     uint32_t n = uint32_t(max);
     if (!vr::VRIPCResourceManager()->GetDmabufModifiers(vr::VRApplication_Overlay, format, &n, out)) return 0;
     return int(n < uint32_t(max) ? n : uint32_t(max));
 }
 
-bool ft_vr_screens_shown(void) { return ModeVisible(); }
+bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
 
 void ft_vr_screen_create(int index, double metres, int count) {
+    if (!g_vr) return;
     Screen &s = g_screens[index];
     s.metres = metres;
     char key[64], name[64];
@@ -1237,6 +1246,7 @@ void ft_vr_screen_destroy(int index) {
 }
 
 bool ft_vr_screen_present(int index, const void *key, const struct ft_dmabuf *b) {
+    if (!g_vr) return false;
     auto sit = g_screens.find(index);
     if (sit == g_screens.end()) return false;
     Screen &s = sit->second;
@@ -1284,6 +1294,7 @@ void ft_vr_forget(const void *key) {
 }
 
 void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!g_vr) return;
     RefreshPoses();
     for (auto &[index, s] : g_screens) {
         vr::VREvent_t ev;
@@ -1438,6 +1449,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
 // (size <screen> <w> <h> and key <code> <value> are handled in compositor.c.) Screens are
 // numbered from 1 here, like everywhere the user sees them.
 void ft_vr_command(const char *cmd, char *reply, int size) {
+    if (!g_vr) return (void)std::snprintf(reply, size, "error no SteamVR (--no-vr)");
     RefreshPoses();
     int n;
     double x, y, z, yaw, pitch, roll, w;

@@ -12,8 +12,13 @@
 //     buffers are in pixels, so a panel position in pixels is divided by the screen's KWin
 //     scale first ("scale <screen> <s>", from ft-layout).
 //
-// Usage: ft-screens [--socket NAME] [--screen WxH@METRES]... [-- COMMAND ARGS...]
+// Usage: ft-screens [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]...
+//                   [-- COMMAND ARGS...]
 //   --socket    Wayland socket name in $XDG_RUNTIME_DIR (default ft-screens-0)
+//   --control   the control socket's abstract name (default ft_screens)
+//   --no-vr     run without SteamVR, for tests next to the running desktop: no panels, no
+//               input, and nothing sent to the input relay. Commands still work, and
+//               "toplevels" shows what KWin opened.
 //   --screen    one per screen, in KWin's order (default: 3440x1440@2.4)
 //   COMMAND     run with WAYLAND_DISPLAY set to our socket (e.g. the Frametop session)
 // Runs in the dev container (wlroots 0.20); KWin connects from the host.
@@ -68,8 +73,10 @@ struct screen {
     struct wlr_xdg_toplevel *toplevel;
     struct wlr_buffer *held;      // on the panel now; unlocked when the next one arrives
     bool frame_pending;           // a commit waits for its frame callback
+    unsigned commits;             // buffers committed, and the last one's size ("toplevels")
+    int buffer_width, buffer_height;
     struct wlr_xdg_toplevel_decoration_v1 *decoration;  // answered on the first commit
-    struct wl_listener commit, destroy, decoration_destroy;
+    struct wl_listener commit, destroy, decoration_destroy, set_title;
 };
 
 // Per client buffer: forget its import when it goes away.
@@ -102,6 +109,7 @@ struct server {
     int relay_fd;         // unbound, so the relay can't reply into our control socket
     uint32_t relay_sent;  // when the relay last heard from us (ms)
     unsigned ticks;
+    bool vr;  // connected to SteamVR (not --no-vr)
 };
 
 static uint32_t now_ms(void) {
@@ -153,6 +161,8 @@ static void screen_commit(struct wl_listener *l, void *data) {
     }
     if (!buffer) return;
     sc->frame_pending = true;
+    ++sc->commits;
+    sc->buffer_width = buffer->width, sc->buffer_height = buffer->height;
     if (buffer == sc->held) return;
     struct wlr_dmabuf_attributes a;
     if (!wlr_buffer_get_dmabuf(buffer, &a)) {
@@ -187,7 +197,15 @@ static void screen_destroy(struct wl_listener *l, void *data) {
     sc->server->screens[sc->index] = NULL;
     wl_list_remove(&sc->commit.link);
     wl_list_remove(&sc->destroy.link);
+    wl_list_remove(&sc->set_title.link);
     free(sc);
+}
+
+// KWin titles each window "KDE Wayland Compositor <output name>", with "- Output disabled"
+// after it while that output is off.
+static void screen_title(struct wl_listener *l, void *data) {
+    struct screen *sc = wl_container_of(l, sc, set_title);
+    wlr_log(WLR_INFO, "screen %d: \"%s\"", sc->index + 1, sc->toplevel->title ? sc->toplevel->title : "");
 }
 
 static void new_toplevel(struct wl_listener *l, void *data) {
@@ -211,6 +229,8 @@ static void new_toplevel(struct wl_listener *l, void *data) {
     wl_signal_add(&toplevel->base->surface->events.commit, &sc->commit);
     sc->destroy.notify = screen_destroy;
     wl_signal_add(&toplevel->events.destroy, &sc->destroy);
+    sc->set_title.notify = screen_title;
+    wl_signal_add(&toplevel->events.set_title, &sc->set_title);
 }
 
 // KWin asks for server-side decorations for its screens; we draw none. It asks before its
@@ -294,6 +314,7 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
 // gamescope's focus) doesn't get the keys too. Without word from us for a few seconds,
 // the relay gives the keyboards back, so a closed desktop doesn't keep them.
 static void keys_update(struct server *s) {
+    if (!s->vr) return;  // a test instance leaves the running desktop's keyboards alone
     const bool desktop = s->keys_clicked && ft_vr_screens_shown();
     const uint32_t t = now_ms();
     if (desktop == s->keys_desktop && t - s->relay_sent < 1000) return;
@@ -366,6 +387,9 @@ static void handle_key(struct server *s, uint32_t code, int value, char *reply, 
 
 // Control socket: abstract datagram @ft_screens. Here: "size <screen> <w> <h>" (a new
 // resolution, live), "scale <screen> <s>" (KWin's scale for it, from ft-layout),
+// "toplevels" (-> "ok <count>" and a line per KWin window: "<screen> <w>x<h> <commits>
+// <title>"), "input <screen> move|down|up|leave [x y [left|right|middle]]" (pointer input
+// as if from that panel, x and y in its pixels; for tests, mostly with --no-vr),
 // "key <code> <value>", and "click <overlay key>" (from the pointer
 // helper: a mouse click landed on that panel, "-" for none); the rest is in vr.cpp
 // (ft_vr_command).
@@ -402,6 +426,34 @@ static int control_readable(int fd, uint32_t mask, void *data) {
             handle_key(s, code, value, reply, sizeof reply);
             len = sizeof from;
             continue;  // no reply: keys are fire-and-forget
+        } else if (strncmp(buf, "input ", 6) == 0) {
+            char what[8] = "", button[8] = "left";
+            double x = 0, y = 0;
+            const int got = sscanf(buf, "input %d %7s %lf %lf %7s", &index, what, &x, &y, button);
+            struct ft_event e = {.screen = index - 1, .x = x, .y = y, .button = BTN_LEFT};
+            if (strcmp(button, "right") == 0) e.button = BTN_RIGHT;
+            else if (strcmp(button, "middle") == 0) e.button = BTN_MIDDLE;
+            if (got >= 2 && strcmp(what, "leave") == 0) e.type = FT_LEAVE;
+            else if (got >= 4 && strcmp(what, "move") == 0) e.type = FT_MOTION;
+            else if (got >= 4 && (strcmp(what, "down") == 0 || strcmp(what, "up") == 0))
+                e.type = FT_BUTTON, e.pressed = what[0] == 'd';
+            else index = 0;
+            if (index < 1 || index > MAX_SCREENS || !s->screens[index - 1]) {
+                snprintf(reply, sizeof reply, "error input <screen> move|down|up|leave [x y [button]]");
+            } else {
+                handle_vr_event(&e, s);
+                snprintf(reply, sizeof reply, "ok");
+            }
+        } else if (strcmp(buf, "toplevels") == 0) {
+            int n = 0, at = 0;
+            for (int i = 0; i < MAX_SCREENS; ++i) n += s->screens[i] != NULL;
+            at = snprintf(reply, sizeof reply, "ok %d", n);
+            for (int i = 0; i < MAX_SCREENS && at < (int)sizeof reply; ++i) {
+                const struct screen *sc = s->screens[i];
+                if (!sc) continue;
+                at += snprintf(reply + at, sizeof reply - at, "\n%d %dx%d %u %s", i + 1, sc->buffer_width,
+                               sc->buffer_height, sc->commits, sc->toplevel->title ? sc->toplevel->title : "");
+            }
         } else if (strncmp(buf, "click ", 6) == 0) {
             // A click on another panel takes typing to Steam. Our own panels (the screens,
             // their controls) leave it: a click on a screen arrives as a panel event.
@@ -418,13 +470,18 @@ static int control_readable(int fd, uint32_t mask, void *data) {
     return 0;
 }
 
-static int open_control_socket(void) {
+static int open_control_socket(const char *name) {
     int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    const char name[] = "ft_screens";
-    memcpy(addr.sun_path + 1, name, sizeof name - 1);
-    if (bind(fd, (struct sockaddr *)&addr, offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1) != 0) {
-        wlr_log(WLR_ERROR, "can't bind @ft_screens (another ft-screens running?)");
+    const size_t len = strlen(name);
+    if (len == 0 || len >= sizeof addr.sun_path - 1) {
+        wlr_log(WLR_ERROR, "bad control socket name");
+        close(fd);
+        return -1;
+    }
+    memcpy(addr.sun_path + 1, name, len);
+    if (bind(fd, (struct sockaddr *)&addr, offsetof(struct sockaddr_un, sun_path) + 1 + len) != 0) {
+        wlr_log(WLR_ERROR, "can't bind @%s (another ft-screens running?)", name);
         close(fd);
         return -1;
     }
@@ -467,11 +524,16 @@ static bool setup_dmabuf(struct server *s) {
 int main(int argc, char **argv) {
     struct server s = {0};
     for (int i = 0; i < MAX_SCREENS; ++i) s.scale[i] = 1;
-    const char *socket_name = "ft-screens-0";
+    const char *socket_name = "ft-screens-0", *control_name = "ft_screens";
     char **command = NULL;
+    s.vr = true;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
             socket_name = argv[++i];
+        } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
+            control_name = argv[++i];
+        } else if (strcmp(argv[i], "--no-vr") == 0) {
+            s.vr = false;
         } else if (strcmp(argv[i], "--screen") == 0 && i + 1 < argc && s.n_config < MAX_SCREENS) {
             struct config *c = &s.config[s.n_config];
             c->metres = 0;
@@ -485,7 +547,10 @@ int main(int argc, char **argv) {
             command = &argv[i + 1];
             break;
         } else {
-            fprintf(stderr, "usage: %s [--socket NAME] [--screen WxH@METRES]... [-- COMMAND ARGS...]\n", argv[0]);
+            fprintf(stderr,
+                    "usage: %s [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]... "
+                    "[-- COMMAND ARGS...]\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -493,7 +558,8 @@ int main(int argc, char **argv) {
 
     setvbuf(stdout, NULL, _IOLBF, 0);  // vr.cpp prints to stdout; keep it in order with the log
     wlr_log_init(WLR_INFO, NULL);
-    if (!ft_vr_init()) return 1;
+    if (s.vr && !ft_vr_init()) return 1;
+    if (!s.vr) wlr_log(WLR_INFO, "--no-vr: running without SteamVR");
 
     s.display = wl_display_create();
     s.loop = wl_display_get_event_loop(s.display);
@@ -530,7 +596,7 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof path, "%s/%s", getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "/tmp", socket_name);
     wlr_log(WLR_INFO, "listening on %s; %d screen(s) configured", path, s.n_config);
 
-    const int control = open_control_socket();
+    const int control = open_control_socket(control_name);
     if (control < 0) return 1;
     s.relay_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     wl_event_loop_add_fd(s.loop, control, WL_EVENT_READABLE, control_readable, &s);
