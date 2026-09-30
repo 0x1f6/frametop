@@ -10,7 +10,8 @@
  * One slot per side and gesture: pinch[0] and grip[0] are the left hand, [1] the right.
  * A gesture follows the hand it began on until it ends.
  *   Pinch: begins when the thumb and index tips close within begin_m and ends when they
- * open past end_m (the gap between keeps it from flickering). point is between the tips.
+ * open past end_m (the gap between keeps it from flickering). point is the index and middle
+ * knuckles, which don't move as the fingers open and close (the tips' midpoint did).
  *   Grip: a closed hand. It begins when all four fingers are curled in (each fingertip
  * nearer the wrist than grip_begin times its knuckle is) and ends when they open past
  * grip_end on average. distance is that average (about 2 open, under 1.2 closed), strength
@@ -55,8 +56,8 @@ typedef struct {
     float    distance;          /* pinch: thumb tip to index tip, m, at this user's */
                                 /* hand size. grip: the fingers' mean curl (above)  */
     float    strength;          /* 0 open .. 1 closed                               */
-    float    point[3];          /* pinch: between the thumb and index tips; grip:   */
-                                /* the palm's centre                                */
+    float    point[3];          /* pinch: the index and middle knuckles; grip: the  */
+                                /* palm's centre                                    */
     float    begin_point[3];    /* point when the current or last one began         */
 } fh_pinch_t;                   /* 64 bytes */
 

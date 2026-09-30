@@ -65,7 +65,11 @@ void Pinch::update(const std::vector<const Hand *> &hands, const std::vector<See
         }
         if (n) world_d[s] = sum / n * h->scale;
         const double d = p_.triangulated || world_d[s] < 0 ? tri_d[s] : world_d[s];
-        const V3 point = (h->smooth[kThumbTip] + h->smooth[kIndexTip]) * 0.5;
+        // Where the pinch is, for drags: the index and middle knuckles, which hold still while
+        // the fingers open and close. The point between the tips moved 1-2 cm as a pinch
+        // opened, so every release dragged the pointer off what it pressed (headset test,
+        // 2026-09-30).
+        const V3 point = (h->smooth[5] + h->smooth[9]) * 0.5;
         o.flags |= FH_PINCH_TRACKED;
         o.hand_id = uint32_t(h->id);
         o.distance = float(d);
@@ -126,10 +130,11 @@ namespace {
 
 constexpr int kWrist = 0, kFingers[4][2] = {{5, 8}, {9, 12}, {13, 16}, {17, 20}};   // knuckle, tip
 
-// Each finger's curl (see GripParams): from the model's world landmarks averaged over the
-// hand's views this step, or the tracker's 3D points without any.
-bool curls(const Hand &h, const std::vector<Seen> &views, double out[4]) {
-    double sum[4] = {};
+// Each finger's curl (see GripParams), and the thumb tip's distance from the index tip (m):
+// from the model's world landmarks averaged over the hand's views this step, or the
+// tracker's 3D points without any.
+bool curls(const Hand &h, const std::vector<Seen> &views, double out[4], double *thumb) {
+    double sum[4] = {}, gap = 0;
     int n = 0;
     for (const Seen &v : views) {
         if (v.hand != h.id) continue;
@@ -138,8 +143,10 @@ bool curls(const Hand &h, const std::vector<Seen> &views, double out[4]) {
             const double k = norm(p(kFingers[f][0]) - p(kWrist));
             sum[f] += k > 1e-4 ? norm(p(kFingers[f][1]) - p(kWrist)) / k : 2;
         }
+        gap += norm(p(4) - p(8)) * h.scale;
         ++n;
     }
+    *thumb = n ? gap / n : norm(h.smooth[4] - h.smooth[8]);
     for (int f = 0; f < 4; ++f) {
         if (n) {
             out[f] = sum[f] / n;
@@ -172,8 +179,8 @@ void Grip::update(const std::vector<const Hand *> &hands, const std::vector<Seen
             if (!h || c->frames > h->frames) h = c;
         }
         curl[s] = -1;
-        double f[4];
-        if (!h || !curls(*h, views, f)) {
+        double f[4], thumb = 1;
+        if (!h || !curls(*h, views, f, &thumb)) {
             o.flags &= ~FH_PINCH_TRACKED;
             if (down && (t_ns - seen_ns_[s]) / 1e9 > p_.grace_s) end(s, t_ns, true);
             continue;
@@ -191,7 +198,7 @@ void Grip::update(const std::vector<const Hand *> &hands, const std::vector<Seen
             if (mean > p_.end) open_ns_[s] = t_ns;
             const bool ahead = -point[2] >= p_.min_ahead_m &&
                                std::atan2(-point[1], -point[2]) * 180 / M_PI <= p_.max_down_deg;
-            if (most < p_.begin && ahead && open_ns_[s] && (t_ns - open_ns_[s]) / 1e9 <= p_.armed_s) {
+            if (most < p_.begin && ahead && thumb >= p_.thumb_off_m && open_ns_[s] && (t_ns - open_ns_[s]) / 1e9 <= p_.armed_s) {
                 o.flags = (o.flags | FH_PINCH_DOWN) & ~FH_PINCH_LOST;
                 ++o.begins;
                 o.begin_ns = uint64_t(t_ns);

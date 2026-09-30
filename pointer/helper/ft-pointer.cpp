@@ -180,8 +180,11 @@
 //   A grip (closing the hand) is a press and drag: the press where the pointer is, then the
 // hand moves the pointer at POINTER_GRIP_GAIN (1: as far as it moves, seen from the eye), and
 // opening the hand releases. So it drags whatever the pointer is on: a title bar moves the
-// window, a panel's grab bar carries the panel, text is selected. Only with the hand held up,
-// at most POINTER_GRIP_BELOW (0.3 m) below the eyes: hands on a desk curl like a loose fist.
+// window, a panel's grab bar carries the panel, text is selected.
+//   Typing touches thumb to index like a pinch: no pinch begins within POINTER_PINCH_TYPING
+// (1 s) of a key (the relay says "typing"). A grip begins only with the hand held up, at most
+// POINTER_GRIP_BELOW (0.35 m) below the eyes: hands on a desk curl like a loose fist. (The
+// user's own pinches sat 0.35-0.45 m below the eyes, elbow resting, so pinches have no such limit.)
 //   The hand's movement is taken in the room, from where the eye was when the gesture began,
 // with the head pose at each frame's capture time, so turning your head doesn't move it.
 // The first gesture while the pointer is off only wakes it. Gestures are ignored in a VR game
@@ -236,7 +239,7 @@
 // gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
 // POINTER_HANDS (1), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
-// POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.3 m): hands, above.
+// POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.35 m), POINTER_PINCH_TYPING (1 s): hands, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -646,7 +649,7 @@ int main() {
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
     // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
     bool handsOn = true;
-    double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, gripBelow = 0.3;
+    double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, handBelow = 0.35, typingHold = 1.0;
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
     auto loadConfig = [&] {
@@ -675,7 +678,8 @@ int main() {
         pinchGain = std::clamp(ConfDouble(conf, "POINTER_PINCH_GAIN", 0.5), 0.05, 3.0);
         pinchDeadzone = std::clamp(ConfDouble(conf, "POINTER_PINCH_DEADZONE", 1.5), 0.0, 10.0);
         gripGain = std::clamp(ConfDouble(conf, "POINTER_GRIP_GAIN", 1.0), 0.05, 3.0);
-        gripBelow = std::clamp(ConfDouble(conf, "POINTER_GRIP_BELOW", 0.3), 0.05, 1.0);
+        handBelow = std::clamp(ConfDouble(conf, "POINTER_GRIP_BELOW", 0.35), 0.05, 1.0);
+        typingHold = std::clamp(ConfDouble(conf, "POINTER_PINCH_TYPING", 1.0), 0.0, 5.0);
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
         const auto ig = conf.find("POINTER_IGNORE");
         ignore = ParseIgnore(ig == conf.end() ? "" : ig->second);
@@ -820,6 +824,7 @@ int main() {
     int handOpens = 0;
     uint64_t handSeq = 0, handPublished = 0;
     Clock::time_point handUsed{};  // a gesture began then (keeps the pointer, like gaze mode)
+    Clock::time_point lastTyping{};  // the relay's last "typing": a key on a keyboard
     // Gaze mode outside games, and its dot (see the top): lastMove/lastHeld/pulseAt.
     bool inGame = false, gazeAwake = false;
     Clock::time_point inGameAt{}, gazeAwakeAt{};
@@ -1108,6 +1113,10 @@ int main() {
             double g[4];
             if (std::sscanf(buf, "gz %lf %lf %lf %lf", &g[0], &g[1], &g[2], &g[3]) == 4) {
                 gz = {g[0], g[1], g[2], g[3], Clock::now()};
+                continue;
+            }
+            if (std::strcmp(buf, "typing") == 0) {  // not mouse input: it never wakes the pointer
+                lastTyping = Clock::now();
                 continue;
             }
             if (std::strncmp(buf, "vrbind", 6) == 0) {
@@ -1415,12 +1424,16 @@ int main() {
             }
             vr::HmdMatrix34_t head;
             if (!poses.At(g.begin_ns, head)) return;
-            // A grip only with the hand held up: hands on a desk (typing, on the mouse) curl
-            // like a loose fist, and looking down at them puts them straight ahead in the
-            // head's frame, where ft-hands' own check can't tell.
+            // No pinch just after a key (typing touches thumb to index), and a grip only with
+            // the hand held up (hands on a desk curl like a loose fist; looking down at them
+            // puts them straight ahead in the head's frame, where ft-hands can't tell).
             const Vec3 at = Position(head) + Rotate(head, Vec3{g.begin_point[0], g.begin_point[1], g.begin_point[2]});
-            if (grip && Position(head).y - at.y > gripBelow) {
-                if (debug) std::printf("hand grip ignored: %.2f m below the eyes\n", Position(head).y - at.y);
+            if (!grip && tnow - lastTyping < std::chrono::duration<double>(typingHold)) {
+                if (debug) std::printf("hand pinch ignored: typing\n");
+                return;
+            }
+            if (grip && Position(head).y - at.y > handBelow) {
+                if (debug) std::printf("hand %s ignored: %.2f m below the eyes\n", grip ? "grip" : "pinch", Position(head).y - at.y);
                 return;
             }
             hold = {side, grip, false, Position(head)};

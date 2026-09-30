@@ -34,6 +34,8 @@ reaches games; see pointer/helper/vrbuttons.h).
 
 In gaze mode outside games, the helper keeps the pointer ("gazeawake 1", repeated every 5
 seconds; "gazeawake 0" or silence ends it): the pointer isn't released when the mouse is idle.
+Typing on a keyboard sends the helper "typing" (at most 4 times a second): it takes no hand
+pinches right after a key, since typing touches thumb to index like a pinch.
 
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
 types them into the desktop screen that has focus: from pass-through keyboards, and
@@ -614,6 +616,7 @@ def main():
     load_config()
     meta_down = False  # Meta pressed with no other key yet: a tap toggles the dashboard
     screens_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+    last_typing = 0.0  # the helper was last told of a key then (see "typing" at the top)
 
     def vr_bind(now):
         """Tell the pointer helper which controller buttons to take from games."""
@@ -957,6 +960,9 @@ def main():
                     # Observed only, unless typing goes to the desktop. With META_DASHBOARD=1,
                     # a Meta tap on any keyboard toggles the dashboard.
                     if node.role == "passthrough" and etype == EV_KEY:
+                        if value == 1 and code < BTN_MISC and now - last_typing >= 0.25:
+                            last_typing = now
+                            screens_sock.sendto(b"typing", HELPER)
                         to_screens(code, value)
                         if node.grabbed and code < BTN_MISC and value in (0, 1):
                             share_key(node, code, value)

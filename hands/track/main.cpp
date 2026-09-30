@@ -177,6 +177,7 @@ int main(int argc, char **argv) {
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
     PinchParams pinch_params;
     GripParams grip_params;
+    bool gesture_log = false;   // what the pinch and grip detectors measure, 10 times a second
     double record_for = 120;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -194,6 +195,7 @@ int main(int argc, char **argv) {
         else if (a == "--pinch-palm-down" && more) pinch_params.palm_down_max = std::atof(argv[++i]);
         else if (a == "--grip-begin" && more) grip_params.begin = std::atof(argv[++i]);
         else if (a == "--grip-end" && more) grip_params.end = std::atof(argv[++i]);
+        else if (a == "--gesture-log") gesture_log = true;
         else if (a == "--swap-sides") swap_sides = true;
         else if (a == "--record-only") track = publish = false;
         else if (a == "--ring" && more) ring_path = argv[++i];
@@ -220,7 +222,7 @@ int main(int argc, char **argv) {
                         "          [--cams auto|mono|color|all] (auto) [--bright all|color] (all) [--bright-on L] (40) [--bright-off L] (25)\n"
                         "          [--color-left color_video0|color_video3] [--color-crop subtract|none]\n"
                         "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated] [--pinch-palm-down MAX] (0.6)\n"
-                        "          [--grip-begin R] (1.2) [--grip-end R] (1.45)\n"
+                        "          [--grip-begin R] (1.2) [--grip-end R] (1.45) [--gesture-log]\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
                         "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for ft-handreplay; SIGUSR1\n"
                         "starts one in ~/.local/share/frametop/hands/rec-<time>. --record-only records without tracking, so it\n"
@@ -339,7 +341,7 @@ int main(int argc, char **argv) {
     std::map<std::string, uint64_t> last;       // per camera: the frame last used
     std::map<std::string, uint64_t> lit_seen;   // per colour camera: the frame last counted for the light
     const uint64_t start = mono_ns();
-    uint64_t t_status = start, next_ns = 0, t_want = 0;
+    uint64_t t_status = start, next_ns = 0, t_want = 0, t_glog = 0;
     double cpu0 = cpu_seconds();
     std::vector<double> lat;
     double hands_sum = 0, resid_sum = 0;
@@ -541,6 +543,14 @@ int main(int argc, char **argv) {
         const std::vector<Seen> views = tracker.views_now();
         grip.update(hands, views, int64_t(capture));
         pinch.update(hands, views, int64_t(capture), grip.gripping());
+        if (gesture_log && capture - t_glog >= 100'000'000) {
+            t_glog = capture;
+            for (int k = 0; k < 2; ++k)
+                if (pinch.world_d[k] >= 0)
+                    std::printf("gesture %s d world %.3f tri %.3f palm-down %.2f curl %.2f%s\n", k ? "right" : "left ",
+                                pinch.world_d[k], pinch.tri_d[k], pinch.palm_down[k], grip.curl[k],
+                                pinch.side(k).flags & FH_PINCH_DOWN ? " PINCH" : grip.side(k).flags & FH_PINCH_DOWN ? " GRIP" : "");
+        }
         // a gesture down or closing gets the full rate, even while the palm holds still
         next_ns = tmin + uint64_t((std::min(tracker.interval(), pinch.engaged() || grip.engaged() ? 1 / 30.0 : 1.0) -
                                    0.005) * 1e9);

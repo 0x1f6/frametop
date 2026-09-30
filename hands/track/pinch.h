@@ -27,7 +27,10 @@ struct PinchParams {
     // head frame; 1 turns it off). Typing curls the thumb onto the index: in the 2026-09-30
     // lit recording, pinches that began while typing had 0.69-1.00, deliberate ones 0.00-0.50.
     // Looking down tilts the head frame, which lowers the reading for a hand on a keyboard.
-    double palm_down_max = 0.6;
+    // Off by default since the first headset test (2026-09-30 14:55): the user's deliberate
+    // pinches, hand raised in front, read 0.90-0.99 too. The pointer helper now leaves out
+    // gestures that begin low (hands on a desk), which it can tell with the head's pose.
+    double palm_down_max = 1.0;
 };
 
 class Pinch {
@@ -87,6 +90,10 @@ struct GripParams {
     // deliberate pinches 5-15.
     double max_down_deg = 35;
     double min_ahead_m = 0.15;
+    // ...and not with the thumb on the index fingertip, closer than this (m, the pinch's
+    // measure): that's a pinch with the other fingers curled, which the first headset test
+    // took for a grip.
+    double thumb_off_m = 0.03;
 };
 
 // Grip (a closed hand) detection, per side like Pinch: press and drag.
