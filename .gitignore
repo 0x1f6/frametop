@@ -14,6 +14,7 @@ camd/fh-camd
 camd/fh-camprobe
 trackd/fh-tracker
 trackd/fh-replay
+trackd/fh-ringplay
 trackd/nettest
 probes/fh-frametime
 probes/mgrvt

@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
     int threads = 3, niceness = 5;
     bool int8 = false, publish = true, track = true, swap_sides = false;
     std::string models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
-    std::string record;
+    std::string record, ring_path = FH_RING_PATH;
     // SteamOS starts user processes on CPUs 0-4 (2-4 are the big A720s) and keeps 5-7 (two
     // A720s and the X4) for SteamVR's compositor, whose threads there run at real-time
     // priority. XRService pins its head tracking to 2-3.
@@ -74,6 +74,7 @@ int main(int argc, char **argv) {
         else if (a == "--no-publish") publish = false;
         else if (a == "--swap-sides") swap_sides = true;
         else if (a == "--record-only") track = publish = false;
+        else if (a == "--ring" && more) ring_path = argv[++i];
         else if (a == "--record" && more) record = argv[++i];
         else if (a == "--record-for" && more) record_for = std::atof(argv[++i]);
         else if (a == "--keep-presence" && more) keep_presence = std::atof(argv[++i]);
@@ -92,7 +93,7 @@ int main(int argc, char **argv) {
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--record DIR] [--record-for S] [--record-only] [--cpus 2,3,4] [--swap-sides]\n"
-                        "          [--keep-presence P] (0.5)\n"
+                        "          [--keep-presence P] (0.5) [--ring PATH] (fh-camd's, or fh-ringplay's)\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
                         "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for fh-replay; SIGUSR1\n"
                         "starts one in captures/rec-<time> next to trackd. --record-only records without tracking, so it\n"
@@ -122,7 +123,7 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
         return true;
     };
-    if (!load_calibration(calib, err) || !ring.open(FH_RING_PATH, err) || !nets.load(models, int8, err) ||
+    if (!load_calibration(calib, err) || !ring.open(ring_path.c_str(), err) || !nets.load(models, int8, err) ||
         (publish && !pub.open(err)) || (!record.empty() && !start_recording(record, err))) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
@@ -135,7 +136,9 @@ int main(int argc, char **argv) {
     std::map<std::string, int> dark;
     std::map<std::string, Camera> used;
     for (int i = 0; i < ring.cameras(); ++i) {
+        // fh-camd's cameras by capture pipe; fh-ringplay's (no device) by the name it gives
         const char *name = camera_for_pipe(ring.camera(i).node);
+        if (!name && ring.camera(i).node < 0) name = ring.camera(i).name;
         if (!name || !calib.count(name)) continue;
         if (ring.camera(i).flags & FH_CAM_DARK) dark[std::string(name) + "_dk"] = i;
         else index[name] = i, used[name] = calib[name];

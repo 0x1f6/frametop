@@ -21,6 +21,8 @@ Options:
 - `--no-publish`: don't write the hands file.
 - `--record DIR`, `--record-for S`: save every frame set for S seconds (default 120) to `DIR/sets.bin`. That's about 80 MB/s. Sending the tracker SIGUSR1 (`pkill -USR1 -x fh-tracker`) starts a recording in `captures/rec-<time>` without a restart.
 - `--record-only`: record without tracking or publishing, so it can run beside the live tracker. Give it `--record DIR`; SIGUSR1 would reach both trackers. With `fh-camd --with-dark`, recordings also hold each camera's newest dark frame as `<name>_dk`, which doubles the rate.
+- `--keep-presence P`: the landmark presence a tracked view needs to stay tracked. New views always need 0.5. Default 0.5. Lowering it to 0.2 barely helped in the bright recording, because lost hands drop to near-zero presence.
+- `--ring PATH`: read frames from another ring, such as `fh-ringplay`'s.
 
 The status line also says how often a hand was on each side (by where the wrist is), and why views and hands came and went: views lost (the landmark model stopped seeing the hand), handoff misses (a crop projected from the hand's 3D position found nothing), duplicates, splits (two views disagreed in 3D), and hands created, merged and forgotten.
 
@@ -44,6 +46,10 @@ trackd/fh-replay captures/rec-20260929-120000 --oracle 10 --timeline /tmp/tl.txt
 - `--oracle N`: every N-th set, also search every tile of every camera, and report how often the tracker had the hands that full search could find.
 - `--slow F`: live, the tracker skips sets that arrive while it's busy. Replay counts each step's time times F as busy (default 1; the headset is busier live).
 - `--timeline FILE`: a line per processed set and hand.
+
+## Playing a recording live
+
+`fh-ringplay DIR --ring PATH [--from S] [--to S] [--loop]` publishes a recording into a ring file in real time, as fh-camd would, so `fh-tracker --ring PATH --no-publish` runs the same frames run after run. It needs no root, and it skips the dark frames. `probes/core_ab.py` uses it to compare CPU placements (A: CPUs 2-4, B: 5-7, C: no tracker), with the headset on so SteamVR's compositor is running.
 
 ## Build
 
