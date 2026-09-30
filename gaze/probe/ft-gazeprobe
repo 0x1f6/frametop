@@ -1409,7 +1409,7 @@ class Probe(Adw.ApplicationWindow):
         the drag was too far to be the tracker's error."""
         if not self.w_snaps.get_active():
             return "clicked (learning is off)"
-        if off > self.SNAP_LEARN_MAX:
+        if off > self.OWN_LEARN_MAX:
             return f"dragged {off:.1f} deg: too far to be the tracker's error, not learned"
         if p.get("t_raw") is None:
             return "no sample time at the press"
@@ -1473,6 +1473,11 @@ class Probe(Adw.ApplicationWindow):
     FLICK = 1.5       # degrees the gaze has to move from where it was at the press to step
     REARM = 0.9       # ... and come back within, before the next glance steps again
     SNAP_LEARN_MAX = 6.0  # degrees: a lesson bigger than this (after the correction) is a wrong element
+    # The Own tracker takes bigger ones: after the headset is taken off and put back on, its
+    # first clicks were 11-17 degrees off, and a 6-degree limit kept them from teaching it
+    # (frame-eyes, session 5). It keeps the median of an eye's last 5 clicks, so one click
+    # where you changed your mind does little harm.
+    OWN_LEARN_MAX = 25.0
 
     def snap_layout(self):
         w, h = self.canvas_size()
@@ -1828,21 +1833,26 @@ class Probe(Adw.ApplicationWindow):
         in the window), turned 20 degrees per round, and half the size in the middle round,
         so the fit sees the middle, halfway out, and the edge of your view.
 
-        For the Own tracker: the centre, then the corners and the middle of each side of the
-        area practice targets use, half the size in the middle round. Its fit is quadratic and
-        goes wrong past its dots, and the ring (limited by the window's height) left the sides
+        For the Own tracker: the centre, then eight directions on an oval out to `Calibration
+        ring` degrees each way (as much as fits across and up the window), turned 20 degrees
+        per round, and half the size in the middle round. Its fit is quadratic and goes
+        wrong past its dots, and the ring (limited by the window's height) left the sides
         out: in frame-eyes' practice2 the worst clicks were all past the ring."""
         w, h = self.canvas_size()
         cx, cy = w / 2, h / 2
-        if self.source == "own":
-            s = self.RING_SCALE[rnd]
-            left, right, bottom = cx - (cx - 80) * s, cx + (cx - 80) * s, cy + (cy - 80) * s
-            top = cy - (cy - 150) * s  # clear of the round and dot text at the top
-            return [(cx, cy), (left, top), (cx, top), (right, top), (right, cy), (right, bottom),
-                    (cx, bottom), (left, bottom), (left, cy)]
         r = self.raw.get(self.source)
         px_per_deg = 1 / r[5] if r and r[5] else 32.0
-        radius = min(self.w_ring.get_value() * px_per_deg, w / 2 - 60, h / 2 - 60) * self.RING_SCALE[rnd]
+        reach = self.w_ring.get_value() * px_per_deg
+        if self.source == "own":
+            k = self.RING_SCALE[rnd]
+            rx = min(reach, cx - 80) * k
+            up, down = min(reach, cy - 150) * k, min(reach, cy - 80) * k  # clear of the text at the top
+            pts = [(cx, cy)]
+            for i in range(8):
+                a = math.radians(-90 + rnd * 20 + i * 45)
+                pts.append((cx + rx * math.cos(a), cy + (up if math.sin(a) < 0 else down) * math.sin(a)))
+            return pts
+        radius = min(reach, w / 2 - 60, h / 2 - 60) * self.RING_SCALE[rnd]
         pts = [(cx, cy)]
         for k in range(6):
             a = math.radians(-90 + rnd * 20 + k * 60)
@@ -2097,7 +2107,7 @@ class Probe(Adw.ApplicationWindow):
         GLib.idle_add(self.area.queue_draw)  # the pulse
         total = len(self.ROUND_BG) * len(c["points"])
         n = c["round"] * len(c["points"]) + c["index"] + 1
-        self.text(cr, 60, 70, f"Calibration: round {c['round'] + 1} of 3 ({self.ROUND_NAMES[c['round']]}), dot {n} of {total}",
+        self.text(cr, 60, 70, f"Calibration ({'Own tracker' if self.source == 'own' else 'SteamVR'}): round {c['round'] + 1} of 3 ({self.ROUND_NAMES[c['round']]}), dot {n} of {total}",
                   ink, 26)
         hint = "Face the centre dot, look at the highlighted dot, and press. Esc cancels, S skips a dot."
         self.text(cr, 60, 108, c.get("retry") or hint, (0.8, 0.2, 0.1) if c.get("retry") and bright else
@@ -2757,7 +2767,8 @@ def main():
     ap = argparse.ArgumentParser(description="Eye tracking playground for the Frametop desktop")
     ap.add_argument("--screen", type=int, default=0, help="Frametop screen to open on (default: where it opens)")
     ap.add_argument("--mode", choices=Probe.MODE_KEYS, help="start in this mode (fit: Headset fit)")
-    ap.add_argument("--source", choices=SOURCES, help="gaze source to start with (default: mmap2)")
+    ap.add_argument("--source", choices=SOURCES,
+                    help="gaze source to start with (default: own if frame-eyes' tracker is running, else mmap2)")
     args, rest = ap.parse_known_args()
     app = Adw.Application(application_id="dev.frametop.GazeProbe", flags=Gio.ApplicationFlags.NON_UNIQUE)
     windows = []
@@ -2766,6 +2777,9 @@ def main():
         win = Probe(a, args.screen)
         if args.source:
             win.w_source.set_selected(SOURCES.index(args.source))
+        elif not win.own.ask("status").startswith("fail"):
+            # Our own tracker is running: that's what you're here to test.
+            win.w_source.set_selected(SOURCES.index("own"))
         if args.mode:
             win.set_mode(args.mode)
         windows.append(win)
