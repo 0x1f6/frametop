@@ -114,9 +114,7 @@ host_runtime=$XDG_RUNTIME_DIR
 runtime=$host_runtime/frametop
 
 cleanup() {
-  pkill -f '[k]rdpserver --plasma' 2>/dev/null || true
-  pkill -f '[X]vnc :20 ' 2>/dev/null || true
-  pkill -f '[x]freerdp /v:.*:3390' 2>/dev/null || true
+  "$here/remote-ctl.sh" stop
   fusermount3 -u -z "$runtime/doc" 2>/dev/null || true
   umount --recursive "$runtime" 2>/dev/null || true
   rm -rf "$runtime"
@@ -173,10 +171,12 @@ mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 # match it to an installed app. KWin's permission check for screencast and fake
 # input is turned off for this nested session only, and so is the check on KWin's
 # D-Bus screenshot interface, which scripts use to see the screens without the headset.
+# The marker lets remote-ctl.sh (and Frametop Remote Access) start and stop it later in
+# this session; a desktop started without it can't capture.
 if [ "$remote" = 1 ]; then
   export KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1
-  "$here/remote-desktop.sh" "$runtime" > /tmp/frametop-remote.log 2>&1 &
-  "$here/vnc-bridge.sh" > /tmp/frametop-vnc.log 2>&1 &
+  touch "$runtime/remote-capable"
+  "$here/remote-ctl.sh" start
 fi
 
 # ft-floatd (floating windows) runs inside the Plasma session, on its D-Bus: started from

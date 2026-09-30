@@ -12,9 +12,9 @@ port=${RDP_PORT:-3390}
 creds=$HOME/.config/frametop-remote
 
 mkdir -p -m 0700 "$creds"
-if [ ! -s "$creds/password" ]; then
-  (umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20 > "$creds/password")
-fi
+# The password between krdp and vnc-bridge.sh (both on this host), new at every start: krdp
+# takes it only on its command line, which other local users can read while it runs.
+(umask 077; head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20 > "$creds/password")
 if [ ! -s "$creds/cert.pem" ]; then
   (umask 077; openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=steam-frame \
     -keyout "$creds/key.pem" -out "$creds/cert.pem" 2>/dev/null)
