@@ -15,6 +15,8 @@
 // --keep-presence P: landmark presence a tracked view needs to stay (default 0.5, as new ones).
 // --pinch-begin M, --pinch-end M, --pinch-triangulated, --pinch-palm-down MAX: the pinch detector (track/pinch.h);
 //             the timeline gets its begin/end/lost events and both distance measures per set.
+// --grip-begin R, --grip-end R: the grip detector (a closed hand; track/pinch.h); the timeline
+//             gets its events and each side's finger curl per set.
 // --cams mono|color|all: which cameras to track with (default mono). color and all need a
 //             recording made with ft-camd --with-color; --color-left NODE (color_video0 or
 //             color_video3) and --color-crop subtract|none say how its calibration maps
@@ -73,6 +75,7 @@ int main(int argc, char **argv) {
     Contrast palm_contrast, hand_contrast{Contrast::None};   // as ft-hands's
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
     PinchParams pinch_params;
+    GripParams grip_params;
     std::string use = "mono", color_left = "color_video0", color_crop = "subtract";
     std::string timeline, depth, poses, models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     for (int i = 2; i < argc; ++i) {
@@ -92,6 +95,8 @@ int main(int argc, char **argv) {
         else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
         else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
         else if (a == "--pinch-palm-down" && more) pinch_params.palm_down_max = std::atof(argv[++i]);
+        else if (a == "--grip-begin" && more) grip_params.begin = std::atof(argv[++i]);
+        else if (a == "--grip-end" && more) grip_params.end = std::atof(argv[++i]);
         else if (a == "--color-left" && more) color_left = argv[++i];
         else if (a == "--color-crop" && more) color_crop = argv[++i];
         else if (a == "--contrast" && more) {
@@ -155,6 +160,9 @@ int main(int argc, char **argv) {
     double pinch_begin_ts[2] = {0, 0};
     std::vector<double> pinch_len[2];   // seconds, per side
     int pinch_lost = 0;
+    Grip grip(grip_params);
+    double grip_begin_ts[2] = {0, 0};
+    std::vector<double> grip_len[2];
     do {
         std::map<std::string, Image> images;
         // the set's time: the mono cameras' when they're used (the color ones run on another
@@ -191,8 +199,17 @@ int main(int argc, char **argv) {
             busy_ms += ms;
             busy_until = t + uint64_t(ms * slow * 1e6) + 3'000'000;   // + the ring hand-off
             const std::vector<Seen> seen = tracker.views_now();
-            pinch.update(out, seen, int64_t(t));
-            next_ns = t + uint64_t((std::min(tracker.interval(), pinch.engaged() ? 1 / 30.0 : 1.0) - 0.005) * 1e9);
+            grip.update(out, seen, int64_t(t));
+            pinch.update(out, seen, int64_t(t), grip.gripping());
+            next_ns = t + uint64_t((std::min(tracker.interval(), pinch.engaged() || grip.engaged() ? 1 / 30.0 : 1.0) - 0.005) * 1e9);
+            for (const Pinch::Event &e : grip.events) {
+                if (std::string(e.what) == "begin") grip_begin_ts[e.side] = ts;
+                else grip_len[e.side].push_back(ts - grip_begin_ts[e.side]);
+                if (tl) std::fprintf(tl, "%.3f grip %s %s curl %.2f point %+.3f %+.3f %+.3f hand %u\n", ts, e.side ? "R" : "L",
+                                     e.what, e.distance, e.point[0], e.point[1], e.point[2], grip.side(e.side).hand_id);
+            }
+            if (tl && (grip.curl[0] >= 0 || grip.curl[1] >= 0))
+                std::fprintf(tl, "%.3f curl L %.2f R %.2f\n", ts, grip.curl[0], grip.curl[1]);
             for (const Pinch::Event &e : pinch.events) {
                 if (std::string(e.what) == "begin") pinch_begin_ts[e.side] = ts;
                 else pinch_len[e.side].push_back(ts - pinch_begin_ts[e.side]), pinch_lost += std::string(e.what) == "lost";
@@ -333,6 +350,11 @@ int main(int argc, char **argv) {
                 pinch_len[0].size(), pinch_len[0].empty() ? 0 : pinch_len[0][pinch_len[0].size() / 2], pinch_len[1].size(),
                 pinch_len[1].empty() ? 0 : pinch_len[1][pinch_len[1].size() / 2], pinch_lost, pinch.held_back[0],
                 pinch.held_back[1]);
+    for (int k = 0; k < 2; ++k) std::sort(grip_len[k].begin(), grip_len[k].end());
+    std::printf("grips (curl under %.2f, open over %.2f): left %zu (median %.2f s), right %zu (median %.2f s)\n",
+                grip_params.begin, grip_params.end, grip_len[0].size(),
+                grip_len[0].empty() ? 0 : grip_len[0][grip_len[0].size() / 2], grip_len[1].size(),
+                grip_len[1].empty() ? 0 : grip_len[1][grip_len[1].size() / 2]);
     std::sort(jit_raw.begin(), jit_raw.end());
     std::sort(jit_sm.begin(), jit_sm.end());
     if (!jit_raw.empty())

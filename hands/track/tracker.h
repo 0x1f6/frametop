@@ -82,7 +82,10 @@ public:
     double interval() const;
     Stats stats;
     size_t views() const { return views_.size(); }
-    std::vector<Seen> views_now() const;
+    std::vector<Seen> views_now() const;   // the views this step updated
+    // Forget this camera's views, when it stops being tracked with (the lighting switched
+    // cameras); views in cameras a set lacks otherwise wait for their next frame.
+    void drop_camera(const std::string &name);
     // Every search tile in every camera, then landmarks on every palm: slow; for checking
     // what the scheduler misses (ft-handreplay --oracle).
     std::vector<Seen> exhaustive(const std::map<std::string, Image> &images);

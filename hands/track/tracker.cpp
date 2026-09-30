@@ -366,9 +366,14 @@ void Tracker::associate() {
 std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &images, int64_t t_ns) {
     const auto t_step = std::chrono::steady_clock::now();
     ++stats.sets;
-    std::vector<View> live;
-    for (View &v : views_)
-        if (images.count(v.cam->name)) live.push_back(v), live.back().fresh = false;
+    // Views in cameras without a frame in this set wait, as they are, for their camera's
+    // next one: the colour cameras run on their own clock, so a set can hold the mono
+    // cameras, the colour ones, or both (drop_camera ends them when a camera stops being used).
+    std::vector<View> live, waiting;
+    for (View &v : views_) {
+        (images.count(v.cam->name) ? live : waiting).push_back(v);
+        (images.count(v.cam->name) ? live : waiting).back().fresh = false;
+    }
 
     // 1. hand-over: give hands with too few views a crop in other cameras
     for (auto &[id, hand] : hands_) {
@@ -430,6 +435,7 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
         else ++stats.dups;
     }
     views_ = next;
+    views_.insert(views_.end(), waiting.begin(), waiting.end());
 
     // 3. search for missing hands
     std::set<int> tracked;
@@ -545,8 +551,14 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
 
 std::vector<Seen> Tracker::views_now() const {
     std::vector<Seen> out;
-    for (const View &v : views_) out.push_back({v.cam->name, v.hand, v.roi, v.lm, {}});
+    for (const View &v : views_)
+        if (v.fresh) out.push_back({v.cam->name, v.hand, v.roi, v.lm, {}});
     return out;
+}
+
+void Tracker::drop_camera(const std::string &name) {
+    views_.erase(std::remove_if(views_.begin(), views_.end(), [&](const View &v) { return v.cam->name == name; }),
+                 views_.end());
 }
 
 std::vector<Seen> Tracker::exhaustive(const std::map<std::string, Image> &images) {

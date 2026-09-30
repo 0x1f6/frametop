@@ -24,8 +24,12 @@ void put3(float out[3], V3 v) {
 
 }  // namespace
 
-void Pinch::update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns) {
+void Pinch::update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns,
+                   const std::vector<int> &gripping) {
     events.clear();
+    auto grips = [&](int id) { return std::find(gripping.begin(), gripping.end(), id) != gripping.end(); };
+    for (int s = 0; s < 2; ++s)   // a grip took this pinch's hand: it's a drag now, not a click
+        if ((side_[s].flags & FH_PINCH_DOWN) && grips(follow_[s])) end(s, t_ns, true);
     // A hand a pinch is down on belongs to that side until it ends. The left/right call is a
     // running average of the model's, and when it flips mid-pinch the other side would take
     // the same hand and pinch too (4 times in the 2026-09-30 lit recording).
@@ -71,7 +75,9 @@ void Pinch::update(const std::vector<const Hand *> &hands, const std::vector<See
             // a close held back (palm down) has to open again before a pinch can begin, so
             // turning the hand with the fingers still closed doesn't start one
             if (d > p_.end_m) held_[s] = false;
-            if (d < p_.begin_m && !held_[s] && palm_down[s] > p_.palm_down_max) {
+            if (grips(h->id)) {
+                // closed: no pinch until it opens
+            } else if (d < p_.begin_m && !held_[s] && palm_down[s] > p_.palm_down_max) {
                 held_[s] = true;
                 ++held_back[s];
             } else if (d < p_.begin_m && !held_[s]) {
@@ -114,7 +120,130 @@ bool Pinch::engaged() const {
     return false;
 }
 
-bool GesturePublisher::open(const Pinch &pinch, std::string &err) {
+// ---------------------------------------------------------------------------- grip
+
+namespace {
+
+constexpr int kWrist = 0, kFingers[4][2] = {{5, 8}, {9, 12}, {13, 16}, {17, 20}};   // knuckle, tip
+
+// Each finger's curl (see GripParams): from the model's world landmarks averaged over the
+// hand's views this step, or the tracker's 3D points without any.
+bool curls(const Hand &h, const std::vector<Seen> &views, double out[4]) {
+    double sum[4] = {};
+    int n = 0;
+    for (const Seen &v : views) {
+        if (v.hand != h.id) continue;
+        auto p = [&](int i) { return V3{v.lm.world[i][0], v.lm.world[i][1], v.lm.world[i][2]}; };
+        for (int f = 0; f < 4; ++f) {
+            const double k = norm(p(kFingers[f][0]) - p(kWrist));
+            sum[f] += k > 1e-4 ? norm(p(kFingers[f][1]) - p(kWrist)) / k : 2;
+        }
+        ++n;
+    }
+    for (int f = 0; f < 4; ++f) {
+        if (n) {
+            out[f] = sum[f] / n;
+            continue;
+        }
+        const double k = norm(h.smooth[kFingers[f][0]] - h.smooth[kWrist]);
+        if (k < 1e-4) return false;
+        out[f] = norm(h.smooth[kFingers[f][1]] - h.smooth[kWrist]) / k;
+    }
+    return true;
+}
+
+V3 palm_centre(const Hand &h) {
+    return (h.smooth[0] + h.smooth[5] + h.smooth[9] + h.smooth[13] + h.smooth[17]) * 0.2;
+}
+
+}  // namespace
+
+void Grip::update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns) {
+    events.clear();
+    int taken[2] = {0, 0};
+    for (int s = 0; s < 2; ++s)
+        if (side_[s].flags & FH_PINCH_DOWN) taken[s] = follow_[s];
+    for (int s = 0; s < 2; ++s) {
+        fh_pinch_t &o = side_[s];
+        const bool down = o.flags & FH_PINCH_DOWN;
+        const Hand *h = nullptr;
+        for (const Hand *c : hands) {
+            if (down ? c->id != follow_[s] : c->right() != (s == 1) || c->id == taken[1 - s]) continue;
+            if (!h || c->frames > h->frames) h = c;
+        }
+        curl[s] = -1;
+        double f[4];
+        if (!h || !curls(*h, views, f)) {
+            o.flags &= ~FH_PINCH_TRACKED;
+            if (down && (t_ns - seen_ns_[s]) / 1e9 > p_.grace_s) end(s, t_ns, true);
+            continue;
+        }
+        seen_ns_[s] = t_ns;
+        const double mean = (f[0] + f[1] + f[2] + f[3]) / 4, most = std::max({f[0], f[1], f[2], f[3]});
+        curl[s] = mean;
+        const V3 point = palm_centre(*h);
+        o.flags |= FH_PINCH_TRACKED;
+        o.hand_id = uint32_t(h->id);
+        o.distance = float(mean);
+        o.strength = float(std::clamp((p_.end - mean) / (p_.end - p_.begin), 0.0, 1.0));
+        put3(o.point, point);
+        if (!down) {
+            if (mean > p_.end) open_ns_[s] = t_ns;
+            const bool ahead = -point[2] >= p_.min_ahead_m &&
+                               std::atan2(-point[1], -point[2]) * 180 / M_PI <= p_.max_down_deg;
+            if (most < p_.begin && ahead && open_ns_[s] && (t_ns - open_ns_[s]) / 1e9 <= p_.armed_s) {
+                o.flags = (o.flags | FH_PINCH_DOWN) & ~FH_PINCH_LOST;
+                ++o.begins;
+                o.begin_ns = uint64_t(t_ns);
+                put3(o.begin_point, point);
+                follow_[s] = h->id;
+                open_frames_[s] = 0;
+                events.push_back({s, "begin", t_ns, mean, point});
+            }
+        } else if (mean > p_.end) {
+            if (++open_frames_[s] >= p_.end_frames) {
+                end(s, t_ns, false);
+                open_ns_[s] = t_ns;
+            }
+        } else {
+            open_frames_[s] = 0;
+        }
+    }
+}
+
+void Grip::end(int s, int64_t t_ns, bool lost) {
+    fh_pinch_t &o = side_[s];
+    o.flags = (o.flags & ~FH_PINCH_DOWN) | (lost ? FH_PINCH_LOST : 0);
+    ++o.ends;
+    o.end_ns = uint64_t(t_ns);
+    follow_[s] = 0;
+    events.push_back({s, lost ? "lost" : "end", t_ns, o.distance, {o.point[0], o.point[1], o.point[2]}});
+}
+
+void Grip::release(int64_t t_ns) {
+    events.clear();
+    for (int s = 0; s < 2; ++s) {
+        side_[s].flags &= ~FH_PINCH_TRACKED;
+        if (side_[s].flags & FH_PINCH_DOWN) end(s, t_ns, true);
+    }
+}
+
+std::vector<int> Grip::gripping() const {
+    std::vector<int> out;
+    for (int s = 0; s < 2; ++s)
+        if (side_[s].flags & FH_PINCH_DOWN) out.push_back(follow_[s]);
+    return out;
+}
+
+bool Grip::engaged() const {
+    for (const fh_pinch_t &o : side_)
+        if ((o.flags & FH_PINCH_DOWN) || ((o.flags & FH_PINCH_TRACKED) && o.strength > 0.3f)) return true;
+    return false;
+}
+
+// ----------------------------------------------------------------------- publisher
+
+bool GesturePublisher::open(const Pinch &pinch, const Grip &grip, std::string &err) {
     const std::string path = run_dir() + "/gestures";
     const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0 || ftruncate(fd, sizeof(fh_gestures_t)) < 0) return err = path + ": " + std::strerror(errno), false;
@@ -131,11 +260,13 @@ bool GesturePublisher::open(const Pinch &pinch, std::string &err) {
         out_->size = sizeof(fh_gestures_t);
     }
     seq_ = out_->seq / 2 + 1;
-    // a pinch the last tracker left down (it crashed) is over: count its end, as lost
+    // a gesture the last tracker left down (it crashed) is over: count its end, as lost
     __atomic_store_n(&out_->seq, 2 * ++seq_ - 1, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    for (fh_pinch_t &o : out_->pinch)
-        if (o.begins != o.ends) {
+    for (fh_pinch_t *slots : {out_->pinch, out_->grip})
+        for (int s = 0; s < 2; ++s) {
+            fh_pinch_t &o = slots[s];
+            if (o.begins == o.ends) continue;
             o.ends = o.begins;
             o.end_ns = mono_ns();
             o.flags = (o.flags & ~FH_PINCH_DOWN) | FH_PINCH_LOST;
@@ -143,22 +274,25 @@ bool GesturePublisher::open(const Pinch &pinch, std::string &err) {
     __atomic_store_n(&out_->seq, 2 * seq_, __ATOMIC_RELEASE);
     out_->begin_m = float(pinch.params().begin_m);
     out_->end_m = float(pinch.params().end_m);
+    out_->grip_begin = float(grip.params().begin);
+    out_->grip_end = float(grip.params().end);
     return true;
 }
 
-void GesturePublisher::write(const Pinch &pinch, uint64_t capture_ns) {
+void GesturePublisher::write(const Pinch &pinch, const Grip &grip, uint64_t capture_ns) {
     __atomic_store_n(&out_->seq, 2 * ++seq_ - 1, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    for (int s = 0; s < 2; ++s) {
-        // counters carry on from what's in the file (a restarted tracker starts its own at 0)
-        const fh_pinch_t &in = pinch.side(s);
-        fh_pinch_t &o = out_->pinch[s];
-        const uint32_t base_b = o.begins - last_begins_[s], base_e = o.ends - last_ends_[s];
-        o = in;
-        o.begins = base_b + in.begins;
-        o.ends = base_e + in.ends;
-        last_begins_[s] = in.begins, last_ends_[s] = in.ends;
-    }
+    for (int g = 0; g < 2; ++g)
+        for (int s = 0; s < 2; ++s) {
+            // counters carry on from what's in the file (a restarted tracker starts its own at 0)
+            const fh_pinch_t &in = g ? grip.side(s) : pinch.side(s);
+            fh_pinch_t &o = g ? out_->grip[s] : out_->pinch[s];
+            const uint32_t base_b = o.begins - last_begins_[g][s], base_e = o.ends - last_ends_[g][s];
+            o = in;
+            o.begins = base_b + in.begins;
+            o.ends = base_e + in.ends;
+            last_begins_[g][s] = in.begins, last_ends_[g][s] = in.ends;
+        }
     out_->capture_ns = capture_ns;
     out_->publish_ns = mono_ns();
     __atomic_store_n(&out_->seq, 2 * seq_, __ATOMIC_RELEASE);

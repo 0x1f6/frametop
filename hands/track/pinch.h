@@ -1,5 +1,6 @@
-// Pinch detection for input: look at something and pinch to click, pinch and move to drag.
-// Per side, from the tracker's hands after each step; published as fh_gestures.h.
+// Gesture detection for input: look at something and pinch to click it (pinch and move to
+// nudge the pointer first), or close the hand to press and drag it. Per side, from the
+// tracker's hands after each step; published as fh_gestures.h.
 #pragma once
 
 #include "tracker.h"
@@ -34,8 +35,10 @@ public:
     explicit Pinch(const PinchParams &p = {}) : p_(p) {}
     const PinchParams &params() const { return p_; }
     // After each processed set: the hands out of Tracker::step, the tracker's views (for
-    // the world landmarks) and the capture time.
-    void update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns);
+    // the world landmarks) and the capture time. Hands in `gripping` (their ids) are closed:
+    // no pinch begins on them, and one that's down on them ends, as lost.
+    void update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns,
+                const std::vector<int> &gripping = {});
     // Ends any pinch that's down (as lost), e.g. when the tracker stops.
     void release(int64_t t_ns);
     const fh_pinch_t &side(int s) const { return side_[s]; }   // 0 left, 1 right
@@ -66,14 +69,60 @@ private:
     bool held_[2] = {false, false};  // a close held back (palm down) that hasn't opened yet
 };
 
+struct GripParams {
+    // How curled a finger is: its tip's distance from the wrist over its knuckle's, from the
+    // model's world landmarks (so the hand's size doesn't matter). About 1.8-2.0 straight,
+    // 0.8-1.0 curled into a fist.
+    double begin = 1.2;       // every finger under this: the grip begins
+    double end = 1.45;        // their mean over this: it ends
+    int end_frames = 2;       // processed frames in a row past end before it ends
+    double grace_s = 0.25;    // a gripping hand lost this long ends its grip (FH_PINCH_LOST)
+    // A grip begins only on a hand seen open (mean over end) within this long: closing the
+    // hand is the gesture. A hand resting closed (in your lap, on a mouse) never grips.
+    double armed_s = 1.0;
+    // ...and only in front of you, where you'd hold a hand up to grab something: the palm no
+    // more than max_down_deg below straight ahead (head frame) and at least min_ahead_m in
+    // front of the eyes. Typing curls the fingers like a loose fist: in the 2026-09-30 lit
+    // recording, typing hands sat about 47 degrees down (14 false grips without this),
+    // deliberate pinches 5-15.
+    double max_down_deg = 35;
+    double min_ahead_m = 0.15;
+};
+
+// Grip (a closed hand) detection, per side like Pinch: press and drag.
+class Grip {
+public:
+    explicit Grip(const GripParams &p = {}) : p_(p) {}
+    const GripParams &params() const { return p_; }
+    void update(const std::vector<const Hand *> &hands, const std::vector<Seen> &views, int64_t t_ns);
+    void release(int64_t t_ns);
+    const fh_pinch_t &side(int s) const { return side_[s]; }
+    // The hands gripping now (for Pinch::update).
+    std::vector<int> gripping() const;
+    bool engaged() const;   // a grip is down or closing: worth tracking at the full rate
+
+    std::vector<Pinch::Event> events;
+    double curl[2] = {-1, -1};   // each side's hand: mean curl, for logs
+
+private:
+    void end(int s, int64_t t_ns, bool lost);
+    GripParams p_;
+    fh_pinch_t side_[2]{};
+    int follow_[2] = {0, 0};
+    int open_frames_[2] = {0, 0};
+    int64_t seen_ns_[2] = {0, 0};
+    int64_t open_ns_[2] = {0, 0};   // the side's hand was last seen open then
+};
+
 // Writes /run/user/UID/frametop-hands/gestures.
 class GesturePublisher {
 public:
-    bool open(const Pinch &pinch, std::string &err);
-    void write(const Pinch &pinch, uint64_t capture_ns);
+    bool open(const Pinch &pinch, const Grip &grip, std::string &err);
+    void write(const Pinch &pinch, const Grip &grip, uint64_t capture_ns);
 
 private:
     fh_gestures_t *out_ = nullptr;
     uint64_t seq_ = 0;
-    uint32_t last_begins_[2] = {0, 0}, last_ends_[2] = {0, 0};   // Pinch's counters last written
+    // the counters last written, per gesture (0 pinch, 1 grip) and side
+    uint32_t last_begins_[2][2] = {}, last_ends_[2][2] = {};
 };
