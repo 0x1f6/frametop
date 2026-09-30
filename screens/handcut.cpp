@@ -59,7 +59,7 @@ bool Hands::Read() {
         const int64_t now = MonoNs();
         if (now - lastOpenTry_ < 1'000'000'000) return false;
         lastOpenTry_ = now;
-        const std::string path = "/run/user/" + std::to_string(getuid()) + "/frametop/hands";
+        const std::string path = "/run/user/" + std::to_string(getuid()) + "/frametop-hands/hands";
         fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         if (fd_ < 0) return false;
         struct stat st;
@@ -295,7 +295,7 @@ void main() {
 // The client's pixels, opaque (its alpha is ignored, as IgnoreTextureAlpha did).
 const char *kCopy = R"(
 #extension GL_OES_EGL_image_external : require
-precision mediump float;
+precision highp float;   // mediump (16-bit on Adreno) steps 1.7 texels across a 3440-pixel screen
 uniform samplerExternalOES tex;
 varying vec2 uv;
 void main() { gl_FragColor = vec4(texture2D(tex, uv).rgb, 1.0); })";

@@ -6,7 +6,7 @@
  *   2. borrows those buffers read-only with pidfd_getfd,
  *   3. opens the v4l2_dqbuf tracepoint (tp.c).
  * Then it gives up its privileges for good, creates the frame ring in the
- * user's runtime folder (/run/user/UID/frametop/cam-ring, fhring.h), learns
+ * user's runtime folder (/run/user/UID/frametop-hands/cam-ring, fhring.h), learns
  * which buffer holds which V4L2 index, and copies each complete bright frame
  * into the ring. It exits when XRService exits or reallocates its buffers;
  * start it again (or let systemd) to re-attach.
@@ -230,8 +230,11 @@ static void setup_camera(cam_t *c, xr_camera_t *cam, int pidfd)
     memset(c, 0, sizeof(*c));
     c->cam  = cam;
     xr_camera_layout(cam, &c->lay);
-    c->need = (size_t)c->lay.pitch * c->lay.rows;
     c->color = c->lay.fmt == XR_FMT_YUV420_10P;
+    /* Color: just the luma rows, not the chroma after them. Whether a frame is new is judged
+     * by the last rows sampled changing, and in a lit room the chroma has too little noise to
+     * change between frames, so every frame looked stale and the buffers kept being relearned. */
+    c->need = (size_t)c->lay.pitch * (c->color ? c->lay.height : c->lay.rows);
     c->out_w = c->color ? c->lay.width / opt_color_scale : c->lay.width;
     c->out_h = c->color ? c->lay.height / opt_color_scale : c->lay.height;
 
@@ -678,6 +681,23 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
 
     if (found < 0 && !fresh(cur, c->samp[slot], &nchanged)) {
         buf_sync(c->fd[slot], DMA_BUF_SYNC_END);
+        if (c->color && getenv("FT_CAMD_DEBUG")) {
+            /* which candidate buffers changed since this camera last looked, whole and tail */
+            static uint64_t d[NSAMP];
+            fprintf(stderr, "stale %s t %.3f index %lld seq %u slot %d changed %d:", c->slug, evtime / 1e9,
+                    (long long)index, seq, slot, nchanged);
+            for (int s = 0; s < c->nslots; s++) {
+                int n, tail = 0;
+                buf_sync(c->fd[s], DMA_BUF_SYNC_START);
+                sample_words(c->map[s], c->need, d);
+                buf_sync(c->fd[s], DMA_BUF_SYNC_END);
+                fresh(d, c->samp[s], &n);
+                for (int i = NSAMP - NSAMP / 8; i < NSAMP; i++)
+                    tail += d[i] != c->samp[s][i];
+                fprintf(stderr, " %d/%d", n, tail);
+            }
+            fprintf(stderr, "\n");
+        }
         c->stale++;
         c->rc->dropped++;
         if (++c->stale_run >= STALE_RELEARN) {
@@ -783,7 +803,7 @@ static char ring_dir[64], ring_file[96];
 /* Created once privileges are gone, as the user, in a folder only the user can write. */
 static uint8_t *ring_create(size_t *len_out)
 {
-    snprintf(ring_dir, sizeof(ring_dir), "/run/user/%d/frametop", (int)getuid());
+    snprintf(ring_dir, sizeof(ring_dir), "/run/user/%d/frametop-hands", (int)getuid());
     snprintf(ring_file, sizeof(ring_file), "/run/user/%d/" FH_RING_NAME, (int)getuid());
 
     if (mkdir(ring_dir, 0700) < 0 && errno != EEXIST)

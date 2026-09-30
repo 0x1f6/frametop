@@ -4,7 +4,7 @@
 //
 //   ft-handtest [--distance m] [--width m] [--seconds s]
 //
-// Needs hand tracking running (hands/run.sh; ft-hands publishes /run/user/UID/frametop/hands).
+// Needs hand tracking running (hands/run.sh; ft-hands publishes /run/user/UID/frametop-hands/hands).
 // Build: screens/build.sh (build/ft-handtest), run in the dev container.
 #include "handcut.h"
 

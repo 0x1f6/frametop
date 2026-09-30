@@ -24,7 +24,7 @@ Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides 
 - `HANDS_SWAP_SIDES=1`: the two side cameras' names are swapped (see ft-camd below). Check with `tools/check_sides.py --ring`.
 - `HANDS_CPUS=5,6,7`: the CPUs the model threads run on (below).
 
-Files, all in `/run/user/UID/frametop/` (private to the user):
+Files, all in `/run/user/UID/frametop-hands/` (private to the user; not `/run/user/UID/frametop/`, which the desktop session deletes whenever it starts):
 
 | File | Written by | Layout | Read by |
 | --- | --- | --- | --- |
@@ -58,6 +58,7 @@ Options:
 - `--with-dark`: also publish the near-black frames, as extra ring cameras flagged `FH_CAM_DARK`. They show only light sources, so they're no use for hands.
 - `--with-color`: also publish the two Arcturus colour cameras, flagged `FH_CAM_COLOR`. Each is the luma of the 10-bit frame's valid 1972x2464 (the top 8 bits), at half size (`--color-scale 2`: 986x1232) and at most 30 fps (`--color-fps`; the cameras run at 60). Frames that carry the module's warped half-size copy are dropped. Their `capture_ns` is on the colour module's clock (2.2 s off the mono cameras' on 2026-09-29), so line them up with the mono cameras by `dqbuf_ns`. Each frame costs about 0.65 ms of cache sync and 1.1 ms of decoding, so both cameras at 30 fps take about 11% of a core.
 - The ring holds 8 cameras: 4 mono, plus 4 dark twins or 2 colour cameras.
+- Colour isn't reliable yet. In the lit-room test of 2026-09-30, the colour cameras kept losing their buffer mapping: 30 frames in a row looked unchanged, the camera relearned, and after 5 relearns ft-camd exited. Each relearn samples all 32 colour buffers, which also made the mono cameras miss frames. Runs with the headset idle (no hands, no cutouts) had none of this, and no half-size copies either, while the failing runs had many. So the passthrough compositor may be writing into the colour buffers while Room View shows. Whether a frame is new is judged on the luma rows only: the chroma after them hardly changes in a lit room. `FT_CAMD_DEBUG=1` prints, at each colour stale frame, how many sampled words changed in every candidate buffer.
 - `--sensor S`: only the mono cameras whose sensor name contains S.
 - `--status S`: a status line every S seconds (0: never).
 
@@ -114,7 +115,9 @@ How good the depth is, measured from recordings (2026-09-30, `--depth` below): t
 ft-hands detects a pinch per hand (`track/pinch.h`) and publishes it to the gestures file. The layout, and how to read it without missing quick taps, is in `include/fh_gestures.h`.
 
 - A pinch begins when the thumb and index tips come within `--pinch-begin` (default 0.020 m). It ends when they open past `--pinch-end` (0.035 m) for 2 processed frames in a row, or when the hand stays lost for 0.25 s (flagged lost).
-- The distance comes from MediaPipe's world landmarks: the model's own 3D hand pose, averaged over the hand's views, at the user's hand size. `--pinch-triangulated` uses the triangulated tips instead. On two recordings without deliberate pinches, the world landmarks came under 2 cm in 0.2-1% of frames, against 3.3-4.5% for the triangulated tips. Typing still gave 2 pinches a minute, so a consumer should only act on a pinch while the gaze is on a target.
+- The distance comes from MediaPipe's world landmarks: the model's own 3D hand pose, averaged over the hand's views, at the user's hand size. `--pinch-triangulated` uses the triangulated tips instead. On two recordings without deliberate pinches, the world landmarks came under 2 cm in 0.2-1% of frames, against 3.3-4.5% for the triangulated tips. In the dim recording, typing still gave 2 pinches a minute before the palm check below.
+- No pinch begins while the palm faces down (`--pinch-palm-down MAX`: the palm normal's share of the head's up axis, default 0.6; 1 turns it off), and a close held back that way has to open again before a pinch can begin. Typing curls the thumb onto the index. In the lit recording of 2026-09-30, typing on a keyboard in the lap began 23 pinches in about 2 minutes, all with the palm facing down (0.69-1.00), while the 26 deliberate ones read 0.00-0.50. The limit held back every typing pinch and none of the deliberate ones. Looking down tilts the head frame, which lowers the reading for a hand on a keyboard, so the consumer's gaze check stays the other guard.
+- A hand a pinch is down on stays with that side until the pinch ends. The left/right call is a running average of the model's, and when it flipped mid-pinch, the other side took the same hand and both sides pinched at once.
 - The pinch point is midway between the thumb and index tips. A drag is the pinch point now, minus where it was when the pinch began, both turned into the room with the HMD pose at their capture times.
 - `tools/watch_gestures.py` prints begins, ends and drag offsets live, and `--distance` prints each hand's distance.
 

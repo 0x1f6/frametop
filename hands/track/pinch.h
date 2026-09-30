@@ -22,6 +22,11 @@ struct PinchParams {
     // triangulated tips. The model's pose should hold up better when the fingers hide each
     // other; tomorrow's recordings will tell.
     bool triangulated = false;
+    // No pinch begins while the palm faces down more than this (|palm normal . up| in the
+    // head frame; 1 turns it off). Typing curls the thumb onto the index: in the 2026-09-30
+    // lit recording, pinches that began while typing had 0.69-1.00, deliberate ones 0.00-0.50.
+    // Looking down tilts the head frame, which lowers the reading for a hand on a keyboard.
+    double palm_down_max = 0.6;
 };
 
 class Pinch {
@@ -48,6 +53,8 @@ public:
     std::vector<Event> events;
     // Both distance measures for the last update, per side (-1: no hand), for logs.
     double world_d[2] = {-1, -1}, tri_d[2] = {-1, -1};
+    double palm_down[2] = {-1, -1};   // |palm normal . up| of each side's hand
+    int held_back[2] = {0, 0};          // pinches that didn't begin because the palm faced down
 
 private:
     void end(int s, int64_t t_ns, bool lost);
@@ -56,9 +63,10 @@ private:
     int follow_[2] = {0, 0};        // the hand id a pinch follows while down
     int open_frames_[2] = {0, 0};
     int64_t seen_ns_[2] = {0, 0};
+    bool held_[2] = {false, false};  // a close held back (palm down) that hasn't opened yet
 };
 
-// Writes /run/user/UID/frametop/gestures.
+// Writes /run/user/UID/frametop-hands/gestures.
 class GesturePublisher {
 public:
     bool open(const Pinch &pinch, std::string &err);

@@ -114,7 +114,7 @@ void put(fh_capsule_t *caps, uint32_t &n, V3 a, V3 b, double ra, double rb) {
 }  // namespace
 
 std::string run_dir() {
-    const std::string dir = "/run/user/" + std::to_string(getuid()) + "/frametop";
+    const std::string dir = "/run/user/" + std::to_string(getuid()) + "/frametop-hands";
     mkdir(dir.c_str(), 0700);
     return dir;
 }

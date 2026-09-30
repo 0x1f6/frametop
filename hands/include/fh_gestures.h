@@ -1,7 +1,7 @@
 /*
  * fh_gestures - pinch state ft-hands publishes for input: look at something and pinch to
  * click it, pinch and move to drag (the Vision Pro model, with the eye tracker doing the
- * looking). /run/user/UID/frametop/gestures, next to the hands
+ * looking). /run/user/UID/frametop-hands/gestures, next to the hands
  * file, with the same sequence lock (read seq, copy, read seq again; use the copy only if
  * both reads are the same even number) and the same frame: metres in the head frame at
  * capture time, OpenVR's HMD frame (+x right, +y up, -z forward).

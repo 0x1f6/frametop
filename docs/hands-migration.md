@@ -14,10 +14,19 @@ Steps 1-5 are done:
 - Built in the dev container on the Frame, and on the 7i.
 - Checked without the headset:
   - `ft-handreplay` against frame-hands' `fh-replay`, both x86 with `--cost`, on the whole dim recording and the first 60 s of the bright one: identical summaries and byte-identical depth dumps. The Makefile's own ncnn build is included in that.
-  - `ft-ringplay` into `ft-hands` on the 7i tracked, pinched, and wrote `/run/user/UID/frametop/{hands,gestures}`.
+  - `ft-ringplay` into `ft-hands` on the 7i tracked, pinched, and wrote `/run/user/UID/frametop-hands/{hands,gestures}`.
   - On the Frame, ft-hands in the container finds the calibration through `/run/host/persist`, and ft-camd without its capabilities refuses with a clear message.
 
-Next is step 6, with the user: `hands/run.sh install` (sudo setcap), then a desktop restart from this branch so ft-screens reads the new path.
+Step 6 has started (2026-09-30 10:30):
+- `hands/run.sh install` is done, and both services run from this worktree.
+- The files moved to `/run/user/UID/frametop-hands/`, because `/run/user/UID/frametop` is the desktop session's own runtime folder, deleted at every desktop start.
+- Until the desktop restarts from a build with this branch's ft-screens, the link `/run/user/UID/frame-hands -> frametop-hands` feeds the running one. It's tmpfs, so it's gone at reboot.
+
+Found in the headset:
+- The side cameras were swapped (`HANDS_SWAP_SIDES=1`).
+- The cutout copy shader lost resolution at `mediump` (now `highp`).
+- Colour capture isn't reliable (see the README).
+- Two pinch fixes: one hand no longer pinches both sides, and the palm-down limit stops typing pinches.
 
 ## What frame-hands is today
 
@@ -66,8 +75,8 @@ Programs within 15 characters, `ft-` prefix; files under `frametop`:
 | `fh-camd` | `ft-camd` |
 | `fh-tracker` | `ft-hands` |
 | `fh-replay`, `fh-ringplay` | `ft-handreplay`, `ft-ringplay` |
-| `/run/frame-hands/ir-ring` | `$XDG_RUNTIME_DIR/frametop/cam-ring` |
-| `$XDG_RUNTIME_DIR/frame-hands/hands`, `gestures` | `$XDG_RUNTIME_DIR/frametop/hands`, `gestures` |
+| `/run/frame-hands/ir-ring` | `/run/user/UID/frametop-hands/cam-ring` |
+| `$XDG_RUNTIME_DIR/frame-hands/hands`, `gestures` | `/run/user/UID/frametop-hands/hands`, `gestures` |
 
 The source keeps its `fh_` identifiers and header names (`fh_hands.h`, `fh_gestures.h`, `fhring.h`), and the file formats keep their magic strings, so recordings and tools from frame-hands keep working. Programs, units and runtime paths change.
 

@@ -28,9 +28,13 @@ sudo_run() {
   printf '%s\n' "$pw" | on_frame "sudo -S -p '' bash -c $(printf %q "$1")"
 }
 
-set_caps() {
+set_caps() {  # only when missing: a rebuild clears them, a reinstall doesn't
   local bin
   bin=$(printf %q "$FRAME_REPO/hands/build/ft-camd")
+  if on_frame "getcap $bin | grep -q cap_sys_ptrace"; then
+    echo "ft-camd has its capabilities"
+    return
+  fi
   sudo_run "setcap $caps $bin && getcap $bin"
 }
 

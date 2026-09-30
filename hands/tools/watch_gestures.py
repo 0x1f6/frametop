@@ -22,7 +22,7 @@ SIDES = ('left ', 'right')
 
 
 def path():
-    return '/run/user/%d/frametop/gestures' % os.getuid()
+    return '/run/user/%d/frametop-hands/gestures' % os.getuid()
 
 
 def read(m):

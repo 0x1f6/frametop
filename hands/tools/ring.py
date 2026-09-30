@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-RING_FILE = '/run/user/%d/frametop/cam-ring' % os.getuid()
+RING_FILE = '/run/user/%d/frametop-hands/cam-ring' % os.getuid()
 MAGIC = b'FHRING01'
 HDR = struct.Struct('<8sIIIIQqQ16x')                     # 64 bytes
 CAM = struct.Struct('<32s32siIIIIIQQQQQ32x')             # 160 bytes

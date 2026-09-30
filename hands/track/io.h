@@ -45,7 +45,8 @@ private:
 uint64_t mono_ns();
 int64_t raw_minus_mono_ns();   // camera timestamps are CLOCK_MONOTONIC_RAW
 
-// /run/user/UID/frametop, created private to the user if it's missing: where ft-camd's ring
+// /run/user/UID/frametop-hands, created private to the user if it's missing: where ft-camd's ring
 // (FH_RING_NAME) and the hands and gestures files live. Not $XDG_RUNTIME_DIR: a terminal in
-// the Frametop desktop has a private one of its own.
+// the Frametop desktop has a private one of its own. And not /run/user/UID/frametop: that is
+// the desktop session's private runtime folder, which it deletes whenever it starts.
 std::string run_dir();

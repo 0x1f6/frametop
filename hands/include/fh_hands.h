@@ -1,6 +1,6 @@
 /*
  * fh_hands - the tracked-hands file ft-hands publishes for ft-screens' hand cutouts
- * (/run/user/UID/frametop/hands, directory mode 0700), rewritten in place
+ * (/run/user/UID/frametop-hands/hands, directory mode 0700), rewritten in place
  * under a sequence lock: read seq, copy, read seq again; use the copy only if
  * both reads are the same even number.
  *

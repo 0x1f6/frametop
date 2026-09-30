@@ -123,6 +123,7 @@ int main(int argc, char **argv) {
         else if (a == "--pinch-begin" && more) pinch_params.begin_m = std::atof(argv[++i]);
         else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
         else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
+        else if (a == "--pinch-palm-down" && more) pinch_params.palm_down_max = std::atof(argv[++i]);
         else if (a == "--swap-sides") swap_sides = true;
         else if (a == "--record-only") track = publish = false;
         else if (a == "--ring" && more) ring_path = argv[++i];
@@ -140,7 +141,7 @@ int main(int argc, char **argv) {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (ft-camd's, or ft-ringplay's)\n"
-                        "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated]\n"
+                        "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated] [--pinch-palm-down MAX] (0.6)\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
                         "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for ft-handreplay; SIGUSR1\n"
                         "starts one in ~/.local/share/frametop/hands/rec-<time>. --record-only records without tracking, so it\n"
@@ -151,6 +152,7 @@ int main(int argc, char **argv) {
             return a == "--help" ? 0 : 1;
         }
     }
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);   // whole lines to the journal as they come
     if (nice(niceness) < 0) std::perror("nice");   // the VR stack wins contested CPUs
     std::signal(SIGINT, [](int) { g_stop = 1; });
     std::signal(SIGTERM, [](int) { g_stop = 1; });
@@ -344,7 +346,8 @@ int main(int argc, char **argv) {
                             s.handoff_miss, s.dups, s.splits, s.created, s.merged, s.forgotten,
                             !rec ? "" : ("  recorded " + std::to_string(rec->written()) + " dropped " +
                                          std::to_string(rec->dropped())).c_str());
-            std::printf("        pinches: left %u right %u", pinch.side(0).begins, pinch.side(1).begins);
+            std::printf("        pinches: left %u right %u (held back, palm down: %d %d)", pinch.side(0).begins,
+                        pinch.side(1).begins, pinch.held_back[0], pinch.held_back[1]);
             for (int k = 0; k < 2; ++k)
                 if (pinch.side(k).flags & FH_PINCH_TRACKED)
                     std::printf("  %s %s d %.3f", k ? "right" : "left", pinch.side(k).flags & FH_PINCH_DOWN ? "DOWN" : "open",
