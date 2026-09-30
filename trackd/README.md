@@ -11,7 +11,7 @@ trackd/fh-tracker --int8           # the 8-bit models (models/ncnn/*-int8.ncnn.*
 Options:
 
 - `--threads N`: model threads, pinned to the `--cpus` list. Default 3.
-- `--cpus LIST`: CPUs for the model threads and the main loop. Default `2,3,4`.
+- `--cpus LIST`: CPUs for the model threads and the main loop. Default `5,6,7`. With the headset on, that ran a step in 8.4 ms against 13.2 ms on `2,3,4`, where XRService's head tracking also runs, and SteamVR's frame timing didn't change (`probes/core_ab.py`, 2026-09-29).
 - `--contrast MODE` or `PALM/HAND`: how crops are equalized before the models see them: `clahe[:CLIP]`, `none`, or `stretch` (1st-99th percentile). Default `clahe:2/none`. In the dim recording, CLAHE let the palm search find about 10% more hands, but it made the landmarks jitter more (published median 6.9 mm, against 6.0 mm with plain landmark crops).
 - `--swap-sides`: swap the two side cameras (`slam_left`, `slam_right`). fh-camd tells their buffers apart by XRService's allocation order, and after some XRService restarts that order is reversed. Then every hand is seen by one camera only, at the wrong depth, and the hand holes land beside the hands. With the headset on and looking at a room with some texture, `tools/check_sides.py --ring` tells whether the names are right (exit 0), swapped (exit 3), or it can't tell (exit 2).
 - `--seconds N`: stop after N seconds.

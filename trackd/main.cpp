@@ -53,10 +53,12 @@ int main(int argc, char **argv) {
     bool int8 = false, publish = true, track = true, swap_sides = false;
     std::string models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     std::string record, ring_path = FH_RING_PATH;
-    // SteamOS starts user processes on CPUs 0-4 (2-4 are the big A720s) and keeps 5-7 (two
-    // A720s and the X4) for SteamVR's compositor, whose threads there run at real-time
-    // priority. XRService pins its head tracking to 2-3.
-    std::vector<int> cpus = {2, 3, 4};
+    // SteamOS starts user processes on CPUs 0-4 and keeps 5-7 (two A720s and the X4) for
+    // SteamVR's compositor, whose threads there run at real-time priority, so they always
+    // win. XRService pins its head tracking to 2-3. probes/core_ab.py (2026-09-29, headset
+    // on, 3 rounds): on 5-7 a step took 8.4 ms against 13.2 on 2-4, latency 9.6 against
+    // 14.1 ms, and the compositor's late frames and CPU/GPU time didn't change.
+    std::vector<int> cpus = {5, 6, 7};
     // How crops are equalized. CLAHE helps the palm search find hands (about 10% more in the
     // dim recording), but makes the landmarks jitter, so they get plain crops.
     Contrast palm_contrast, hand_contrast{Contrast::None};
@@ -88,11 +90,11 @@ int main(int argc, char **argv) {
                 if (*p == ',') ++p;
                 else if (*p) break;
             }
-            if (cpus.empty()) cpus = {2, 3, 4};
+            if (cpus.empty()) cpus = {5, 6, 7};
         }
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
-                        "          [--record DIR] [--record-for S] [--record-only] [--cpus 2,3,4] [--swap-sides]\n"
+                        "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (fh-camd's, or fh-ringplay's)\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
                         "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for fh-replay; SIGUSR1\n"
