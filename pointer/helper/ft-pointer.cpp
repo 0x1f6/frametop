@@ -163,7 +163,7 @@
 // press dragged onto the target is the same: from the raw gaze at the press to the release. With no
 // fresh gaze (a blink, the service stopped, the headset off), the pointer stays put.
 //
-// Hands (POINTER_HANDS, on by default; needs hand tracking, hands/): ft-hands publishes
+// Hands (POINTER_HANDS, off by default; needs hand tracking, hands/): ft-hands publishes
 // pinches and grips (hands/include/fh_gestures.h), read here every frame.
 //   A pinch works like gaze mode's mouse press: the pointer stops (where the gaze put it), and
 // the click comes when the pinch opens, where the pointer is then. A quick tap clicks where
@@ -238,7 +238,7 @@
 // (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_SHOW (1 s):
 // gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
-// POINTER_HANDS (1), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
+// POINTER_HANDS (0), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
 // POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.35 m), POINTER_PINCH_TYPING (1 s): hands, above.
 #include <openvr.h>
 
@@ -648,7 +648,7 @@ int main() {
     bool gazeOn = false, gazeConf = false;
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
     // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
-    bool handsOn = true;
+    bool handsOn = false;
     double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, handBelow = 0.35, typingHold = 1.0;
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
@@ -674,7 +674,7 @@ int main() {
         gazeShow = std::clamp(ConfDouble(conf, "POINTER_GAZE_SHOW", 1), 0.0, 30.0);
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
         if (wantGaze != gazeConf) gazeOn = gazeConf = wantGaze;
-        handsOn = ConfDouble(conf, "POINTER_HANDS", 1) != 0;
+        handsOn = ConfDouble(conf, "POINTER_HANDS", 0) != 0;
         pinchGain = std::clamp(ConfDouble(conf, "POINTER_PINCH_GAIN", 0.5), 0.05, 3.0);
         pinchDeadzone = std::clamp(ConfDouble(conf, "POINTER_PINCH_DEADZONE", 1.5), 0.0, 10.0);
         gripGain = std::clamp(ConfDouble(conf, "POINTER_GRIP_GAIN", 1.0), 0.05, 3.0);

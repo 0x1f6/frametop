@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install, start, stop, or inspect hand tracking on the Frame: ft-camd (the camera broker) and
-# ft-hands (the tracker), user services that start and stop with SteamVR.
+# ft-hands (the tracker), user services that stop with SteamVR. They don't start with it:
+# ft-handsctl on|off (on the Frame) or hands/run.sh start|stop.
 # Usage: hands/run.sh install|uninstall
 #        hands/run.sh caps      # give ft-camd its capabilities again (a rebuild clears them)
 #        hands/run.sh start|stop|restart|status|log [lines]
@@ -47,9 +48,10 @@ case ${1:-status} in
     for u in $units; do
       fill_template "$root/hands/$u" | on_frame "mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/$u"
     done
-    "$frame" --host "set -e; systemctl --user daemon-reload; systemctl --user enable $units
-if systemctl --user -q is-active steamvr.service; then systemctl --user restart $units; sleep 5; fi
-$states" ;;
+    # Installed but not started with SteamVR: ft-handsctl on|off (linked into ~/.local/bin).
+    "$frame" --host "set -e; systemctl --user daemon-reload; systemctl --user disable $units 2>/dev/null || true
+mkdir -p ~/.local/bin && ln -sfn $(printf %q "$FRAME_REPO/hands/ft-handsctl") ~/.local/bin/ft-handsctl
+$states; echo 'start it with: ft-handsctl on'" ;;
   caps) set_caps ;;
   uninstall) "$frame" --host "systemctl --user disable --now $units 2>/dev/null
 for u in $units; do rm -f ~/.config/systemd/user/\$u; done; systemctl --user daemon-reload; echo removed" ;;

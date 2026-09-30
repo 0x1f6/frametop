@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# ft-handsctl: turn hand tracking on and off by hand, on the Frame. With it on, your hands show
+# through Frametop's screens (the hand cutouts); pinches and grips only move the pointer with
+# POINTER_HANDS=1. It doesn't start with SteamVR (hands/run.sh install leaves it off), and it
+# stops when SteamVR does.
+#
+#   ft-handsctl on | off | status | log [lines]
+#   ft-handsctl cutouts on|off|state   ft-screens' hand cutouts, without stopping tracking
+#   ft-handsctl gestures               watch pinches and grips live (Ctrl+C to stop)
+#
+# Needs the services installed once: hands/run.sh install (it sets ft-camd's capabilities).
+set -euo pipefail
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+units="frametop-camd.service frametop-hands.service"
+
+ask_screens() {  # a command to ft-screens' control socket, and its reply
+  python3 - "$1" <<'EOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind("")
+s.settimeout(2)
+try:
+    s.sendto(sys.argv[1].encode(), "\0ft_screens")
+    print(s.recv(512).decode())
+except OSError as e:
+    sys.exit("ft-screens didn't answer (is the Frametop desktop running?): %s" % e)
+EOF
+}
+
+case ${1:-status} in
+  on)
+    systemctl --user -q is-active steamvr.service || { echo "SteamVR isn't running" >&2; exit 1; }
+    systemctl --user start $units
+    sleep 4
+    "$0" status ;;
+  off)
+    systemctl --user stop $units
+    echo "hand tracking off" ;;
+  status)
+    for u in $units; do echo "$u: $(systemctl --user is-active $u || true)"; done
+    journalctl --user -u frametop-hands.service --no-pager -o cat -n 40 |
+      grep -E '^ *[0-9.]+s |sets with a hand|cameras:' | tail -2 | cut -c1-160 || true ;;
+  log) journalctl --user -u frametop-camd.service -u frametop-hands.service --no-pager -o short -n "${2:-30}" ;;
+  cutouts)
+    ask_screens "cutouts ${2:-state}" ;;
+  gestures) exec python3 "$here/tools/watch_gestures.py" --distance ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
