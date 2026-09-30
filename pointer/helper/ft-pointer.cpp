@@ -163,6 +163,26 @@
 // press dragged onto the target is the same: from the raw gaze at the press to the release. With no
 // fresh gaze (a blink, the service stopped, the headset off), the pointer stays put.
 //
+// Hands (POINTER_HANDS, on by default; needs hand tracking, hands/): ft-hands publishes
+// pinches and grips (hands/include/fh_gestures.h), read here every frame.
+//   A pinch works like gaze mode's mouse press: the pointer stops (where the gaze put it), and
+// the click comes when the pinch opens, where the pointer is then. A quick tap clicks where
+// you looked. Held, the pinch's hand moves the pointer, for correcting the gaze: past
+// POINTER_PINCH_DEADZONE (1.5 deg of hand movement, seen from the eye; a tap's jitter and the
+// pinch point shifting as the fingers close stay inside it), at POINTER_PINCH_GAIN (0.5: half
+// the hand's angle, for precision). A correction is a lesson for the gaze tracker, as with the
+// mouse. A pinch ended by losing the hand (or by a grip taking over) doesn't click.
+//   A grip (closing the hand) is a press and drag: the press where the pointer is, then the
+// hand moves the pointer at POINTER_GRIP_GAIN (1: as far as it moves, seen from the eye), and
+// opening the hand releases. So it drags whatever the pointer is on: a title bar moves the
+// window, a panel's grab bar carries the panel, text is selected. Only with the hand held up,
+// at most POINTER_GRIP_BELOW (0.3 m) below the eyes: hands on a desk curl like a loose fist.
+//   The hand's movement is taken in the room, from where the eye was when the gesture began,
+// with the head pose at each frame's capture time, so turning your head doesn't move it.
+// The first gesture while the pointer is off only wakes it. Gestures are ignored in a VR game
+// (unless the dashboard is up) and with the headset off, and while the mouse's button is held.
+// Hand use keeps the pointer from the relay's idle release for two minutes, as gaze mode does.
+//
 // Placement (for layout): SteamVR keeps a floating panel's position inside the
 // dashboard, where nothing outside can set it, so the helper carries panels like a user
 // would. It measures the panel (md::ScanPanel), aims the device at its grab bar
@@ -210,10 +230,16 @@
 // (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_SHOW (1 s):
 // gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
+// POINTER_HANDS (1), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
+// POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.3 m): hands, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
 #include "vrmath.h"
+
+extern "C" {
+#include "../../hands/include/fh_gestures.h"
+}
 
 #include <algorithm>
 #include <atomic>
@@ -222,6 +248,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -232,9 +259,12 @@
 
 #include <climits>
 
+#include <fcntl.h>
 #include <fnmatch.h>
 
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -265,6 +295,81 @@ double ConfDouble(const std::map<std::string, std::string> &c, const char *key, 
     auto it = c.find(key);
     return it == c.end() ? fallback : std::atof(it->second.c_str());
 }
+
+// Hand gestures from ft-hands (see "Hands" at the top): /run/user/UID/frametop-hands/gestures,
+// mapped read-only. Version 1 files have pinches only; their grips read as zero.
+class HandGestures {
+public:
+    ~HandGestures() { Close(); }
+    // A consistent copy of the file (its sequence lock), if it's there. Opens it, and
+    // checks it's still the same file, at most once a second.
+    bool Read(fh_gestures_t &out) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - checked_ > std::chrono::seconds(1)) {
+            checked_ = now;
+            const std::string path = "/run/user/" + std::to_string(getuid()) + "/frametop-hands/gestures";
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0 || size_t(st.st_size) != len_ || st.st_ino != ino_) {
+                Close();
+                const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+                if (fd >= 0 && fstat(fd, &st) == 0 && size_t(st.st_size) >= offsetof(fh_gestures_t, grip)) {
+                    void *m = mmap(nullptr, size_t(st.st_size), PROT_READ, MAP_SHARED, fd, 0);
+                    if (m != MAP_FAILED) map_ = m, len_ = size_t(st.st_size), ino_ = st.st_ino, ++opens;
+                }
+                if (fd >= 0) close(fd);
+            }
+        }
+        if (!map_) return false;
+        const auto *g = static_cast<const fh_gestures_t *>(map_);
+        if (std::memcmp(g->magic, FH_GESTURES_MAGIC, 8) != 0) return false;
+        const size_t n = std::min(len_, sizeof out);
+        for (int tries = 0; tries < 3; ++tries) {
+            const uint64_t seq = __atomic_load_n(&g->seq, __ATOMIC_ACQUIRE);
+            if (seq & 1) continue;
+            std::memset(&out, 0, sizeof out);
+            std::memcpy(&out, map_, n);
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&g->seq, __ATOMIC_RELAXED) != seq) continue;
+            if (out.version < 2) std::memset(out.grip, 0, sizeof out.grip);
+            return true;
+        }
+        return false;
+    }
+    int opens = 0;   // a new file: the counters start over
+
+private:
+    void Close() {
+        if (map_) munmap(map_, len_);
+        map_ = nullptr, len_ = 0, ino_ = 0;
+    }
+    void *map_ = nullptr;
+    size_t len_ = 0;
+    ino_t ino_ = 0;
+    std::chrono::steady_clock::time_point checked_{};
+};
+
+// The HMD's recent poses (standing universe), to turn the gestures' head-frame points into
+// the room as the head was when the cameras took them.
+class PoseHistory {
+public:
+    void Add(std::chrono::steady_clock::time_point t, const vr::HmdMatrix34_t &m) {
+        poses_.push_back({t, m});
+        while (poses_.size() > 128) poses_.pop_front();   // about a second
+    }
+    // The pose at CLOCK_MONOTONIC time t_ns (steady_clock's), or the nearest kept.
+    bool At(uint64_t t_ns, vr::HmdMatrix34_t &out) const {
+        if (poses_.empty()) return false;
+        const std::chrono::steady_clock::time_point t{std::chrono::nanoseconds(t_ns)};
+        const auto *best = &poses_.front();
+        for (const auto &p : poses_)
+            if (std::chrono::abs(p.first - t) < std::chrono::abs(best->first - t)) best = &p;
+        out = best->second;
+        return true;
+    }
+
+private:
+    std::deque<std::pair<std::chrono::steady_clock::time_point, vr::HmdMatrix34_t>> poses_;
+};
 
 int AbstractSocket(const char *name, bool bindIt) {
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -534,6 +639,9 @@ int main() {
     // Gaze mode (see the top); gazeConf is POINTER_GAZE as last read, like followConf.
     bool gazeOn = false, gazeConf = false;
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
+    // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
+    bool handsOn = true;
+    double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, gripBelow = 0.3;
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
     auto loadConfig = [&] {
@@ -558,6 +666,11 @@ int main() {
         gazeShow = std::clamp(ConfDouble(conf, "POINTER_GAZE_SHOW", 1), 0.0, 30.0);
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
         if (wantGaze != gazeConf) gazeOn = gazeConf = wantGaze;
+        handsOn = ConfDouble(conf, "POINTER_HANDS", 1) != 0;
+        pinchGain = std::clamp(ConfDouble(conf, "POINTER_PINCH_GAIN", 0.5), 0.05, 3.0);
+        pinchDeadzone = std::clamp(ConfDouble(conf, "POINTER_PINCH_DEADZONE", 1.5), 0.0, 10.0);
+        gripGain = std::clamp(ConfDouble(conf, "POINTER_GRIP_GAIN", 1.0), 0.05, 3.0);
+        gripBelow = std::clamp(ConfDouble(conf, "POINTER_GRIP_BELOW", 0.3), 0.05, 1.0);
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
         const auto ig = conf.find("POINTER_IGNORE");
         ignore = ParseIgnore(ig == conf.end() ? "" : ig->second);
@@ -684,7 +797,23 @@ int main() {
     // the gaze the pointer again when the press or click is over.
     vr::TrackedDeviceIndex_t ours = vr::k_unTrackedDeviceIndexInvalid;
     bool aimHeld = false, clickPress = false, clickRelease = false, gazeBack = false;
+    bool aimHand = false;  // the held-back press is a pinch's: it never turns into a real press
     Clock::time_point aimSince{}, clickReleaseAt{};
+    // Hands (see the top): the gesture being held (side -1: none), where its hand pointed
+    // from (origin: the eye when it began, in the room) and the pointer then.
+    HandGestures handFile;
+    PoseHistory poses;
+    struct HandHold {
+        int side = -1;
+        bool grip = false, engaged = false;
+        Vec3 origin;
+        double refYaw = 0, refPitch = 0, startYaw = 0, startPitch = 0, lastYaw = 0, lastPitch = 0;
+    } hold;
+    uint32_t seenBegins[2][2] = {}, seenEnds[2][2] = {};  // [pinch, grip][side], as last read
+    bool handBaseline = false;
+    int handOpens = 0;
+    uint64_t handSeq = 0, handPublished = 0;
+    Clock::time_point handUsed{};  // a gesture began then (keeps the pointer, like gaze mode)
     // Gaze mode outside games, and its dot (see the top): lastMove/lastHeld/pulseAt.
     bool inGame = false, gazeAwake = false;
     Clock::time_point inGameAt{}, gazeAwakeAt{};
@@ -940,9 +1069,13 @@ int main() {
                 inGameAt = t;
                 inGame = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
             }
-            const bool awake = gazeOn && !inGame && !headsetOff;
+            // Hand gestures in the last two minutes keep it the same way.
+            const bool handsRecent = handsOn && handUsed != Clock::time_point{} && t - handUsed < std::chrono::minutes(2);
+            const bool awake = (gazeOn || handsRecent) && !inGame && !headsetOff;
             if (awake != gazeAwake || t - gazeAwakeAt > std::chrono::seconds(5)) {
-                if (awake != gazeAwake) std::printf("gaze keeps the pointer: %s\n", awake ? "yes" : "no (off, in a game, or headset off)");
+                if (awake != gazeAwake)
+                    std::printf("%s keeps the pointer: %s\n", gazeOn ? "gaze" : "hand use",
+                                awake ? "yes" : "no (off, in a game, or headset off)");
                 if (awake != gazeAwake) std::fflush(stdout);
                 gazeAwake = awake;
                 gazeAwakeAt = t;
@@ -1227,6 +1360,141 @@ int main() {
                 pitch = std::clamp(std::asin(std::clamp(g.y, -1.0, 1.0)) * 180 / M_PI, -85.0, 85.0);
             }
         }
+
+        // Hands (see the top): pinches and grips from ft-hands.
+        {
+            vr::TrackedDevicePose_t h0;
+            sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &h0, 1);
+            if (h0.bPoseIsValid) poses.Add(tnow, h0.mDeviceToAbsoluteTracking);
+        }
+        // Where a gesture's point is, seen from the hold's origin: yaw and pitch, degrees.
+        auto handAngles = [&](const float p[3], uint64_t t_ns, const Vec3 &from, double &hy, double &hp) {
+            vr::HmdMatrix34_t head;
+            if (!poses.At(t_ns, head)) return false;
+            const Vec3 d = Normalize(Position(head) + Rotate(head, Vec3{p[0], p[1], p[2]}) - from);
+            hy = std::atan2(-d.x, -d.z) * 180 / M_PI;
+            hp = std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI;
+            return true;
+        };
+        auto endHold = [&](bool lost) {
+            if (hold.grip) {
+                if (leftHeld) releaseLeft();
+            } else if (aimHeld) {
+                aimHeld = aimHand = false;
+                if (lost) {
+                    if (gazeOn) gazeOwns = true, nudging = false;  // no click: the pointer goes back to the gaze
+                } else {
+                    clickPress = true;  // the click is on the release, where the pointer is now
+                    gazeBack = nudgeMoved < 0.2;
+                }
+            }
+            if (debug) std::printf("hand %s %s%s\n", hold.grip ? "grip" : "pinch", lost ? "lost" : "released",
+                                   hold.grip ? "" : lost ? " (no click)" : " (click)");
+            if (debug) std::fflush(stdout);
+            hold.side = -1;
+        };
+        auto beginHold = [&](int side, bool grip, const fh_pinch_t &g) {
+            handUsed = tnow;
+            if (hold.side >= 0) {
+                // A grip takes over a pinch on the way to it (closing the hand passes through
+                // one); otherwise one gesture at a time.
+                if (!grip || hold.grip) return;
+                aimHeld = aimHand = false;
+                hold.side = -1;
+            }
+            if (leftHeld || aimHeld || clickPress || clickRelease) return;  // the mouse's button is busy
+            if (!active) {
+                wake(tnow);  // the first gesture only wakes the pointer, like the first mouse move
+                return;
+            }
+            vr::HmdMatrix34_t head;
+            if (!poses.At(g.begin_ns, head)) return;
+            // A grip only with the hand held up: hands on a desk (typing, on the mouse) curl
+            // like a loose fist, and looking down at them puts them straight ahead in the
+            // head's frame, where ft-hands' own check can't tell.
+            const Vec3 at = Position(head) + Rotate(head, Vec3{g.begin_point[0], g.begin_point[1], g.begin_point[2]});
+            if (grip && Position(head).y - at.y > gripBelow) {
+                if (debug) std::printf("hand grip ignored: %.2f m below the eyes\n", Position(head).y - at.y);
+                return;
+            }
+            hold = {side, grip, false, Position(head)};
+            if (!handAngles(g.begin_point, g.begin_ns, hold.origin, hold.refYaw, hold.refPitch)) return void(hold.side = -1);
+            hold.startYaw = yaw, hold.startPitch = pitch;
+            if (grip) {
+                // A press and drag where the pointer is (where you look, in gaze mode).
+                gazeBack = gazeOn && gazeOwns;
+                pressLeft();
+            } else {
+                // Held back like gaze mode's mouse press (see the top): the click comes on the release.
+                gazeOwns = false;
+                nudging = gazeOn && haveHead && tnow - gz.at < std::chrono::milliseconds(200);
+                nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+                nudgeAt = aimSince = tnow, nudgeMoved = 0;
+                aimHeld = aimHand = true;
+                pulseAt = tnow;
+            }
+            if (debug) std::printf("hand %s %s began\n", side ? "right" : "left", grip ? "grip" : "pinch");
+            if (debug) std::fflush(stdout);
+        };
+        fh_gestures_t hg;
+        const bool handOk = handsOn && handFile.Read(hg);
+        if (handOk && (hg.seq != handSeq || handFile.opens != handOpens)) {
+            handSeq = hg.seq;
+            handPublished = hg.publish_ns;
+            const fh_pinch_t *slots[2] = {hg.pinch, hg.grip};
+            // A new file, or a tracker whose counters went back: start counting from here.
+            bool rebase = !handBaseline || handFile.opens != handOpens;
+            for (int k = 0; k < 2; ++k)
+                for (int s = 0; s < 2; ++s)
+                    rebase = rebase || slots[k][s].begins < seenBegins[k][s] || slots[k][s].ends < seenEnds[k][s];
+            if (rebase) {
+                if (hold.side >= 0) endHold(true);
+                for (int k = 0; k < 2; ++k)
+                    for (int s = 0; s < 2; ++s) seenBegins[k][s] = slots[k][s].begins, seenEnds[k][s] = slots[k][s].ends;
+                handBaseline = true, handOpens = handFile.opens;
+            }
+            // Not over a VR game (unless the dashboard is up), and not with the headset off.
+            const bool allowed = !headsetOff && (!inGame || overlay->IsDashboardVisible());
+            for (int k = 1; k >= 0; --k)  // grips first: one takes over a pinch
+                for (int s = 0; s < 2; ++s) {
+                    const fh_pinch_t &g = slots[k][s];
+                    const bool began = g.begins != seenBegins[k][s], ended = g.ends != seenEnds[k][s];
+                    const bool lost = g.flags & FH_PINCH_LOST;
+                    seenBegins[k][s] = g.begins, seenEnds[k][s] = g.ends;
+                    auto holding = [&] { return hold.side == s && hold.grip == (k == 1); };
+                    if (holding() && ended) endHold(lost);  // the one held ended (another may have begun)
+                    if (began && allowed) {
+                        beginHold(s, k == 1, g);
+                        // begun and ended since the last read (a quick tap): its release too
+                        if (!(g.flags & FH_PINCH_DOWN) && holding()) endHold(lost);
+                    }
+                }
+            // The held gesture's hand moves the pointer: past the dead zone (a tap's jitter,
+            // the pinch point shifting as the fingers close), then at the gain, from there.
+            if (hold.side >= 0) {
+                const fh_pinch_t &g = hold.grip ? hg.grip[hold.side] : hg.pinch[hold.side];
+                double hy, hp;
+                if ((g.flags & FH_PINCH_TRACKED) && handAngles(g.point, hg.capture_ns, hold.origin, hy, hp)) {
+                    const double dy = std::remainder(hy - hold.refYaw, 360.0), dp = hp - hold.refPitch;
+                    if (!hold.engaged && std::hypot(dy, dp) > (hold.grip ? 0.5 : pinchDeadzone)) {
+                        hold.engaged = true;
+                        hold.refYaw = hy, hold.refPitch = hp;
+                        hold.startYaw = hold.lastYaw = yaw, hold.startPitch = hold.lastPitch = pitch;
+                    } else if (hold.engaged) {
+                        const double gain = hold.grip ? gripGain : pinchGain;
+                        yaw = std::remainder(hold.startYaw + gain * dy, 360.0);
+                        pitch = std::clamp(hold.startPitch + gain * dp, -85.0, 85.0);
+                        if (!hold.grip) nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
+                        hold.lastYaw = yaw, hold.lastPitch = pitch;
+                        lastMove = tnow;  // the dot shows while it moves (gaze mode)
+                    }
+                }
+            }
+        }
+        // ft-hands stopped (or hung) with a gesture held: it's over, as lost.
+        const uint64_t nowNs =
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow.time_since_epoch()).count());
+        if (hold.side >= 0 && (!handOk || !active || nowNs - handPublished > 1'500'000'000ull)) endHold(true);
 
         if (aimHeld || leftHeld || clickPress || clickRelease) lastHeld = tnow;
 
@@ -1573,8 +1841,8 @@ int main() {
 
         // A held-back press (see the top): held still long enough, it's a real press (a drag);
         // released, it's a click where the pointer is now (this frame's pose has gone out).
-        if (!active) aimHeld = clickPress = false;  // released meanwhile: nothing to click
-        if (aimHeld && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
+        if (!active) aimHeld = clickPress = aimHand = false;  // released meanwhile: nothing to click
+        if (aimHeld && !aimHand && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
             aimHeld = false;
             gazeBack = true;
             pressLeft();
