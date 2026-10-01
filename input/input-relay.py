@@ -790,13 +790,16 @@ def main():
         return True
 
 
+    screens_down = set()  # keys the desktop was told went down and not yet up (see reconcile_desktop_keys)
+
     def to_screens(code, value):
         """A key for the desktop screens (ft-screens decides whether it types)."""
         if value in (0, 1) and code < BTN_MISC:
             try:
                 screens_sock.sendto(f"key {code} {value}".encode(), SCREENS)
             except OSError:
-                pass  # ft-screens not running
+                return  # ft-screens not running
+            (screens_down.add if value else screens_down.discard)(code)
     nodes = {}  # fd -> Node
     # Nodes already probed (rejected or open): path -> inode. A device that disconnects and
     # reconnects between two scans often gets the same event numbers back, so the path alone
@@ -877,6 +880,35 @@ def main():
         node.held.clear()
         mouse.sync()
         keyboard.sync()
+
+    def physically_down():
+        """The keys down on every device read here, as the kernel has them (EVIOCGKEY)."""
+        down = set()
+        for node in nodes.values():
+            buf = bytearray((KEY_MAX + 8) // 8)
+            try:
+                fcntl.ioctl(node.fd, EVIOCGKEY, buf)
+            except OSError:
+                continue
+            down.update(i * 8 + bit for i, b in enumerate(buf) if b for bit in range(8) if b >> bit & 1)
+        return down
+
+    def reconcile_desktop_keys():
+        """A key the desktop has down that no device holds comes up there, and the key
+        combinations forget a Meta or modifier no device holds. A key can be left down when
+        its device vanishes with it held (release_held only lets go of it here) or a release
+        goes astray: on 2026-10-01, after a calibration, Meta stayed down in KWin, so typing
+        opened the overview and clicks on the desktop did other things."""
+        if not screens_down and not held_meta and not held_modifiers:
+            return
+        down = physically_down()
+        for code in sorted(screens_down - down):
+            to_screens(code, 0)
+            log(f"key {code} released on the desktop: no keyboard holds it")
+        for code in [c for c in held_meta if c not in down]:
+            held_meta.discard(code)
+            meta_hidden.discard(code)
+        held_modifiers.intersection_update({MODIFIERS[c] for c in down if c in MODIFIERS})
 
     def keys_down(node):
         buf = bytearray((KEY_MAX + 8) // 8)
@@ -1000,11 +1032,16 @@ def main():
 
     vr_bind(time.monotonic())  # a helper that's already running keeps its buttons in step
     waiting = False  # a keyboard's grab waits for its keys to come up
+    # A relay that went away with a key down left it down on the desktop, where this one
+    # never sent it: modifiers come up there now (a release of a key that isn't down is nothing).
+    for code in sorted(MODIFIERS):
+        to_screens(code, 0)
     while True:
         now = time.monotonic()
         pointer = state["pointer"]
         if now >= next_scan:
             next_scan = now + 1.0
+            reconcile_desktop_keys()
             current = {}
             for name in os.listdir("/dev/input"):
                 if name.startswith("event"):
