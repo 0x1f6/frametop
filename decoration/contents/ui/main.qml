@@ -44,24 +44,24 @@ Decoration {
         default: return 4;
         }
     }
-    readonly property int bottom: borderSize === DecorationOptions.BorderNone ? 0
+    readonly property int bottomBorder: borderSize === DecorationOptions.BorderNone ? 0
                                 : borderSize === DecorationOptions.BorderNoSides ? 4 : side
     readonly property color outline: Qt.tint(options.titleBarColor, Qt.rgba(0, 0, 0, 0.35))
 
     function applyBorders() {
         borders.left = side;
         borders.right = side;
-        borders.bottom = bottom;
+        borders.bottom = bottomBorder;
         borders.top = titleHeight;
         maximizedBorders.top = titleHeight;
         // Without visible side borders, keep a strip to grab for resizing.
         extendedBorders.left = side ? 0 : 4;
         extendedBorders.right = side ? 0 : 4;
-        extendedBorders.bottom = bottom ? 0 : 4;
+        extendedBorders.bottom = bottomBorder ? 0 : 4;
     }
     onTitleHeightChanged: applyBorders()
     onSideChanged: applyBorders()
-    onBottomChanged: applyBorders()
+    onBottomBorderChanged: applyBorders()
     Component.onCompleted: applyBorders()
 
     // The configured buttons, with the float button left of Close (or first on the right

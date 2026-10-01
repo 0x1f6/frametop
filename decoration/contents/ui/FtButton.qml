@@ -116,5 +116,8 @@ DecorationButton {
             visible = Qt.binding(() => decoration.client.providesContextHelp);
         if (buttonType === DecorationOptions.DecorationButtonApplicationMenu)
             visible = Qt.binding(() => decoration.client.hasApplicationMenu);
+        // Like Breeze: no On All Desktops button with only one virtual desktop.
+        if (buttonType === DecorationOptions.DecorationButtonOnAllDesktops)
+            visible = Qt.binding(() => decorationSettings.onAllDesktopsAvailable);
     }
 }

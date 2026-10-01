@@ -10,10 +10,11 @@ deco=kwin4_decoration_qml_frametop
 cfg=$HOME/.config/frametop
 kwinrc=$cfg/kwinrc
 
-# The desktop's KWin: the one using Frametop's config folder. Its D-Bus is the session's.
+# The desktop's D-Bus: from its Plasma shell, which uses Frametop's config folder (KWin's own
+# environment isn't readable: it runs with extra capabilities).
 bus=
-for pid in $(pgrep -x kwin_wayland); do
-  env=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null) || continue
+for pid in $(pgrep -x plasmashell); do
+  env=$( (tr '\0' '\n' < "/proc/$pid/environ") 2>/dev/null) || continue
   grep -qx "XDG_CONFIG_HOME=$cfg" <<<"$env" || continue
   bus=$(sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' <<<"$env")
 done
@@ -23,11 +24,15 @@ if [ "${1:-}" = --off ]; then
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library --delete
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
 else
-  dir=${XDG_DATA_HOME:-$HOME/.local/share}/kwin/decorations/$deco
-  rm -rf "$dir"
-  mkdir -p "$(dirname "$dir")"
-  cp -r "$here" "$dir"
-  rm -f "$dir/apply.sh"
+  # Under a new name each time: KWin keeps a decoration's QML (even a broken one) by name
+  # until it restarts. The next desktop start goes back to the plain name.
+  decos=${XDG_DATA_HOME:-$HOME/.local/share}/kwin/decorations
+  rm -rf "$decos/${deco}"_try*
+  deco=${deco}_try$(date +%s)
+  mkdir -p "$decos"
+  cp -r "$here" "$decos/$deco"
+  rm -f "$decos/$deco/apply.sh"
+  sed -i "s/\"Id\": \"[^\"]*\"/\"Id\": \"$deco\"/" "$decos/$deco/metadata.json"
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library org.kde.kwin.aurorae
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme "$deco"
 fi

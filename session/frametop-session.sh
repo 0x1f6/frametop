@@ -204,7 +204,7 @@ deco=kwin4_decoration_qml_frametop
 deco_dir=${XDG_DATA_HOME:-$HOME/.local/share}/kwin/decorations/$deco
 kwinrc=$XDG_CONFIG_HOME/kwinrc
 if [ "$float_slots" -gt 0 ]; then
-  rm -rf "$deco_dir"
+  rm -rf "$deco_dir" "$deco_dir"_try*  # (decoration/apply.sh's copies)
   mkdir -p "$(dirname "$deco_dir")"
   cp -r "$here/../decoration" "$deco_dir"
   rm -f "$deco_dir/apply.sh"

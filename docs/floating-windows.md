@@ -10,7 +10,7 @@ Built so far (2026-09-29; the KWin side tested on the headless test desktop, `sc
 - The session adds `FLOAT_SLOTS` spares and starts ft-floatd from the desktop's autostart; ft-layout leaves the spares alone.
 - The 3D mouse's drag lock crosses onto other Frametop panels (not while carrying one).
 - The float key (2026-09-30): the input relay's `float_toggle` (Meta+Shift+F by default) and `dock_all`, through `float pointer` and `dock all` on ft-floatd. Tested on the headless desktop.
-- The title bar button (2026-09-30, branch `float-titlebar`): `decoration/` (Frametop's QML window decoration, installed by the session script; `decoration/apply.sh` switches the running desktop to it or back to Breeze), and keep-below as the floating flag in the script. Not yet tried in a running KWin.
+- The title bar button (2026-09-30, branch `float-titlebar`): `decoration/` (Frametop's QML window decoration, installed by the session script; `decoration/apply.sh` switches the running desktop to it or back to Breeze), and keep-below as the floating flag in the script. Tried on the live desktop: the button floats Dolphin and docks it again, the float key and `dock all` keep the flag in step, and maximized windows look right.
 
 Not built yet: phase 2 (the ghost, tear-off by dragging, push-flush docking), phase 3 (launching floating, Launch as Standalone, remembered placement), and phase 4.
 
