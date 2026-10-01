@@ -50,7 +50,8 @@ case ${1:-status} in
   status)
     for u in $camd $hands; do echo "$u: $(systemctl --user is-active $u || true)"; done
     echo "ft-screens cutouts: $("$here/ft-handsctl" cutouts state 2>&1)"
-    journalctl --user -u $hands --no-pager -o cat -n 40 |
+    inv=$(systemctl --user show -p InvocationID --value $hands)  # this run's lines only
+    [ -n "$inv" ] && journalctl --user _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat |
       grep -E '^ *[0-9.]+s |sets with a hand|cameras:' | tail -2 | cut -c1-160 || true ;;
   *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
