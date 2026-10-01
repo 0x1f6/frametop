@@ -29,6 +29,10 @@ A Steam Frame is someone's personal headset, and they may be wearing it while yo
 - Write only inside the repo, `/tmp`, and the container unless told otherwise. The installers are the exception: they write the user services, launchers, and the SteamVR driver into the home folder.
 - Never copy `.netrc`, SSH keys, or Steam config off the Frame or into this repo.
 
+## SteamOS updates
+
+A SteamOS update replaces SteamVR, KWin, and gamescope with the rest of the OS image. When a change starts depending on something from the image (a host file, an OpenVR interface outside the bundled header, an undocumented layout or output format, a SteamVR or KWin quirk), add a check for it to `scripts/update-check.py`, or a retest hint for its package there. [docs/design.md](docs/design.md) has the background.
+
 ## Names
 
 User-facing names are "Frametop", "Frametop Display Settings", and "Frametop Input Settings". Programs and files use the `ft-` / `ft_` prefix (`ft-screens`, `ft-pointer`, `ft-layout`, the `ft_pointer` driver); config, units, and overlay keys use `frametop`. Program names must stay within 15 characters: Linux truncates process names there, and the scripts find programs with `pgrep -x` / `pkill -x`.

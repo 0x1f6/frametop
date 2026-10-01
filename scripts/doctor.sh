@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Check that the Steam Frame is ready for these projects: reachable (from a PC), the
-# distrobox tool and the dev container present, and disk space. Works on the Frame too.
+# distrobox tool and the dev container present, and disk space. Then check what Frametop
+# needs from SteamOS, which an update can change (scripts/update-check.py). Works on the
+# Frame too.
+# Usage: scripts/doctor.sh [--mark-good]
+#   --mark-good  once Frametop works, record the SteamOS, SteamVR, and KWin versions, so a
+#                later run says what an update changed
 set -uo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
@@ -31,4 +36,11 @@ check "distrobox" on_frame 'test -x ~/.local/bin/distrobox && ~/.local/bin/distr
 check "container $FRAME_BOX" on_frame "podman ps -a --filter name=^$FRAME_BOX\$ --format '{{.Image}} {{.Status}}' | grep ."
 check "repo on the Frame" on_frame 'pwd'
 check "free space in ~" on_frame "df -h ~ | awk 'NR==2{print \$4\" free\"}'"
+
+echo "what Frametop needs from SteamOS:"
+if [ "$FRAME_LOCAL" = 1 ]; then
+  python3 "$REPO_ROOT/scripts/update-check.py" "$@" || fail=1
+else
+  ssh -o BatchMode=yes "$FRAME_HOST" "python3 - ${*:+$(printf '%q ' "$@")}" < "$REPO_ROOT/scripts/update-check.py" || fail=1
+fi
 exit "$fail"

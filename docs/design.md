@@ -149,6 +149,12 @@ Movement is judged within 10-second windows. On the mount, the head pose jittere
 
 Staying awake while charging uses Steam's own setting rather than a logind sleep inhibitor. Steam suspends with `dbus-send ... login1.Manager.Suspend boolean:true`, and a block inhibitor does stop that (`CanSuspend` answers "challenge" while one is held), but it stops the power button too. `system_idle_suspend_ac_sec` is field 24004 of Steam's CMsgClientSettings. In Steam's SharedJSContext, reachable over CDP on port 8080 because Steam runs with `-cef-enable-debugging`, `SteamClient.Settings.SetSetting` takes a change as a base64 protobuf, the way Steam's Power page sends it (0 is never), and `settingsStore.clientSettings` has the current values.
 
+## SteamOS updates
+
+On the Frame, SteamVR is part of the OS image (`/opt/steamvr`, the `deckard-steamvr-rel` package), next to KWin, gamescope, and the kernel, so every SteamOS update can bring a new SteamVR too. Frametop survives updates: it lives in the home folder and the `dev` container, the Bluetooth fixes are in `/etc`, which SteamOS keeps across updates, and nothing goes into `/usr`. What an update can break is what Frametop uses from the image. The public OpenVR API is versioned and stays put. The rest is less certain: `IVRIPCResourceManagerClient`, which is newer than the header SteamVR ships; the text `vrcmd --overlays` prints; the eye tracker's shared memory layout; XRService's camera buffers; KWin's nested backend; and behavior Frametop works around, such as the SteamVR Settings page that `ComputeOverlayIntersection` can't find or the scale KWin's nested backend doesn't undo.
+
+`scripts/update-check.py`, which `scripts/doctor.sh` runs, checks what it can directly: that SteamVR still serves every OpenVR interface version the installed programs were built against (read from the binaries), that `vrcmd`'s format still parses, that the eye tracker's sample timestamp is still at the offset ft-gaze reads, and the host files, services, sockets, and driver registration. Behavior can't be checked without someone in the headset, so it records the versions of the packages that matter once things work (`--mark-good`), and after an update names what changed and what to try by hand.
+
 ## Approaches we dropped
 
 - WayVR, an existing Wayland desktop for VR. It built and connected to SteamVR on the Frame, but nothing showed in the headset. It has no bindings for the Frame's controllers, and its KDE screen capture needs `xdg-desktop-portal-kde`, which SteamOS doesn't ship.

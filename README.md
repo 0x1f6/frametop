@@ -79,7 +79,7 @@ With the displays off, the headset keeps tracking and rendering, so it uses abou
 
 This is an early release, tested on one Steam Frame (SteamOS 0.3.0 build 20260922, SteamVR 2.17.10).
 
-- A SteamOS or SteamVR update can break parts of it until Frametop catches up. If something stops working after an update, please report it.
+- A SteamOS or SteamVR update can break parts of it until Frametop catches up. After an update, run `cd ~/frametop && scripts/doctor.sh` in a terminal. It checks what Frametop needs from SteamOS, and says what changed since the versions you last marked as working and what to try. Once everything works, `scripts/doctor.sh --mark-good` records the versions. If something stops working, please report it.
 - The first install downloads 1–2 GB for the build container and compiles everything on the headset, which takes several minutes.
 - During a VR game you can't show the screens with a controller button, because the game owns the buttons. Open the SteamVR dashboard, press Meta+Shift+H, or use a mapped mouse button instead.
 - Flatscreen games aren't detected as games. If your controllers end up working the screens instead of the game, set Controllers on the screens to "Only with the SteamVR dashboard open" (Frametop Display Settings, Visibility & pins tab).
@@ -162,6 +162,7 @@ Then run `./install.sh` from the PC. Daily use:
 
 ```
 scripts/doctor.sh                  # is the Frame reachable and ready?
+scripts/doctor.sh --mark-good      # and record the versions Frametop works with
 scripts/sync.sh                    # copy the repo to ~/dev/frametop on the Frame
 scripts/frame.sh '<cmd>'           # run in the dev container, in the Frame's copy
 scripts/frame.sh -C <dir> '<cmd>'  # same, in a folder of the repo

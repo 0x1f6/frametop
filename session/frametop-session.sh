@@ -64,12 +64,22 @@ if [ "${1:-}" != --inner ]; then
     echo "Frametop is already running" >&2
     exit 0
   fi
-  set -a; . /usr/share/deckard/mesavars.sh; set +a
+  # A SteamOS update could move either of the files sourced here. The desktop still
+  # starts without them (scripts/update-check.py reports it).
+  if [ -r /usr/share/deckard/mesavars.sh ]; then
+    set -a; . /usr/share/deckard/mesavars.sh; set +a
+  else
+    echo "frametop: no /usr/share/deckard/mesavars.sh, starting without SteamOS's Mesa settings" >&2
+  fi
   # Flatpak apps (Chromium) publish their launcher entries under the Flatpak
   # exports dirs. SSH and launcher environments may lack XDG_DATA_DIRS, and then
   # Plasma can't find them and opens Discover instead.
   export XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
-  set +u; . /etc/profile.d/flatpak.sh; set -u
+  if [ -r /etc/profile.d/flatpak.sh ]; then
+    set +u; . /etc/profile.d/flatpak.sh; set -u
+  else
+    echo "frametop: no /etc/profile.d/flatpak.sh, so Flatpak apps may open Discover instead" >&2
+  fi
   # Arrange the screens once they're up: in the profile this desktop starts with (FT_PROFILE,
   # from a profile's launcher entry, or the default profile), which also opens its apps, or
   # else in the saved layout (skipped when auto-arrange is off). docs/profiles.md.
