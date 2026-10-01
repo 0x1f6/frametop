@@ -1139,8 +1139,8 @@ int main() {
         return "";
     };
 
-    // Spike: aim down from the panel's bottom edge, 1 cm a step, and log where SteamVR's
-    // laser hits something (the hit dot shows) and whether the window controls are up.
+    // grabprobe (maintenance): aim down from the panel's bottom edge, 1 cm a step, and log where
+    // SteamVR's laser hits something (the hit dot shows) and whether the window controls are up.
     auto grabProbe = [&](const char *key) {
         Panel p;
         Vec3 eye;

@@ -1,5 +1,5 @@
 // ft-gaze: the headset's eye tracking as rays and Frametop screen pixels (OpenVR overlay
-// client, runs in the dev container). An experiment for gaze input; ft-gazeprobe reads it.
+// client, runs in the dev container). The gaze service (ft-gazed) and the gaze probe run it.
 //
 // Every eye tracker sample (90 Hz) becomes one JSON line on stdout with each gaze source
 // hit-tested against the Frametop screens:

@@ -54,7 +54,8 @@ mkdir -p ~/.local/bin && ln -sfn $(printf %q "$FRAME_REPO/hands/ft-handsctl") ~/
 $states; echo 'start it with: ft-handsctl on'" ;;
   caps) set_caps ;;
   uninstall) "$frame" --host "systemctl --user disable --now $units 2>/dev/null
-for u in $units; do rm -f ~/.config/systemd/user/\$u; done; systemctl --user daemon-reload; echo removed" ;;
+for u in $units; do rm -f ~/.config/systemd/user/\$u; done; systemctl --user daemon-reload
+[ -L ~/.local/bin/ft-handsctl ] && rm -f ~/.local/bin/ft-handsctl; echo removed" ;;
   start|stop|restart) "$frame" --host "systemctl --user $1 $units; $states" ;;
   status) "$frame" --host "$states; journalctl --user -u frametop-hands.service --no-pager -o cat -n 4" || true ;;
   log) "$frame" --host "journalctl --user -u frametop-camd.service -u frametop-hands.service --no-pager -o short -n ${2:-30}" ;;

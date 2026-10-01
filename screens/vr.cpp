@@ -890,7 +890,8 @@ void SendFloat(const std::string &msg) {
     std::memcpy(addr.sun_path + 1, name, sizeof name - 1);
     sendto(fd, msg.data(), msg.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&addr),
            socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1));
-    std::printf("to ft-floatd: %s\n", msg.c_str());
+    if (msg.rfind("resize ", 0) != 0)  // an edge drag sends many resizes a second
+        std::printf("to ft-floatd: %s\n", msg.c_str());
 }
 
 // Where a device's ray meets the screen's plane, in the screen's x (right) and y (up),

@@ -411,8 +411,8 @@ Kirigami.ApplicationWindow {
                 text: spage.md
                       ? "Each screen is a real monitor of its own: any resolution, portrait by choosing a tall one. Resolution, "
                         + "width, and curve apply at once. In VR: move a screen by the bar underneath, curve it with the round "
-                        + "button next to the bar, resize it by the tab on its bottom right corner; Save current arrangement on the "
-                        + "Layout page keeps all of it."
+                        + "button next to the bar, resize it by the tab on its bottom right corner; Save as profile… on the "
+                        + "Layout & profiles page keeps all of it."
                       : "gamescope draws every screen at the same resolution, at most 1920 × 1080 worth of pixels. Portrait turns "
                         + "a screen on its side. Rotation and scale apply at once; the rest when the desktop starts."
             }
@@ -949,7 +949,7 @@ Kirigami.ApplicationWindow {
                           + "it.\n\nPin a screen to your head: choose On your head above. It rides on the headset where it "
                           + "is now, like a HUD, and shows whenever the screens do. Grab its bar to move it; it stays on "
                           + "your head where you let go. Choosing a pin above keeps the screen where it is now, so place "
-                          + "it first. Save current arrangement (Layout) keeps pins."
+                          + "it first. Save as profile… (Layout) keeps pins."
                 }
             }
         }

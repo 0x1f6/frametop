@@ -445,7 +445,7 @@ class Backend(QObject):
                               f"{reply or 'the desktop is not running'}", True)
         elif which == "all" and where != "none":
             place = "on your head" if where == "head" else f"on your {where} wrist"
-            self.message.emit(f"All screens ride {place} now. Save current arrangement (Layout) keeps it.", False)
+            self.message.emit(f"All screens ride {place} now. Save as profile… (Layout & profiles) keeps it.", False)
         self._check_running()
 
     # --- power: ft-powerd and Steam's sleep setting ---

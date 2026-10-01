@@ -138,8 +138,6 @@ GAZE_SETTINGS = [
 # In gaze mode, what the mouse's left button does (POINTER_GAZE_MOUSE).
 GAZE_MOUSE = {"precision": "Gaze precision: hold to steer with the mouse, release to click",
               "direct": "Click right away where the pointer is"}
-# The hand role the pointer's virtual controller takes (POINTER_ROLE).
-POINTER_ROLES = {"right": "Right hand", "left": "Left hand", "stylus": "Stylus (no hand)"}
 # Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
@@ -884,23 +882,6 @@ class Backend(QObject):
         self.reload_timer.start()
         self.pointerChanged.emit()
         self.message.emit("Gaze dot: " + ("always shown" if on else "shown only while the mouse moves it"), False)
-
-    @Property(str, notify=pointerChanged)
-    def pointerRole(self):
-        v = read_conf().get("POINTER_ROLE", "right")
-        return v if v in POINTER_ROLES else "right"
-
-    @Property("QVariantList", constant=True)
-    def pointerRoles(self):
-        return [{"value": k, "text": v} for k, v in POINTER_ROLES.items()]
-
-    @Slot(str)
-    def setPointerRole(self, role):
-        if role in POINTER_ROLES:
-            write_conf_value("POINTER_ROLE", role)
-            self.reload_timer.start()
-            self.pointerChanged.emit()
-            self.message.emit(f"Pointer role: {POINTER_ROLES[role].lower()} (from its next wake)", False)
 
     # --- key combinations ("key_bindings") ---
     def comboName(self, combo):

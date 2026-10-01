@@ -1,3 +1,5 @@
 # Model sources that tools/convert_models.py downloads; the converted ncnn models are kept
 models/onnx/
 models/*.task
+# frame-job settings (where replays run, and the lab's capture folder): personal, not shipped
+.frame-job
