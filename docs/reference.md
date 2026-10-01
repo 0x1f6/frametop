@@ -139,8 +139,10 @@ Frametop Display Settings has four tabs (three with the gamescope backend, which
 ```
 layout/ft-layout apply      # arrange every screen
 layout/ft-layout capture    # save the current arrangement and sizes as the layout
-layout/ft-layout save NAME  # ...under a name too, and use it
-layout/ft-layout use NAME   # switch to a named layout and arrange the screens in it
+layout/ft-layout save NAME  # ...under a name too, with the open apps and hidden screens (a profile, docs/profiles.md), and use it
+layout/ft-layout use NAME   # switch to a profile: arrange the screens in it and open its apps
+layout/ft-layout open NAME  # a profile's launcher entry: use it, or start the desktop in it
+layout/ft-layout default NAME|none  # the profile the desktop starts with (start --wait runs it at desktop start)
 layout/ft-layout layouts    # list the named layouts (* = in use); rename OLD NEW, delete NAME
 layout/ft-layout pin N|all left|right|head   # pin as they are now; unpin N|all
 layout/ft-layout plan       # print the arrangement as JSON (no VR needed)

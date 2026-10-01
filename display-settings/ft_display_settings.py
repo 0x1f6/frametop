@@ -584,15 +584,54 @@ class Backend(QObject):
     def renameLayout(self, old, new):
         try:
             self._edit_layout(lambda l: ft_layout.rename_named(l, old, new))
-        except RuntimeError as e:
+            ft_layout.write_launchers(ft_layout.load_layout())
+        except (RuntimeError, OSError) as e:
             self.message.emit(str(e), True)
 
     @Slot(str)
     def deleteLayout(self, name):
         try:
             self._edit_layout(lambda l: ft_layout.delete_named(l, name))
-        except RuntimeError as e:
+            ft_layout.write_launchers(ft_layout.load_layout())
+        except (RuntimeError, OSError) as e:
             self.message.emit(str(e), True)
+
+    # --- profiles (docs/profiles.md): a named layout's apps and hidden screens ---
+    @Slot(str, result="QVariantList")
+    def profileWindows(self, name):
+        """A profile's windows, as "app" and "where" for the list."""
+        out = []
+        for e in ft_layout.load_layout().get("profiles", {}).get(name, {}).get("windows", []):
+            app = e.get("app") or os.path.basename((e.get("cmd") or ["?"])[0])
+            app = app.rsplit(".", 1)[-1] if "." in app and not e.get("cmd") else app
+            where = "floating" if "float" in e else f"screen {e.get('screen', 1)}" + (", maximized" if e.get("maximized") else "")
+            out.append({"app": app, "where": where})
+        return out
+
+    @Slot(str, result="QVariantList")
+    def profileHidden(self, name):
+        return ft_layout.load_layout().get("profiles", {}).get(name, {}).get("hidden", [])
+
+    @Slot(str, int)
+    def removeProfileWindow(self, name, index):
+        def edit(layout):
+            windows = layout.get("profiles", {}).get(name, {}).get("windows", [])
+            if 0 <= index < len(windows):
+                windows.pop(index)
+        self._edit_layout(edit)
+
+    @Property(str, notify=changed)
+    def defaultProfile(self):
+        return ft_layout.load_layout().get("default_profile", "")
+
+    @Slot(str)
+    def setDefaultProfile(self, name):
+        def edit(layout):
+            if name:
+                layout["default_profile"] = name
+            else:
+                layout.pop("default_profile", None)
+        self._edit_layout(edit)
 
     @Slot(str, "QVariant")
     def setPreset(self, key, value):
@@ -607,7 +646,13 @@ class Backend(QObject):
 
     @Slot()
     def arrange(self):
-        self._run("Arranging the screens", "apply")
+        """Arrange the screens; in a profile, also open its apps (ft-layout use)."""
+        layout = ft_layout.load_layout()
+        name = layout.get("active")
+        if layout.get("mode") == "custom" and name in layout.get("layouts", {}):
+            self._run(f"Opening {name}", "use", name)
+        else:
+            self._run("Arranging the screens", "apply")
 
     @Slot()
     def capture(self):
