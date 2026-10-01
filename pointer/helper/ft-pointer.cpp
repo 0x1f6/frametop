@@ -183,9 +183,11 @@
 // mouse's buttons work like the keyboard clicks: the right button's press is held back the same
 // way, and the right click comes on the release, where the pointer is by then (gaze_right).
 // Pressing the right button while the left one's press is held back presses the left button
-// where the pointer is now, and the mouse drags (gaze_left then gaze_right): letting go of
-// either drops it. So once you've moved the pointer, the left button alone only clicks; to drag
-// from there, press the right one. Held still for POINTER_GAZE_HOLD, either press is a real one.
+// where the pointer is now, and the mouse drags (gaze_left then gaze_right): the drag lasts
+// while either button is held. So once you've moved the pointer, the left button alone only
+// clicks; to drag from there, press the right one. Pressing the right one again (a double right
+// click, with the left still held) tilts, as a right press does during any drag (see Tilt).
+// Held still for POINTER_GAZE_HOLD, either press is a real one.
 //   POINTER_GAZE_MOUSE_MOVE: held (the default) or free. Held: while the gaze has the pointer,
 // moving the mouse does nothing; it moves the pointer only during a press (as a correction,
 // like a keyboard click's head). So a bumped or drifting mouse can't pull the pointer off what
@@ -203,7 +205,10 @@
 // whatever the head did meanwhile, and tells the gaze tracker it was right there (a lesson
 // with no correction). Pressing gaze_right while gaze_left aims (Meta+K with Meta+J held)
 // presses the left button where the dot is now, so you can correct first and then drag; the
-// first key let go drops it. Without gaze mode they work from wherever the pointer is.
+// drag lasts while either key is held. gaze_right pressed during a gaze_left drag (held still
+// into one, or again after starting one with it: a double Meta+K) tilts while it's held (see
+// Tilt): turning the head turns the panel, and the mouse can too; let go of it and the head
+// drags again from there. Without gaze mode they work from wherever the pointer is.
 //   The gaze calibration panel (gaze/panel/ft-gazepanel, run by the gaze service): while
 // ft-gazed says it's up ("calpanel 1", renewed every second; it lapses 3 s after the last),
 // the dot hides and a press answers the panel instead of clicking: a left click or gaze_left
@@ -832,7 +837,11 @@ int main() {
     // aimRight, the held-back press is the right button's; chordDrag, a drag the right button
     // began during the left's held-back press (the first release drops it, the other's is nothing).
     bool leftDown = false, rightDown = false, aimRight = false, chordDrag = false;
-    bool ignoreLeftUp = false, ignoreRightUp = false;
+    bool ignoreLeftUp = false;
+    // The keyboard clicks' keys as the relay last said, and a tilt gaze_right holds during a
+    // keyboard drag (see the top): the head turns the panel, from where it was (keyTiltYaw, keyTiltPitch).
+    bool keyLeftDown = false, keyRightDown = false, keyTilting = false;
+    double keyTiltYaw = 0, keyTiltPitch = 0;
     double tiltYaw = 0, tiltPitch = 0;
     double dragDistance = 0, lastDistance = 1.5;  // drag lock: distance from the anchor at the press
     bool onVrSettings = false;       // the cursor is on the SteamVR Settings page (kept while dragging)
@@ -997,11 +1006,10 @@ int main() {
         nudgeAt = aimSince = Clock::now(), nudgeMoved = 0;
         aimHeld = true, aimRight = right;
     };
-    // A drag the right button began (chordDrag): the first release drops it.
-    auto chordDrop = [&](bool otherDown, bool &ignoreOtherUp) {
+    // A drag the right button began (chordDrag): it lasts while either button is held.
+    auto chordDrop = [&] {
         chordDrag = false;
         if (leftHeld) releaseLeft();
-        ignoreOtherUp = otherDown;
         if (debug) std::printf("mouse drag dropped\n");
         if (debug) std::fflush(stdout);
     };
@@ -1023,7 +1031,10 @@ int main() {
             ignoreLeftUp = false;
             return;
         }
-        if (chordDrag) return chordDrop(rightDown, ignoreRightUp);
+        if (chordDrag) {
+            if (!rightDown) chordDrop();  // otherwise the right holds it (tilting, maybe)
+            return;
+        }
         if (aimHeld && !aimHand && !aimRight) {
             aimHeld = false;
             clickPress = true;  // after this frame's pose, so it lands where the pointer was moved to
@@ -1052,12 +1063,10 @@ int main() {
             }
             return false;
         }
-        if (ignoreRightUp) {
-            ignoreRightUp = false;
-            return true;
-        }
         if (chordDrag) {
-            chordDrop(leftDown, ignoreLeftUp);
+            if (leftDown) return !swallowedRight;  // the left holds it; a tilt's release ends the tilt
+            tilting = swallowedRight = false;
+            chordDrop();
             return true;
         }
         if (aimHeld && !aimHand && aimRight) {
@@ -1744,8 +1753,17 @@ int main() {
             return true;
         };
         for (const KeyPress &k : keyPresses) {
+            (k.right ? keyRightDown : keyLeftDown) = k.down;
             if (!k.down) {
-                if (hold.src == Src::Head && (hold.right == k.right || hold.keyDrag)) {
+                if (keyTilting && k.right) {  // the tilt ends; the head drags again from here
+                    keyTilting = tilting = false;
+                    hold.engaged = false;
+                    if (debug) std::printf("hold key left: tilt ended\n");
+                    if (debug) std::fflush(stdout);
+                }
+                // The keys holding it: a gaze_left then gaze_right drag, either; otherwise its own.
+                const bool held = hold.keyDrag ? keyLeftDown || keyRightDown : hold.right ? keyRightDown : keyLeftDown;
+                if (hold.src == Src::Head && !held) {
                     if (!hold.pressed && aimHeld && tnow - aimSince < std::chrono::duration<double>(keyTap)) {
                         // A quick tap: a click where the dot was at the press, and the gaze was right.
                         yaw = hold.pressYaw, pitch = hold.pressPitch;
@@ -1753,7 +1771,16 @@ int main() {
                         confirmLesson = true;
                     }
                     endHold(false);
+                    keyTilting = false;
                 }
+                continue;
+            }
+            if (k.right && hold.src == Src::Head && !hold.right && hold.pressed && leftHeld) {
+                // gaze_right during a gaze_left drag: tilt while it's held (see the top).
+                tilting = tiltStart = keyTilting = true;
+                headAngles(keyTiltYaw, keyTiltPitch);
+                if (debug) std::printf("hold key left: tilt began\n");
+                if (debug) std::fflush(stdout);
                 continue;
             }
             if (k.right && hold.src == Src::Head && !hold.right && !hold.pressed && aimHeld) {
@@ -1787,7 +1814,14 @@ int main() {
         }
         if (hold.src == Src::Head) {
             double hy, hp;
-            if (headAngles(hy, hp)) steer(hy, hp, hold.pressed ? 0.3 : headDeadzone, 1.0);
+            if (headAngles(hy, hp) && keyTilting) {
+                // The head turns the panel, as the mouse does in a tilt; the pointer stays put.
+                tiltYaw += std::remainder(hy - keyTiltYaw, 360.0);
+                tiltPitch = std::clamp(tiltPitch + hp - keyTiltPitch, -80.0, 80.0);
+                keyTiltYaw = hy, keyTiltPitch = hp;
+            } else if (headAngles(hy, hp)) {
+                steer(hy, hp, hold.pressed ? 0.3 : headDeadzone, 1.0);
+            }
         }
         fh_gestures_t hg;
         const bool handOk = handsOn && handFile.Read(hg);
