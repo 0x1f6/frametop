@@ -324,21 +324,34 @@ def remap_volume(fd, restore=False):
 
     Returns how many keymap entries are volume keys or stand-ins, or None when the
     device has no keymap to change (uinput devices, some platform buttons).
+
+    A swap that fails doesn't stop the others: every entry is still tried, then the
+    first failure is raised. The entries that did swap stay swapped, for the caller
+    to handle their stand-ins and restore them.
     """
     swap = VOLUME_ORIGINAL if restore else VOLUME_STANDIN
     found = 0
+    failed = None  # the first swap that failed
     for index in range(8192):
         entry = bytearray(KEYMAP_ENTRY.pack(INPUT_KEYMAP_BY_INDEX, 0, index, 0, b""))
         try:
             fcntl.ioctl(fd, EVIOCGKEYCODE_V2, entry)
         except OSError:
-            return found if index else None  # past the last entry
+            if not index:
+                return None
+            break  # past the last entry
         _, length, _, code, scancode = KEYMAP_ENTRY.unpack(entry)
         if code in VOLUME_CODES:
             found += 1
         if code in swap:
-            fcntl.ioctl(fd, EVIOCSKEYCODE_V2,
-                        KEYMAP_ENTRY.pack(INPUT_KEYMAP_BY_INDEX, length, index, swap[code], scancode))
+            try:
+                fcntl.ioctl(fd, EVIOCSKEYCODE_V2,
+                            KEYMAP_ENTRY.pack(INPUT_KEYMAP_BY_INDEX, length, index, swap[code], scancode))
+            except OSError as e:
+                if failed is None:
+                    failed = e
+    if failed is not None:
+        raise failed
     return found
 
 
