@@ -1053,12 +1053,13 @@ Kirigami.ApplicationWindow {
                 padding: Kirigami.Units.largeSpacing
                 wrapMode: Text.Wrap
                 opacity: 0.7
-                text: "Map a mouse button (Buttons) or a controller button (Controllers) to \"Gaze pointer on/off\" "
+                text: "Map a mouse button (Buttons) or a key combination (Keyboard) to \"Gaze pointer on/off\" "
                       + "to switch it on the fly. A click waits for the release: if the gaze is off, drag onto the target "
                       + "with the button held and let go there. Hold still to drag: hold a press this long without moving "
                       + "to drag something instead. Look away to hand back: how far from the pointer you look before the "
-                      + "gaze takes it back from the mouse. Largest nudge to learn: bigger mouse moves before a click "
-                      + "are treated as using the mouse, not correcting the gaze. Eye tracker: SteamVR's, or our own "
+                      + "gaze takes it back from the mouse. Largest correction to learn: bigger mouse moves before a click "
+                      + "are treated as using the mouse, not correcting the gaze; a bigger correction with a keyboard "
+                      + "click, or at the quick check, runs the quick check again. Eye tracker: SteamVR's, or our own "
                       + "(gaze/tracker), which keeps its own calibration (Calibrate… with Own tracker). Eye bias: the gaze "
                       + "combines both eyes, since their errors partly cancel; Left or Right counts that eye twice as "
                       + "much, and Auto weights each by how far off it was at your recent nudges."

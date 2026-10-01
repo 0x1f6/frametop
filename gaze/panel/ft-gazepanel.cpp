@@ -12,7 +12,10 @@
 //
 // Control socket: abstract unix datagram "@ft_gazepanel" (--socket NAME); a sender with an
 // address gets "ok" or "error ...":
-//   show quick|full              the panel, empty, in front of you
+//   show quick|full              the panel, empty, in front of you (fixed to the headset)
+//   lock                         stay where it is in the room now, until the next show (the
+//                                quick check's second step: the head carries the pointer onto
+//                                the dot, so the dot mustn't move with it)
 //   hide
 //   bg <0..1>                    the background's brightness (full)
 //   dot <yaw> <pitch> <state> [<progress 0..1>]
@@ -317,6 +320,17 @@ int main(int argc, char **argv) {
                 place();
                 ov->ShowOverlay(h);
                 visible = dirty = true;
+            } else if (!std::strcmp(buf, "lock")) {
+                vr::TrackedDevicePose_t pose{};
+                vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &pose, 1);
+                if (pose.bPoseIsValid) {
+                    // The headset's pose, moved out to the panel: where place() puts it now.
+                    vr::HmdMatrix34_t m = pose.mDeviceToAbsoluteTracking;
+                    for (int r = 0; r < 3; ++r) m.m[r][3] -= float(distance) * m.m[r][2];
+                    ov->SetOverlayTransformAbsolute(h, vr::TrackingUniverseStanding, &m);
+                } else {
+                    reply = "error no headset pose";
+                }
             } else if (!std::strcmp(buf, "hide")) {
                 ov->HideOverlay(h);
                 visible = false;

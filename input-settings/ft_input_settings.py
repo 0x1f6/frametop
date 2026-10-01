@@ -102,7 +102,7 @@ KEYBOARD_ONLY = ("gaze_left", "gaze_right")
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
-    ("POINTER_GAZE_NUDGE_MAX", "Largest nudge to learn", 8, 1, 30, 0.5, "°"),
+    ("POINTER_GAZE_NUDGE_MAX", "Largest correction to learn", 15, 1, 30, 0.5, "°"),
     ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
 ]
