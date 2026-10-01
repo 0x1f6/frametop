@@ -9,6 +9,8 @@ to the input relay over its control socket (@frametop_relay):
   - Controllers: the same for the Frame controllers' buttons, minus the gaze actions (gaze
     mode is a mouse feature). They're read by the pointer helper through SteamVR input
     (@ft_pointer_helper: vrstatus, vrglobal), and a mapped button is taken from games.
+  - Keyboard: when Frametop's keyboard opens, and key combinations for any action (Meta+Shift+F
+    floats a window unless the rules have their own list).
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
@@ -65,6 +67,7 @@ ACTION_LABELS = {
     "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
+    "float_toggle": "Float window in VR / put it back", "dock_all": "Put all floating windows back",
     "key": "Pass through as key",
     "none": "Do nothing",
 }
@@ -104,6 +107,15 @@ POINTER_ROLES = {"right": "Right hand", "left": "Left hand", "stylus": "Stylus (
 # Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
+# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): Meta+Shift+F.
+DEFAULT_KEY_BINDINGS = {"42+125+33": "float_toggle"}
+
+
+def key_bindings(rules):
+    """The rules' key combinations, or the defaults if it has none of its own (an empty list
+    counts as its own)."""
+    bound = rules.get("key_bindings")
+    return dict(bound) if isinstance(bound, dict) else dict(DEFAULT_KEY_BINDINGS)
 # The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
 GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker"}
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
@@ -842,7 +854,7 @@ class Backend(QObject):
 
     @Property("QVariantList", notify=mappingsChanged)
     def keyShortcuts(self):
-        bound = read_json(RULES_PATH).get("key_bindings", {}) or {}
+        bound = key_bindings(read_json(RULES_PATH))
         return [{"combo": c, "label": self.comboName(c), "action": a, "actionLabel": ACTION_LABELS.get(a, a)}
                 for c, a in sorted(bound.items())]
 
@@ -869,14 +881,15 @@ class Backend(QObject):
 
     def _save_shortcut(self, combo, action):
         rules = read_json(RULES_PATH)
-        rules.setdefault("key_bindings", {})[combo] = action
+        rules["key_bindings"] = dict(key_bindings(rules), **{combo: action})
         self._save_rules(rules)
         self.message.emit(f"{self.comboName(combo)} → {ACTION_LABELS[action]}", False)
 
     @Slot(str)
     def removeShortcut(self, combo):
         rules = read_json(RULES_PATH)
-        (rules.get("key_bindings") or {}).pop(combo, None)
+        rules["key_bindings"] = key_bindings(rules)
+        rules["key_bindings"].pop(combo, None)
         self._save_rules(rules)
         self.message.emit(f"{self.comboName(combo)} removed", False)
 

@@ -538,6 +538,49 @@ Kirigami.ApplicationWindow {
                     Kirigami.FormData.label: "Keyboards connected:"
                     text: kpage.keyboards.length ? kpage.keyboards.map(d => d.name).join(", ") : "none"
                 }
+                Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Key combinations" }
+
+                Repeater {
+                    model: backend.keyShortcuts
+                    delegate: RowLayout {
+                        required property var modelData
+                        Kirigami.FormData.label: modelData.label + ":"
+                        Controls.Label { text: modelData.actionLabel }
+                        Controls.ToolButton {
+                            icon.name: "edit-delete"
+                            display: Controls.AbstractButton.IconOnly
+                            text: "Remove"
+                            Controls.ToolTip.text: text
+                            Controls.ToolTip.visible: hovered
+                            onClicked: backend.removeShortcut(modelData.combo)
+                        }
+                    }
+                }
+                RowLayout {
+                    Kirigami.FormData.label: "New:"
+                    Controls.ComboBox {
+                        id: shortcutAction
+                        model: backend.shortcutActions
+                        textRole: "text"
+                        valueRole: "value"
+                        Component.onCompleted: currentIndex = indexOfValue("float_toggle")
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+                    }
+                    Controls.Button {
+                        text: backend.capturingShortcut ? "Press the keys… (Cancel)" : "Set keys…"
+                        onClicked: backend.capturingShortcut ? backend.cancelShortcutCapture()
+                                                             : backend.startShortcutCapture(shortcutAction.currentValue)
+                    }
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    text: "Hold the modifiers (Ctrl, Alt, Shift, Meta), then press the key, on any keyboard. The "
+                          + "combination's last key isn't typed; the modifiers still reach the app. Meta+Shift+F floats "
+                          + "the desktop window under the pointer in VR, or puts it back, until you remove or change it."
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
             }
 
             footer: Controls.Label {
@@ -844,49 +887,7 @@ Kirigami.ApplicationWindow {
                     wrapMode: Text.WordWrap
                     text: "Gaze works with the mouse. The Frame controllers don't take part, and moving one hands the "
                           + "pointer back to the controllers. Gaze pointer on/off, Gaze precision, and Gaze drag can go on "
-                          + "a mouse button (Buttons page) or a key combination below."
-                    opacity: 0.7
-                    font: Kirigami.Theme.smallFont
-                }
-                Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Key combinations" }
-
-                Repeater {
-                    model: backend.keyShortcuts
-                    delegate: RowLayout {
-                        required property var modelData
-                        Kirigami.FormData.label: modelData.label + ":"
-                        Controls.Label { text: modelData.actionLabel }
-                        Controls.ToolButton {
-                            icon.name: "edit-delete"
-                            display: Controls.AbstractButton.IconOnly
-                            text: "Remove"
-                            Controls.ToolTip.text: text
-                            Controls.ToolTip.visible: hovered
-                            onClicked: backend.removeShortcut(modelData.combo)
-                        }
-                    }
-                }
-                RowLayout {
-                    Kirigami.FormData.label: "New:"
-                    Controls.ComboBox {
-                        id: shortcutAction
-                        model: backend.shortcutActions
-                        textRole: "text"
-                        valueRole: "value"
-                        Component.onCompleted: currentIndex = indexOfValue("gaze_toggle")
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 16
-                    }
-                    Controls.Button {
-                        text: backend.capturingShortcut ? "Press the keys… (Cancel)" : "Set keys…"
-                        onClicked: backend.capturingShortcut ? backend.cancelShortcutCapture()
-                                                             : backend.startShortcutCapture(shortcutAction.currentValue)
-                    }
-                }
-                Controls.Label {
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
-                    wrapMode: Text.WordWrap
-                    text: "Hold the modifiers (Ctrl, Alt, Shift, Meta), then press the key, on any keyboard. The "
-                          + "combination's last key isn't typed; the modifiers still reach the app."
+                          + "a mouse button (Buttons page) or a key combination (Keyboard page)."
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
