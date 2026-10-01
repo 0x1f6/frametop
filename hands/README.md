@@ -14,12 +14,16 @@ Two programs, each a user service that stops when SteamVR does:
 
 They don't start with SteamVR. `hands/run.sh install` builds them, gives ft-camd its capabilities, installs both services disabled, and links `hands/ft-handsctl` into `~/.local/bin`. Then `ft-handsctl on` starts hand tracking and `ft-handsctl off` stops it. `install.sh` doesn't install it.
 
+For the cutouts alone, `hands/ft-cutouts on` starts the same two programs with ft-hands' `--no-gestures`: your hands show through the screens, and no pinch or grip is detected, so nothing clicks or drags. It runs this checkout's build as transient user units, so it needs `hands/build.sh` and ft-camd's capabilities (`hands/run.sh caps`) but not `hands/run.sh install`. It and `ft-handsctl on` stop each other's services, and it stops with SteamVR too.
+
 ```
 ft-handsctl on | off            # on the Frame: start or stop hand tracking (SteamVR must be running)
 ft-handsctl status              # the services, and ft-hands' last status lines
 ft-handsctl log [lines]
 ft-handsctl cutouts on|off|state  # ft-screens' hand cutouts, without stopping tracking
 ft-handsctl gestures            # pinches and grips, live (tools/watch_gestures.py --distance)
+
+hands/ft-cutouts on | off | status   # the cutouts only: no pinches or grips
 
 hands/run.sh install            # build, give ft-camd its capabilities (sudo, once per build), install disabled
 hands/run.sh start|stop         # start or stop the services
@@ -104,6 +108,7 @@ Options:
 - `--models DIR`: where the models are.
 - `--nice N`: niceness. Default 5, so the VR stack wins contested CPUs.
 - `--no-publish`: don't write the hands and gestures files.
+- `--no-gestures`: hands for the cutouts only. No pinch or grip detection, so nothing reaches the pointer and a closing hand doesn't raise the rate to 30 Hz. The gestures file is removed at start. `ft-cutouts` runs it this way.
 - `--record DIR`, `--record-for S`: save every frame set for S seconds (default 120) to `DIR/sets.bin`. That's about 80 MB/s. Sending the tracker SIGUSR1 (`pkill -USR1 -x ft-hands`) starts a recording in `~/.local/share/frametop/hands/rec-<time>` without a restart. Recordings are images of your hands and room: they stay on the headset unless you move them.
 - `--record-only`: record without tracking or publishing, so it can run beside the live tracker. Give it `--record DIR`, since SIGUSR1 would reach both trackers. With `ft-camd --with-dark`, recordings also hold each camera's newest dark frame as `<name>_dk`, which doubles the rate. With `--with-color`, each colour camera's newest frame is saved with every set, as `color_video<N>`, which adds about 70 MB/s. Run the recorder at normal I/O priority: idle I/O priority stalled a 165 MB/s recording.
 - `--keep-presence P`: the landmark presence a tracked view needs to stay tracked. New views always need 0.5. Default 0.5. Lowering it to 0.2 barely helped in the bright recording, because lost hands drop to near-zero presence.

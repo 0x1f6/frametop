@@ -3,8 +3,11 @@
 // Python prototype: the same scheduling, with the models on a few threads.
 //
 //   ft-hands [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N]
-//            [--no-publish] [--record DIR] [--swap-sides] [--cams auto|mono|color|all] ...
+//            [--no-publish] [--no-gestures] [--record DIR] [--swap-sides] [--cams auto|mono|color|all] ...
 //            (--help lists them all)
+//
+// --no-gestures: hands for the cutouts only. No pinch or grip detection, so nothing reaches
+// the pointer and a closing hand doesn't raise the rate; the gestures file is removed.
 //
 // Which cameras (--cams, HANDS_CAMERAS): the four mono IR cameras light the hands with their
 // own IR and track well in dim rooms, but in bright light (a sunny room, a window behind the
@@ -150,7 +153,7 @@ struct Lighting {
 int main(int argc, char **argv) {
     double seconds = 0, status = 5;
     int threads = 3, niceness = 5;
-    bool int8 = false, publish = true, track = true, swap_sides = false;
+    bool int8 = false, publish = true, track = true, swap_sides = false, gestures_on = true;
     std::string models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     std::string record, ring_path = "/run/user/" + std::to_string(getuid()) + "/" FH_RING_NAME;
     // SteamOS starts user processes on CPUs 0-4 and keeps 5-7 (two A720s and the X4) for
@@ -189,6 +192,7 @@ int main(int argc, char **argv) {
         else if (a == "--nice" && more) niceness = std::atoi(argv[++i]);
         else if (a == "--int8") int8 = true;
         else if (a == "--no-publish") publish = false;
+        else if (a == "--no-gestures") gestures_on = false;
         else if (a == "--pinch-begin" && more) pinch_params.begin_m = std::atof(argv[++i]);
         else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
         else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
@@ -217,6 +221,7 @@ int main(int argc, char **argv) {
         }
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
+                        "          [--no-gestures] (hands for the cutouts only: no pinches or grips)\n"
                         "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (ft-camd's, or ft-ringplay's)\n"
                         "          [--cams auto|mono|color|all] (auto) [--bright all|color] (all) [--bright-on L] (40) [--bright-off L] (25)\n"
@@ -265,12 +270,14 @@ int main(int argc, char **argv) {
         return true;
     };
     if (!load_calibration(calib, err) || !ring.open(ring_path.c_str(), err) || !nets.load(models, int8, err) ||
-        (publish && (!pub.open(err) || !gestures.open(pinch, grip, err))) ||
+        (publish && (!pub.open(err) || (gestures_on && !gestures.open(pinch, grip, err)))) ||
         (!record.empty() && !start_recording(record, err))) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
     if (!ring.alive()) return std::fprintf(stderr, "ft-camd isn't running (no heartbeat)\n"), 1;
+    // so a reader can't take an earlier run's file for this one's
+    if (publish && !gestures_on) unlink((run_dir() + "/gestures").c_str());
 
     std::map<std::string, int> index;   // mono calibration name -> ring camera
     std::map<std::string, int> color;   // colour calibration name (color_video<N>) -> ring camera
@@ -541,9 +548,11 @@ int main(int argc, char **argv) {
         const auto hands = tracker.step(images, int64_t(tmin));
         const uint64_t capture = uint64_t(int64_t(tmin) - raw_off);   // CLOCK_MONOTONIC
         const std::vector<Seen> views = tracker.views_now();
-        grip.update(hands, views, int64_t(capture));
-        pinch.update(hands, views, int64_t(capture), grip.gripping());
-        if (gesture_log && capture - t_glog >= 100'000'000) {
+        if (gestures_on) {
+            grip.update(hands, views, int64_t(capture));
+            pinch.update(hands, views, int64_t(capture), grip.gripping());
+        }
+        if (gestures_on && gesture_log && capture - t_glog >= 100'000'000) {
             t_glog = capture;
             for (int k = 0; k < 2; ++k)
                 if (pinch.world_d[k] >= 0)
@@ -554,7 +563,8 @@ int main(int argc, char **argv) {
         // a gesture down or closing gets the full rate, even while the palm holds still
         next_ns = tmin + uint64_t((std::min(tracker.interval(), pinch.engaged() || grip.engaged() ? 1 / 30.0 : 1.0) -
                                    0.005) * 1e9);
-        if (publish) pub.write(hands, capture), gestures.write(pinch, grip, capture);
+        if (publish) pub.write(hands, capture);
+        if (publish && gestures_on) gestures.write(pinch, grip, capture);
         for (const Pinch::Event &e : grip.events)
             std::printf("grip  %s %-5s curl %.2f at %+.3f %+.3f %+.3f\n", e.side ? "right" : "left ", e.what, e.distance,
                         e.point[0], e.point[1], e.point[2]);
@@ -593,17 +603,19 @@ int main(int argc, char **argv) {
                             s.handoff_miss, s.dups, s.splits, s.created, s.merged, s.forgotten,
                             !rec ? "" : ("  recorded " + std::to_string(rec->written()) + " dropped " +
                                          std::to_string(rec->dropped())).c_str());
-            std::printf("        pinches: left %u right %u (held back, palm down: %d %d)  grips: left %u right %u",
-                        pinch.side(0).begins, pinch.side(1).begins, pinch.held_back[0], pinch.held_back[1],
-                        grip.side(0).begins, grip.side(1).begins);
-            for (int k = 0; k < 2; ++k)
-                if (pinch.side(k).flags & FH_PINCH_TRACKED)
-                    std::printf("  %s %s d %.3f curl %.2f", k ? "right" : "left",
-                                grip.side(k).flags & FH_PINCH_DOWN    ? "GRIP"
-                                : pinch.side(k).flags & FH_PINCH_DOWN ? "PINCH"
-                                                                      : "open",
-                                pinch.side(k).distance, grip.curl[k]);
-            std::printf("\n");
+            if (gestures_on) {
+                std::printf("        pinches: left %u right %u (held back, palm down: %d %d)  grips: left %u right %u",
+                            pinch.side(0).begins, pinch.side(1).begins, pinch.held_back[0], pinch.held_back[1],
+                            grip.side(0).begins, grip.side(1).begins);
+                for (int k = 0; k < 2; ++k)
+                    if (pinch.side(k).flags & FH_PINCH_TRACKED)
+                        std::printf("  %s %s d %.3f curl %.2f", k ? "right" : "left",
+                                    grip.side(k).flags & FH_PINCH_DOWN    ? "GRIP"
+                                    : pinch.side(k).flags & FH_PINCH_DOWN ? "PINCH"
+                                                                          : "open",
+                                    pinch.side(k).distance, grip.curl[k]);
+                std::printf("\n");
+            }
             for (const Hand *h : hands)
                 std::printf("        hand %d %-5s views %d wrist %+.3f %+.3f %+.3f m  scale %.2f  speed %.2f m/s\n", h->id,
                             h->right() ? "right" : "left", h->nviews, h->pts[0][0], h->pts[0][1], h->pts[0][2], h->scale,
@@ -616,8 +628,8 @@ int main(int argc, char **argv) {
         }
     }
     if (!color.empty()) unlink(want_file.c_str());
-    if (publish) {
-        pub.write({}, mono_ns());
+    if (publish) pub.write({}, mono_ns());
+    if (publish && gestures_on) {
         pinch.release(int64_t(mono_ns()));   // a drag in progress ends, as lost
         grip.release(int64_t(mono_ns()));
         gestures.write(pinch, grip, mono_ns());
