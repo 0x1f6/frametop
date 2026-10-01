@@ -181,7 +181,9 @@
 // your view, so turning your head carries it onto what you meant (past
 // POINTER_HEAD_DEADZONE, 0.5 deg, so a still head doesn't wobble it). The release clicks there
 // (left, or right for gaze_right), and a correction is a lesson for the gaze tracker, as with
-// the mouse. Held still for POINTER_GAZE_HOLD instead, it's a real press, and the head drags.
+// the mouse, but up to kKeyNudgeMax (30 deg) rather than POINTER_GAZE_NUDGE_MAX: a keyboard
+// correction is always meant, and our tracker can be 12 deg off after the headset goes on (live,
+// 2026-10-01: every correction was dropped). Held still for POINTER_GAZE_HOLD instead, it's a real press, and the head drags.
 // A quick tap (let go within POINTER_KEY_TAP, 0.25 s) clicks where the dot was at the press,
 // whatever the head did meanwhile, and tells the gaze tracker it was right there (a lesson
 // with no correction). Pressing gaze_right while gaze_left aims (Meta+K with Meta+J held)
@@ -905,6 +907,9 @@ int main() {
     bool pressRight = false;
     std::string heldButton = "trigger";
     bool confirmLesson = false;  // a keyboard click's quick tap: a lesson with no correction (see the top)
+    // A keyboard click's correction: always meant, so learned up to kKeyNudgeMax (see the top).
+    bool keyLesson = false;
+    constexpr double kKeyNudgeMax = 30;
     // The gaze calibration panel is up until then ("calpanel 1"; see the top); calOpened: it just
     // came up, so a press in progress ends without a click.
     Clock::time_point calPanelUntil{};
@@ -914,8 +919,11 @@ int main() {
         // its own screens, but only we know when one lands on another panel.
         SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
         // A click after nudging the gaze-placed pointer: the nudge is a lesson (see the top).
+        const double nudgeMax = keyLesson ? kKeyNudgeMax : gazeNudgeMax;
+        if (debug && gazeOn && nudging && !gazeOwns && nudgeMoved > nudgeMax)
+            std::printf("gaze nudge %.2f deg: over %.0f, not learned\n", nudgeMoved, nudgeMax);
         if (gazeOn && nudging && !gazeOwns && havePoint && Clock::now() - nudgeAt < std::chrono::seconds(10) &&
-            (confirmLesson || (nudgeMoved >= 0.2 && nudgeMoved <= gazeNudgeMax))) {
+            (confirmLesson || (nudgeMoved >= 0.2 && nudgeMoved <= nudgeMax))) {
             const Vec3 d = RotateInverse(nudgeHead, Normalize(lastPoint - Position(nudgeHead)));
             char msg[160];
             std::snprintf(msg, sizeof msg, "lesson %.3f %.3f %.3f %.3f", nudgeRawHy, nudgeRawHp,
@@ -924,7 +932,7 @@ int main() {
             if (debug) std::printf("gaze %s (nudged %.2f deg)\n", msg, nudgeMoved);
             if (debug) std::fflush(stdout);
         }
-        nudging = confirmLesson = false;
+        nudging = confirmLesson = keyLesson = false;
         leftHeld = true;
         dragDistance = lastDistance;
         pressKey.clear();
@@ -1523,6 +1531,7 @@ int main() {
                 } else {
                     clickPress = true;  // the click is on the release, where the pointer is now
                     pressRight = hold.right;
+                    keyLesson = hold.src == Src::Head;
                     gazeBack = nudgeMoved < 0.2;
                 }
             }
@@ -1656,6 +1665,7 @@ int main() {
                 headAngles(hold.refYaw, hold.refPitch);
                 gazeBack = gazeOn;
                 pressRight = false;
+                keyLesson = true;
                 pressLeft();
                 if (debug) std::printf("hold key left: pressed (right key)\n");
                 if (debug) std::fflush(stdout);
@@ -2077,7 +2087,7 @@ int main() {
 
         // A held-back press (see the top): held still long enough, it's a real press (a drag);
         // released, it's a click where the pointer is now (this frame's pose has gone out).
-        if (!active) aimHeld = clickPress = aimHand = false;  // released meanwhile: nothing to click
+        if (!active) aimHeld = clickPress = aimHand = confirmLesson = keyLesson = false;  // released meanwhile: nothing to click
         if (aimHeld && !aimHand && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
             aimHeld = false;
             gazeBack = true;
