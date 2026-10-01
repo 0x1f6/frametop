@@ -41,7 +41,7 @@ So a "Work" profile can put three screens around you with a browser, two termina
 ```
 
 - `screen` is 1-based, as everywhere in Frametop. `rect` is the window's frame in KWin's logical units, relative to its screen's output, so it survives the screens being arranged differently.
-- A floating window's place (`rel`) is its panel's centre and axes in the frame of the primary screen's panel, the same way ft-floatd remembers each app's place. The screens go relative to your head when the profile is applied, and the floating windows follow them. `mpp` is its density in metres per pixel. Its scale is kept but not yet applied (see Known problems in `docs/floating-windows.md`).
+- A floating window's place (`rel`) is its panel's centre and axes in the frame of the primary screen's panel, the same way ft-floatd remembers each app's place. The screens go relative to your head when the profile is applied, and the floating windows follow them. `mpp` is its density in metres per pixel, and `scale` its scale, put back with the rest.
 - Renaming or deleting a layout renames or deletes its profile entry with it.
 
 ## How it works

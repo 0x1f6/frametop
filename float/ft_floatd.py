@@ -257,6 +257,7 @@ class Float:
         self.normal = None        # its size in pixels when last not full screen
         self.unfull_until = 0.0   # left full screen just now (see follow)
         self.move_from = None     # frame when a title-bar move started (put back after)
+        self.resizing = False     # KWin's resize by the window's edge is going on (see follow)
         self.subs = {}            # popup or dialog id -> number on the panel
         self.app = ""             # its desktop file name (for its remembered place)
 
@@ -401,6 +402,11 @@ class Daemon:
         elif kind == "move-start" and f and ev.get("move"):
             f.move_from = ev["frame"]
             self.screens.ask(f"carry {f.slot.index}", quiet=True)
+        elif kind == "move-start" and f and ev.get("resize"):
+            f.resizing = True
+        elif kind == "move-end" and f and f.resizing:
+            f.resizing = False
+            self.follow(f, ev)
         elif kind == "move-end" and f and f.move_from:
             # The panel carried the window; KWin may have slipped it a few pixels first.
             m, f.move_from = f.move_from, None
@@ -443,9 +449,14 @@ class Daemon:
                 return
             # Floating when ft-floatd (re)started: take it over where it is.
             f = Float(wid, slot, None)
+            f.app = ev.get("app", "")
             slot.window = f
             self.floats[wid] = f
             f.scale = slot.kscale = output_scales().get(slot.output, 1.0)
+            # Its panel's density as it is (follow below sets the panel again).
+            g, px = self.panel_get(slot.index), round(ev["frame"]["w"] * f.scale)
+            if g and g["metres"] > 0 and px > 0:
+                f.mpp = g["metres"] / px
             log(f"{wid[:9]} ({ev.get('cls')}) already floats on {slot.output}")
             self.follow(f, ev)
             return
@@ -512,9 +523,10 @@ class Daemon:
                     return float(metres) / max(1, int(size.split("x")[0]))
         return DEFAULT_MPP
 
-    def float_window(self, ev, place=None, mpp=None):
+    def float_window(self, ev, place=None, mpp=None, scale=None):
         """Float a window: its panel in front of where it was on its screen, or at place (centre
-        and axes in the world), at the density of its screen, or mpp. Returns its Float."""
+        and axes in the world), at the density of its screen, or mpp, and at its screen's scale,
+        or scale (then ev's frame is the window's size at that scale). Returns its Float."""
         wid = ev["id"]
         if wid in self.floats:
             return self.floats[wid]
@@ -529,7 +541,7 @@ class Daemon:
         slot.window = f
         self.floats[wid] = f
         scales = output_scales()
-        f.scale = scales.get(ev["output"], 1.0)
+        f.scale = scale or scales.get(ev["output"], 1.0)
         slot.kscale = scales.get(slot.output, slot.kscale)
         f.mpp = mpp or self.screen_mpp(ev["output"])
         fr, s, m = ev["frame"], f.scale, self.margin
@@ -590,9 +602,17 @@ class Daemon:
         full = bool(ev.get("fullScreen")) or (fills and time.monotonic() > f.unfull_until)
         f.full = full
         w, h = round(fr["w"] * s), round(fr["h"] * s)
-        if not full:
+        if not full and not (f.normal and abs(f.normal[0] - w) <= math.ceil(s) and abs(f.normal[1] - h) <= math.ceil(s)):
+            # (Within a logical pixel it's the same size: a size asked for in pixels comes out
+            # rounded to whole logical pixels. Keeping it stops scale changes from creeping.)
             f.normal = (w, h)
         m = 0 if full else self.margin
+        if f.resizing:
+            # KWin ends a resize by the window's edge whenever an output changes: the output
+            # follows when it's done (the margin is room to grow until then).
+            x, y = round((fr["x"] - out["x"]) * s), round((fr["y"] - out["y"]) * s)
+            self.set_panel(f, (x, y, w, h), title=round((cl["y"] - fr["y"]) * s))
+            return
         self.set_size(slot, f.normal if full and f.normal else (w + 2 * m, h + 2 * m))
         if not full:
             x0, y0 = slot.pos[0] + m / s, slot.pos[1] + m / s
@@ -614,7 +634,7 @@ class Daemon:
         s = min(3.0, max(0.5, s))
         if not f.frame or f.full or s == f.scale or self.floats.get(f.id) is not f:
             return
-        w, h = round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale)
+        w, h = f.normal or (round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale))
         slot, m = f.slot, self.margin
         log(f"{f.id[:9]} scale {f.scale:g} -> {s:g}")
         f.scale = s
@@ -785,15 +805,11 @@ class Daemon:
         ref = self.reference()
         place = to_world(ref, known["rel"]) if known and ref and len(known.get("rel", [])) == 12 else self.in_front()
         mpp = (known or {}).get("mpp") or self.screen_mpp(f"WL-{self.primary()}")
+        scale = None
         if known and known.get("pixels"):
-            ev = dict(ev, frame=dict(ev["frame"]))
-            s = output_scales().get(ev["output"], 1.0)
-            ev["frame"]["w"], ev["frame"]["h"] = known["pixels"][0] / s, known["pixels"][1] / s
-        # The remembered scale isn't applied yet: changing a floating window's scale can set
-        # off a loop between its size and its output's (KWin keeps the window's margins when
-        # the output resizes, and follow resizes the output after the window), which needs
-        # fixing first (docs/floating-windows.md, Known problems).
-        self.float_window(dict(ev, app=app), place=place, mpp=mpp)
+            scale = known.get("scale") or output_scales().get(ev["output"], 1.0)
+            ev = dict(ev, frame=dict(ev["frame"], w=known["pixels"][0] / scale, h=known["pixels"][1] / scale))
+        self.float_window(dict(ev, app=app), place=place, mpp=mpp, scale=scale)
 
     # ------------------------------------------------------------ profiles (docs/profiles.md)
 
@@ -920,18 +936,22 @@ class Daemon:
             if not ref or len(fl.get("rel", [])) != 12:
                 return
             place = to_world(ref, fl["rel"])
-            pixels = fl.get("pixels")
+            pixels, scale = fl.get("pixels"), fl.get("scale")
             if f:
                 self.pose(f, *place)
+                if scale:
+                    self.set_scale(f, scale)
                 if pixels and f.frame:
                     m = self.margin
                     self.command(cmd="geometry", id=f.id, x=f.slot.pos[0] + m / f.scale,
                                  y=f.slot.pos[1] + m / f.scale, w=pixels[0] / f.scale, h=pixels[1] / f.scale)
                 return
             if pixels:
-                s = output_scales().get(ev["output"], 1.0)
-                ev = dict(ev, frame=dict(ev["frame"], w=pixels[0] / s, h=pixels[1] / s))
-            self.float_window(ev, place=place, mpp=fl.get("mpp"))
+                scale = scale or output_scales().get(ev["output"], 1.0)
+                ev = dict(ev, frame=dict(ev["frame"], w=pixels[0] / scale, h=pixels[1] / scale))
+            else:
+                scale = None
+            self.float_window(ev, place=place, mpp=fl.get("mpp"), scale=scale)
             return
         n = int(e.get("screen", 1)) - 1
         if not 0 <= n < self.screens_n:
@@ -1039,7 +1059,8 @@ class Daemon:
             if not ev:
                 return f"error no window {rest[0]}"
             if cmd == "float":
-                self.float_window(ev)
+                # The script's word for where it is now: a window on a screen isn't followed here.
+                self.command(cmd="request-float", id=rest[0])
             elif cmd == "dock" and rest[0] in self.floats:
                 self.dock(self.floats[rest[0]])
             elif cmd == "close":
