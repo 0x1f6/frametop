@@ -898,11 +898,11 @@ Kirigami.ApplicationWindow {
                     Controls.ToolTip.visible: hovered
                     Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
                     Controls.ToolTip.text: checked
-                        ? "Your eyes move the pointer, so moving the mouse on its own does nothing. To fix a click, "
-                          + "hold the left button, move onto the target, and let go (or press right to right-click "
-                          + "there). It's on because a bumped mouse can't pull the pointer away, and every mouse move "
-                          + "is a real correction the eye tracker learns from. If the eye tracker stops, the mouse "
-                          + "works as usual."
+                        ? "Your eyes move the pointer, so moving the mouse on its own does nothing. Hold a button "
+                          + "and the pointer stops where you look: move onto the target and let go to click there "
+                          + "(left or right). To drag after moving, press right while holding left. It's on because a "
+                          + "bumped mouse can't pull the pointer away, and every mouse move is a real correction the "
+                          + "eye tracker learns from. If the eye tracker stops, the mouse works as usual."
                         : "The mouse moves the pointer any time, as without gaze. Moves that weren't corrections can "
                           + "teach the eye tracker the wrong thing."
                 }

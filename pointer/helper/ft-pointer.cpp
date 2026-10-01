@@ -179,9 +179,13 @@
 // title bars, grab bars, and selections. Without gaze mode both still work from wherever the
 // pointer is.
 //   In gaze mode the mouse's left button is a gaze precision button (POINTER_GAZE_MOUSE =
-// precision, the default), or clicks at once where the pointer is (direct). Pressing the right
-// button while the left one's press is held back clicks right there instead (correct with the
-// left, then right-click), and the left release does nothing.
+// precision, the default), or clicks at once where the pointer is (direct). With precision the
+// mouse's buttons work like the keyboard clicks: the right button's press is held back the same
+// way, and the right click comes on the release, where the pointer is by then (gaze_right).
+// Pressing the right button while the left one's press is held back presses the left button
+// where the pointer is now, and the mouse drags (gaze_left then gaze_right): letting go of
+// either drops it. So once you've moved the pointer, the left button alone only clicks; to drag
+// from there, press the right one. Held still for POINTER_GAZE_HOLD, either press is a real one.
 //   POINTER_GAZE_MOUSE_MOVE: held (the default) or free. Held: while the gaze has the pointer,
 // moving the mouse does nothing; it moves the pointer only during a press (as a correction,
 // like a keyboard click's head). So a bumped or drifting mouse can't pull the pointer off what
@@ -824,8 +828,11 @@ int main() {
     Clock::time_point movingSince[vr::k_unMaxTrackedDeviceCount] = {};
     // Tilt mode (see top of file).
     bool leftHeld = false, tilting = false, tiltStart = false, swallowedRight = false;
-    // Right pressed during the left's held-back press: a right click there; the left's release is then nothing.
-    bool chordRight = false;
+    // The mouse's buttons in gaze mode (see the top): leftDown, rightDown as the relay last said;
+    // aimRight, the held-back press is the right button's; chordDrag, a drag the right button
+    // began during the left's held-back press (the first release drops it, the other's is nothing).
+    bool leftDown = false, rightDown = false, aimRight = false, chordDrag = false;
+    bool ignoreLeftUp = false, ignoreRightUp = false;
     double tiltYaw = 0, tiltPitch = 0;
     double dragDistance = 0, lastDistance = 1.5;  // drag lock: distance from the anchor at the press
     bool onVrSettings = false;       // the cursor is on the SteamVR Settings page (kept while dragging)
@@ -978,32 +985,92 @@ int main() {
     };
     // The left button, from the relay's "btn trigger", with gaze mode's held-back press (see
     // the top).
+    auto canAim = [&] {
+        return gazeOn && gazeMousePrecision && gazeOwns && !aimHeld && !clickPress && !clickRelease &&
+               hold.src == Src::None;
+    };
+    // Hold the press back: the pointer stops where the gaze put it.
+    auto aimStart = [&](bool right) {
+        gazeOwns = false;
+        nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
+        nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+        nudgeAt = aimSince = Clock::now(), nudgeMoved = 0;
+        aimHeld = true, aimRight = right;
+    };
+    // A drag the right button began (chordDrag): the first release drops it.
+    auto chordDrop = [&](bool otherDown, bool &ignoreOtherUp) {
+        chordDrag = false;
+        if (leftHeld) releaseLeft();
+        ignoreOtherUp = otherDown;
+        if (debug) std::printf("mouse drag dropped\n");
+        if (debug) std::fflush(stdout);
+    };
     auto leftButton = [&](bool down) {
+        leftDown = down;
         if (down) {
-            if (gazeOn && gazeMousePrecision && gazeOwns && !aimHeld && !clickPress && !clickRelease &&
-                hold.src == Src::None) {
-                // Hold the press back: the pointer stops where the gaze put it.
-                gazeOwns = false;
-                nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
-                nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
-                nudgeAt = aimSince = Clock::now(), nudgeMoved = 0;
-                aimHeld = true;
+            if (aimHeld && aimRight && !aimHand) {
+                ignoreLeftUp = true;  // the right's press is held back: the left does nothing
+                return;
+            }
+            if (canAim()) {
+                aimStart(false);
                 return;
             }
             pressLeft();
             return;
         }
-        if (chordRight) {  // it was a right click (see the top)
-            chordRight = false;
+        if (ignoreLeftUp) {
+            ignoreLeftUp = false;
             return;
         }
-        if (aimHeld && !aimHand) {
+        if (chordDrag) return chordDrop(rightDown, ignoreRightUp);
+        if (aimHeld && !aimHand && !aimRight) {
             aimHeld = false;
             clickPress = true;  // after this frame's pose, so it lands where the pointer was moved to
             gazeBack = nudgeMoved < 0.2;
             return;
         }
         if (leftHeld) releaseLeft();
+    };
+    // The right button (see the top); false: not taken here (a tilt, or passed on as it is).
+    auto rightButton = [&](bool down) {
+        rightDown = down;
+        if (down) {
+            if (aimHeld && !aimHand && !aimRight) {
+                // During the left's held-back press: press the left where the pointer is now (the
+                // correction is a lesson), and the mouse drags.
+                aimHeld = false;
+                chordDrag = gazeBack = true;
+                pressLeft();
+                if (debug) std::printf("mouse drag began (right during left)\n");
+                if (debug) std::fflush(stdout);
+                return true;
+            }
+            if (canAim() && !leftHeld) {
+                aimStart(true);
+                return true;
+            }
+            return false;
+        }
+        if (ignoreRightUp) {
+            ignoreRightUp = false;
+            return true;
+        }
+        if (chordDrag) {
+            chordDrop(leftDown, ignoreLeftUp);
+            return true;
+        }
+        if (aimHeld && !aimHand && aimRight) {
+            aimHeld = aimRight = false;
+            pressRight = clickPress = true;  // the right click, where the pointer was moved to
+            gazeBack = nudgeMoved < 0.2;
+            return true;
+        }
+        if (leftHeld && heldButton == "b") {  // its press, held still into a real one
+            releaseLeft();
+            return true;
+        }
+        return false;
     };
     // POINTER_GAZE_MOUSE_MOVE=held (see the top): the gaze is fresh and nothing is pressed, so a
     // mouse move doesn't move the pointer.
@@ -1364,13 +1431,9 @@ int main() {
             } else if (std::strncmp(buf, "btn trigger 0", 13) == 0) {
                 leftButton(false);
                 continue;
-            } else if (std::strncmp(buf, "btn b 1", 7) == 0 && aimHeld && !aimHand) {
-                // Right during the left's held-back press: a right click where the pointer is now,
-                // the correction a lesson as with the left (see the top).
-                aimHeld = false;
-                pressRight = clickPress = true;
-                gazeBack = nudgeMoved < 0.2;
-                chordRight = swallowedRight = true;  // both releases are nothing
+            } else if (std::strncmp(buf, "btn b 1", 7) == 0 && rightButton(true)) {
+                continue;
+            } else if (std::strncmp(buf, "btn b 0", 7) == 0 && rightButton(false)) {
                 continue;
             } else if (std::strncmp(buf, "btn b 1", 7) == 0 && leftHeld) {
                 tilting = tiltStart = swallowedRight = true;  // right press while dragging: tilt, no right-click
@@ -2122,10 +2185,12 @@ int main() {
 
         // A held-back press (see the top): held still long enough, it's a real press (a drag);
         // released, it's a click where the pointer is now (this frame's pose has gone out).
-        if (!active) aimHeld = clickPress = aimHand = confirmLesson = false;  // released meanwhile: nothing to click
+        if (!active) aimHeld = aimRight = clickPress = aimHand = confirmLesson = false;  // released meanwhile: nothing to click
         if (aimHeld && !aimHand && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
             aimHeld = false;
             gazeBack = true;
+            pressRight = aimRight;  // the right button's: a real right press (see the top)
+            aimRight = false;
             pressLeft();
         }
         // A keyboard click held still for POINTER_GAZE_HOLD: a real press, then the head drags
