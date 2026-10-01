@@ -12,15 +12,12 @@
 //
 // Control socket: abstract unix datagram "@ft_gazepanel" (--socket NAME); a sender with an
 // address gets "ok" or "error ...":
-//   show quick|full              the panel, empty, in front of you (fixed to the headset)
-//   lock                         stay where it is in the room now, until the next show (the
-//                                quick check's second step: the head carries the pointer onto
-//                                the dot, so the dot mustn't move with it)
+//   show quick|full              the panel, empty, in front of you
 //   hide
 //   bg <0..1>                    the background's brightness (full)
 //   dot <yaw> <pitch> <state> [<progress 0..1>]
 //                                the dot, head-relative degrees (yaw +left, pitch +up); state:
-//                                look (pulsing), capture (a ring filling to progress), done,
+//                                look, capture (a ring filling to progress), done,
 //                                fail, off
 //   title <text> / text <text>   a line at the top / at the bottom (empty to clear)
 //   ping
@@ -125,7 +122,6 @@ struct Panel {
     bool dotOn = false;
     double dotYaw = 0, dotPitch = 0, progress = 0;
     std::string state = "off";
-    Clock::time_point stateAt = Clock::now();
 };
 
 void Blend(Panel &p, int x, int y, double r, double g, double b, double a) {
@@ -211,12 +207,10 @@ void Draw(Panel &p) {
     double x, y;
     ToPixel(p, p.dotYaw, p.dotPitch, x, y);
     const double core = 0.22 * pxPerDeg;
-    const double t = std::chrono::duration<double>(Clock::now() - p.stateAt).count();
     if (p.state == "look") {
-        // A ring that draws in toward the dot, again and again, and a still centre to look at.
-        const double phase = std::fmod(t * 1.4, 1.0);
-        const double rr = (1.6 - 1.1 * phase) * pxPerDeg;
-        Disc(p, x, y, rr, rr - 0.12 * pxPerDeg, ink, ink, ink, 0.55 * (1 - phase) + 0.2);
+        // Still, so the panel looks solid and is drawn again only when something changes.
+        const double rr = 0.75 * pxPerDeg;
+        Disc(p, x, y, rr, rr - 0.12 * pxPerDeg, ink, ink, ink, 0.6);
         Disc(p, x, y, core, 0, ink, ink, ink, 1);
     } else if (p.state == "capture") {
         const double rr = 0.75 * pxPerDeg;
@@ -232,7 +226,6 @@ void Draw(Panel &p) {
     }
 }
 
-bool Animating(const Panel &p) { return p.dotOn && (p.state == "look"); }
 
 }  // namespace
 
@@ -300,7 +293,6 @@ int main(int argc, char **argv) {
     };
     std::fprintf(stderr, "ft-gazepanel running: @%s, %.2f m\n", sockName.c_str(), distance);
 
-    Clock::time_point lastDraw{};
     while (!g_stop) {
         char buf[512];
         sockaddr_un from{};
@@ -320,24 +312,12 @@ int main(int argc, char **argv) {
                 place();
                 ov->ShowOverlay(h);
                 visible = dirty = true;
-            } else if (!std::strcmp(buf, "lock")) {
-                vr::TrackedDevicePose_t pose{};
-                vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &pose, 1);
-                if (pose.bPoseIsValid) {
-                    // The headset's pose, moved out to the panel: where place() puts it now.
-                    vr::HmdMatrix34_t m = pose.mDeviceToAbsoluteTracking;
-                    for (int r = 0; r < 3; ++r) m.m[r][3] -= float(distance) * m.m[r][2];
-                    ov->SetOverlayTransformAbsolute(h, vr::TrackingUniverseStanding, &m);
-                } else {
-                    reply = "error no headset pose";
-                }
             } else if (!std::strcmp(buf, "hide")) {
                 ov->HideOverlay(h);
                 visible = false;
             } else if (std::sscanf(buf, "bg %lf", &a) == 1) {
                 p.bg = std::clamp(a, 0.0, 1.0), dirty = true;
             } else if (std::sscanf(buf, "dot %lf %lf %15s %lf", &a, &b, state, &c) >= 3) {
-                if (p.state != state || a != p.dotYaw || b != p.dotPitch) p.stateAt = Clock::now();
                 p.dotYaw = a, p.dotPitch = b, p.state = state, p.progress = c;
                 p.dotOn = std::strcmp(state, "off") != 0, dirty = true;
             } else if (!std::strncmp(buf, "title", 5)) {
@@ -359,11 +339,9 @@ int main(int argc, char **argv) {
                 vr::VRSystem()->AcknowledgeQuit_Exiting();
                 g_stop = true;
             }
-        const auto now = Clock::now();
-        if (visible && (dirty || (Animating(p) && now - lastDraw > std::chrono::milliseconds(40)))) {
+        if (visible && dirty) {
             Draw(p);
             ov->SetOverlayRaw(h, p.px.data(), uint32_t(p.w), uint32_t(p.h), 4);
-            lastDraw = now;
             dirty = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(visible ? 10 : 50));

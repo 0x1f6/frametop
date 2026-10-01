@@ -8,17 +8,9 @@ directions: look at each one.
           stay on for hours with nobody in the headset. It also opens when our own tracker asks
           for a click (its "reseat": the headset may sit differently on your face now), at most
           once every QUICK_COOLDOWN, and on "quickcal" (Frametop Input Settings, or a mouse
-          button or key combination mapped to Gaze quick check). Ignored, it closes after
-          QUICK_TIMEOUT and changes nothing.
-          Then, in gaze mode, its second step: the dot stays where it is in the room (the
-          panel's "lock"), the gaze has the pointer again, and you bring the pointer onto the
-          dot as you'd correct a click, with the mouse or a keyboard click and the head (the
-          helper's "calpanel 2": that click clicks nothing). The helper sends it as
-          "calverify", and it's learned whatever its size. If the pointer was more than
-          POINTER_GAZE_NUDGE_MAX (15 degrees) off, the first step runs again, up to RECHECKS
-          times. A right click or Meta+K skips the step; ignored, it closes after
-          VERIFY_TIMEOUT. A keyboard click's correction past POINTER_GAZE_NUDGE_MAX outside a
-          check ("recheck", from the helper) opens a quick check too.
+          button or key combination mapped to Gaze quick check), and when a click's correction
+          was past POINTER_GAZE_NUDGE_MAX (55 degrees; the helper's "recheck"): the tracker is
+          far off. Ignored, it closes after QUICK_TIMEOUT and changes nothing.
   five    the middle and four around it, when the first FIVE_COUNT lessons after a quick check
           were all over FIVE_LIMIT degrees off: the quick check didn't fix it.
   full    the calibration, as the gaze probe's: three rounds, dark, medium and bright (pupil
@@ -76,8 +68,6 @@ CHECK_SPREAD = 1.0     # degrees
 ACCEPT_SPREAD = 2.5    # degrees: a capture asked for (calaccept) takes this much
 DOT_TIMEOUT = 8.0      # seconds a dot of five or full waits; then it's skipped
 QUICK_TIMEOUT = 6.0
-VERIFY_TIMEOUT = 20.0  # seconds the quick check's second step waits for its click
-RECHECKS = 3
 QUICK_COOLDOWN = 120.0
 DON_DELAY = 3.0        # seconds of eyes after AWAY_MIN without: the headset went on
 AWAY_MIN = 3.0
@@ -312,7 +302,7 @@ class Checks:
         now = time.monotonic()
         self.check = {"kind": kind, "reason": reason, "own": own, "dots": check_dots(kind, own), "i": 0,
                       "started": now, "shown": now, "run": [], "accept": False, "done_at": None, "tries": 0,
-                      "skipped": 0, "captured": 0, "points": {}, "verify_at": None, "rechecks": 0}
+                      "skipped": 0, "captured": 0, "points": {}}
         log(f"{kind} check: {reason}")
         if kind == "full":
             st = ask(SCREENS, "state", 0.5).split()
@@ -338,6 +328,7 @@ class Checks:
         else:
             self.to_panel("text Look at the dot")
         self.to_panel(f"dot {yaw:.3f} {pitch:.3f} look")
+        self.last_progress = None
         c["shown"] = time.monotonic()
         c["run"], c["accept"], c["done_at"] = [], False, None
 
@@ -348,7 +339,7 @@ class Checks:
             if self.away and self.back_since is None:
                 self.back_since = self.seen_at
         c = self.check
-        if not c or c["done_at"] or c["verify_at"]:
+        if not c or c["done_at"]:
             return
         if c["own"]:
             src = s["src"].get("own") or {}
@@ -373,10 +364,13 @@ class Checks:
         run.append((now, s, g[0], g[1]))
         window = [p for p in run if p[0] >= now - CHECK_WINDOW]
         held = now - run[0][0]
-        if now - self.last_progress > 0.07:
+        # The ring fills in quarters: each step is a new picture for the panel to upload, so
+        # few of them keep it solid.
+        progress = math.floor(min(1.0, held / CHECK_WINDOW) * 4) / 4
+        if progress != self.last_progress:
             yaw, pitch, _ = c["dots"][c["i"]]
-            self.to_panel(f"dot {yaw:.3f} {pitch:.3f} capture {min(1.0, held / CHECK_WINDOW):.2f}")
-            self.last_progress = now
+            self.to_panel(f"dot {yaw:.3f} {pitch:.3f} capture {progress:.2f}")
+            self.last_progress = progress
         if c["accept"] and held >= 0.3 and len(window) >= 10:
             sd, _ = spread([(p[2], p[3]) for p in window])
             if sd <= ACCEPT_SPREAD:
@@ -493,9 +487,6 @@ class Checks:
             if c["captured"]:
                 log(f"{kind} check done ({c['captured']} of {len(c['dots'])} dots)")
                 self.after_quick = [] if kind == "quick" else None
-                if kind == "quick" and self.gaze_on:
-                    self.verify()
-                    return
             self.close()
             return
         n = len(c["dots"])
@@ -525,45 +516,6 @@ class Checks:
             svc.refit()
             log(f"calibration ({c['captured']} of {n} dots): {mode}, saved")
         self.close()
-
-    def verify(self):
-        """The quick check's second step (see the top): bring the pointer onto the dot."""
-        c = self.check
-        yaw, pitch, _ = c["dots"][0]
-        c["verify_at"] = time.monotonic()
-        self.to_panel("lock")
-        self.to_panel(f"dot {yaw:.3f} {pitch:.3f} look")
-        self.to_panel("title Now put the pointer on the dot")
-        self.to_panel("text Right click or Meta+K: skip")
-        self.to_helper("calpanel 2")
-
-    def on_verify(self, rhy, rhp, thy, thp):
-        svc = self.svc
-        c = self.check
-        rec = svc.lesson(rhy, rhp, thy, thp, limit=False)
-        off = rec.get("lesson_deg", math.hypot(thy - rhy, thp - rhp))
-        self.log_check({"time": time.time(), "check": "verify", "raw": [rhy, rhp], "true": [thy, thp], "off": off,
-                        "own": c["own"], "accepted": "refused" not in rec, "reply": rec.get("refused")})
-        log(f"quick check: the pointer was {off:.1f} deg off the dot"
-            + (f" (not learned: {rec['refused']})" if "refused" in rec else ""))
-        if off <= svc.nudge_max:
-            self.close()
-        elif c["rechecks"] < RECHECKS:
-            c["rechecks"] += 1
-            log(f"more than {svc.nudge_max:.0f} deg: the quick check again ({c['rechecks']} of {RECHECKS})")
-            self.recapture()
-        else:
-            self.close(f"still more than {svc.nudge_max:.0f} deg off after {RECHECKS} more tries: "
-                       "the full calibration should help (Calibrate on the Gaze page)")
-
-    def recapture(self):
-        """The quick check's first step again, in the same check."""
-        c = self.check
-        now = time.monotonic()
-        c.update(i=0, started=now, verify_at=None, tries=0, done_at=None, captured=0, skipped=0)
-        self.to_panel("show quick")  # fixed to the headset again
-        self.to_helper("calpanel 1")
-        self.show_dot()
 
     def close(self, why=None):
         if not self.check:
@@ -615,16 +567,8 @@ class Checks:
         if cmd == "calquit":
             self.quit()
             return "ok"
-        if cmd == "calverify" and len(words) == 5:
-            if not self.check or not self.check["verify_at"]:
-                return "error no quick check is waiting for that"
-            try:
-                self.on_verify(*map(float, words[1:]))
-            except ValueError:
-                return "error bad numbers"
-            return "ok"
         if cmd == "recheck" and len(words) == 2:
-            self.auto_quick(f"a keyboard correction was {words[1]} deg")
+            self.auto_quick(f"a click was corrected {words[1]} deg")
             return "ok"
         return "error unknown command"
 
@@ -655,10 +599,6 @@ class Checks:
         if not self.eyes_seen(EYES_GONE):
             self.close("the headset came off")
             return
-        if c["verify_at"]:
-            if now - c["verify_at"] > VERIFY_TIMEOUT:
-                self.close("the pointer wasn't put on the dot")
-            return
         if c["done_at"]:
             return
         if c["kind"] == "quick" and now - c["started"] > QUICK_TIMEOUT:
@@ -676,7 +616,7 @@ class Checks:
         if now - self.gaze_heard > 5:
             self.gaze_on = None  # the helper isn't answering
         if self.check:
-            self.to_helper("calpanel 2" if self.check["verify_at"] else "calpanel 1")
+            self.to_helper("calpanel 1")
         if self.want_full_until:
             cal = self.calibrated()
             if cal is not None or now > self.want_full_until:
@@ -705,8 +645,7 @@ class Checks:
               "last_quick_s": round(time.monotonic() - self.last_quick) if self.last_quick else None}
         if c:
             st["check"] = {"kind": c["kind"], "dot": c["i"] + 1, "dots": len(c["dots"]), "captured": c["captured"],
-                           "skipped": c["skipped"], "reason": c["reason"], "verifying": bool(c["verify_at"]),
-                           "rechecks": c["rechecks"]}
+                           "skipped": c["skipped"], "reason": c["reason"]}
         return st
 
     def stop(self):

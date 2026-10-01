@@ -45,7 +45,7 @@ was when the mouse took over, and where the pointer was when you clicked (you we
 there). The gap is the tracker's error there. The raw gaze is the one sent, so it also says
 when that look was (the history of what was sent), and so what each eye read then:
   - SteamVR: each eye learns its own error, unless the gaze was more than
-    POINTER_GAZE_NUDGE_MAX degrees (frametop.conf, 15 by default; the helper's limit too)
+    POINTER_GAZE_NUDGE_MAX degrees (frametop.conf, 55 by default: the helper's limit too)
     past the correction (then it wasn't a nudge onto what you looked at);
   - our tracker: unless it was more than POINTER_GAZE_NUDGE_MAX off, the look goes to it as
     a click ("click T YAW PITCH" on @ft_eyes), as the
@@ -72,8 +72,8 @@ tracker's shared memory read-only.
 
 Control socket: abstract unix datagram "@ft_gazed":
   lesson <rhy> <rhp> <thy> <thp>   from the pointer helper (see above)
-  calverify <rhy> <rhp> <thy> <thp>  the same, the quick check's second step (gazecheck.py)
-  recheck <deg>                    a keyboard correction past POINTER_GAZE_NUDGE_MAX: a quick check
+  recheck <deg>                    from the pointer helper: a click's correction was past
+                                   POINTER_GAZE_NUDGE_MAX, so the quick check (gazecheck.py)
   status                           reply: one JSON object
   forget                           drop what the lessons taught (the calibration stays)
   reload                           read calibration.json and the settings again
@@ -126,7 +126,7 @@ SOURCES = ("action", "mmap1", "mmap2", "left", "right")  # the ones with a calib
 SIDES = ("left", "right")  # ft-gaze's order, and the sources for each eye alone
 TRACKERS = ("steam", "own")
 BIASES = ("auto", "left", "right")
-NUDGE_MAX = 15.0  # degrees: POINTER_GAZE_NUDGE_MAX's default, the largest lesson taken
+NUDGE_MAX = 55.0  # degrees: POINTER_GAZE_NUDGE_MAX's default, the largest lesson taken
 HISTORY = 12.0    # seconds of the gaze sent, to find a lesson's look (the helper sends it up to 10 s later)
 LOOK = 0.3        # seconds of samples before that moment make the look (the probe's fixation)
 RETRY = 3.0       # seconds before starting ft-gaze again
@@ -166,7 +166,7 @@ def read_settings():
     tracker = conf.get("GAZE_TRACKER", "steam")
     bias = conf.get("GAZE_EYE", "auto")
     try:
-        nudge = min(max(float(conf.get("POINTER_GAZE_NUDGE_MAX", NUDGE_MAX)), 1.0), 30.0)  # the helper's range
+        nudge = min(max(float(conf.get("POINTER_GAZE_NUDGE_MAX", NUDGE_MAX)), 1.0), 110.0)  # the helper's range
     except ValueError:
         nudge = NUDGE_MAX
     return tracker if tracker in TRACKERS else "steam", bias if bias in BIASES else "auto", nudge
@@ -320,18 +320,16 @@ class Service:
             eyes.append((statistics.median(e[0] for e in seen), statistics.median(e[1] for e in seen)) if seen else None)
         return t, eyes
 
-    def lesson(self, rhy, rhp, thy, thp, limit=True):
-        """Learn a lesson; limit=False takes it whatever its size (the quick check's own)."""
+    def lesson(self, rhy, rhp, thy, thp):
         kind = self.kind
-        limit = self.nudge_max if limit else math.inf
         rec = {"time": time.time(), "kind": kind, "raw": [rhy, rhp], "true": [thy, thp], "wear": self.steam.worn()}
         if kind == "source":
             dy, dp = thy - rhy, thp - rhp  # the whole error there
             cy, cp = self.correction(self.source, rhy, rhp)
             left = math.hypot(dy - cy, dp - cp)
             rec.update(source=self.source, model=self.mode, correction=[cy, cp], lesson_deg=left)
-            if left > limit:
-                rec["refused"] = f"more than {limit} deg past the correction"
+            if left > self.nudge_max:
+                rec["refused"] = f"more than {self.nudge_max:g} deg past the correction"
             else:
                 self.lives[self.source].add({"time": rec["time"], "hy": rhy, "hp": rhp, "dy": dy, "dp": dp,
                                              "wy": 1.0, "wp": 1.0, "how": "pointer"}, self.models[self.source], self.mode)
@@ -344,8 +342,8 @@ class Service:
                    eyes=eyes, weights=[round(w, 3) for w in weights.weights()])
         if t is None:
             rec["refused"] = "that gaze isn't in the last few seconds sent"
-        elif left > limit:
-            rec["refused"] = f"more than {limit} deg off"
+        elif left > self.nudge_max:
+            rec["refused"] = f"more than {self.nudge_max:g} deg off"
         if "refused" in rec:
             return self.taken(rec)
         if kind == "own":
@@ -675,7 +673,7 @@ class Service:
             elif words[:1] == ["forget"]:
                 self.forget_lessons()
                 reply = "ok"
-            elif words[:1] and words[0] in ("quickcal", "calibrate", "calaccept", "calquit", "calverify", "recheck"):
+            elif words[:1] and words[0] in ("quickcal", "calibrate", "calaccept", "calquit", "recheck"):
                 reply = self.checks.command(words)
             elif words[:1] == ["eyes"] and len(words) == 2:
                 try:
