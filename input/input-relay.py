@@ -1192,6 +1192,16 @@ def main():
                 if node.role != "pointer":
                     # Observed only, unless typing goes to the desktop. Key combinations work on
                     # any pass-through keyboard.
+                    if (node.role == "passthrough" and etype == EV_KEY and node.grabbed
+                            and code < BTN_MISC and value in (0, 1)):
+                        # Shared as pressed, key combinations included: the Meta release a
+                        # combination keeps from the desktop must still reach frame-voice, or
+                        # it waits for that release before typing anything.
+                        share_key(node, code, value)
+                        if value:
+                            node.held.add(code)
+                        else:
+                            node.held.discard(code)
                     if node.role == "passthrough" and etype == EV_KEY and code < BTN_MISC and key_binding(code, value, now):
                         continue
                     if node.role == "passthrough" and etype == EV_KEY:
@@ -1202,12 +1212,6 @@ def main():
                             except OSError:
                                 pass  # helper not running (SteamVR not running)
                         to_screens(code, value)
-                        if node.grabbed and code < BTN_MISC and value in (0, 1):
-                            share_key(node, code, value)
-                            if value:
-                                node.held.add(code)
-                            else:
-                                node.held.discard(code)
                     continue
                 if etype == EV_KEY:
                     action = buttons.get(str(code), DEFAULT_BUTTONS.get(code, "key"))
