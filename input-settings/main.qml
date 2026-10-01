@@ -902,6 +902,23 @@ Kirigami.ApplicationWindow {
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
+                Controls.Label {
+                    // Why the gaze pointer, on, can't follow your eyes yet, so it isn't left looking
+                    // like a plain mouse. The calibration part is the gaze service's (gaze/gazecheck.py).
+                    readonly property var checks: gpage.status.checks || {}
+                    readonly property string why: !backend.gazeServiceInstalled
+                        ? "The gaze service isn't installed: run gaze/run.sh install in the Frametop folder, in a terminal"
+                        : !backend.gazeServiceRunning ? "The gaze service isn't running (it starts with SteamVR)"
+                        : backend.gazeTracker === "own" && !gpage.status.eyegrab
+                        ? "Our eye tracker needs its frame grabber: run gaze/tracker/install.sh (asks for sudo)"
+                        : checks.problem || ""
+                    visible: backend.gazeMode > 0 && why !== ""
+                    text: why
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    color: checks.check ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
+                    font: Kirigami.Theme.smallFont
+                }
                 ColumnLayout {
                     Kirigami.FormData.label: "Mouse left button:"
                     Repeater {

@@ -17,9 +17,12 @@ directions: look at each one.
           size, and the tracker's error with it, changes with brightness), each the middle and
           a ring of six (SteamVR's tracker) or eight (ours, whose fit goes wrong past its dots)
           RING degrees out, half that in the middle round, turned 20 degrees a round. It opens
-          when gaze mode comes on without a calibration for the tracker in use, and on
-          "calibrate". Frametop's screens hide while it runs. Quitting it while there's still
-          no calibration turns gaze mode off (POINTER_GAZE=0); turning it on again reopens it.
+          whenever gaze mode is on without a calibration for the tracker in use and someone's
+          in the headset, and on "calibrate". One that closes unfinished (ignored, too few
+          dots) opens again only once the headset comes off and on, or gaze mode off and on.
+          Frametop's screens hide while it runs. Quitting it while there's still no
+          calibration turns gaze mode off (POINTER_GAZE=0); turning it on again reopens it.
+          Why gaze mode can't work yet goes in the status ("problem"), for Input Settings.
 
   fit     the headset fit check (on "fitcheck", Check headset fit on the Gaze page): live, a
           card per eye (tracked or lost, the tracker's signal, how much of the last 10 s it was
@@ -90,6 +93,7 @@ ROUND_BG = (0.03, 0.33, 0.8)
 ROUND_NAMES = ("dark", "medium", "bright")
 RING_SCALE = (1.0, 0.5, 1.0)
 PANEL_RETRY = 10.0
+FULL_RETRY = 10.0      # seconds before an automatic calibration that failed to start tries again
 FIT_TIMEOUT = 300.0    # seconds the fit check stays up
 FIT_EVERY = 0.5        # seconds between its cards' updates (each is a new picture for the panel)
 FIT_HINT_WIDTH = 95    # characters a hint line holds in the panel
@@ -167,7 +171,9 @@ class Checks:
         self.check = None
         self.gaze_on = None
         self.gaze_heard = 0.0
-        self.want_full_until = 0.0  # gaze mode came on before the tracker said whether it's calibrated
+        self.full_armed = True    # gaze mode on without a calibration opens the full one (need_full)
+        self.full_blocked = None  # why it can't open now
+        self.full_retry_at = 0.0
         self.last_quick = 0.0
         self.sample_at = 0.0     # the tracker last sent anything
         self.seen_at = 0.0       # eyes last seen (SteamVR's tracker's variance for them, "unc")
@@ -282,11 +288,47 @@ class Checks:
         return self.eyes_seen() and time.monotonic() - self.svc.last_sample < 2
 
     def on_gaze_on(self):
+        self.full_armed = True
+        self.need_full("gaze mode came on without a calibration")
+
+    def need_full(self, reason):
+        """Gaze mode is on without a calibration: open the full one, once per arming (see the top),
+        or note why it can't open."""
         cal = self.calibrated()
-        if cal is False:
-            self.start("full", "gaze mode came on without a calibration")
-        elif cal is None:
-            self.want_full_until = time.monotonic() + 20
+        if cal:
+            self.full_armed = True  # missing one later (the other tracker picked) is news again
+        if not self.gaze_on or self.check or not self.full_armed or cal is not False:
+            self.full_blocked = None
+            return
+        now = time.monotonic()
+        if not self.can_run():
+            why = ("the eye tracker isn't sending" if now - self.svc.last_sample >= 2
+                   else "no eyes seen (is the headset on?)")
+        elif now < self.full_retry_at:
+            return
+        else:
+            reply = self.start("full", reason)
+            why = None if reply == "ok" else reply.removeprefix("error ")
+            if why:
+                self.full_retry_at = now + FULL_RETRY
+        if why and why != self.full_blocked:
+            log(f"the calibration can't open: {why}")
+        self.full_blocked = why
+        if not why:
+            self.full_armed = False
+
+    def problem(self):
+        """Why gaze mode, on, can't follow your eyes yet, or None. Our tracker not having said
+        yet is None: Input Settings has its own line for our tracker."""
+        if not self.gaze_on or self.calibrated() is not False:
+            return None
+        if self.check and self.check["kind"] == "full":
+            return "Not calibrated yet: the calibration is open in the headset"
+        if self.full_blocked:
+            return f"Not calibrated, and the calibration can't open: {self.full_blocked}"
+        if not self.full_armed:
+            return "Not calibrated: the calibration closed unfinished. Use Calibrate"
+        return "Not calibrated: the calibration opens in the headset"
 
     def auto_quick(self, reason):
         now = time.monotonic()
@@ -703,18 +745,13 @@ class Checks:
             self.gaze_on = None  # the helper isn't answering
         if self.check:
             self.to_helper("calpanel 1")
-        if self.want_full_until:
-            cal = self.calibrated()
-            if cal is not None or now > self.want_full_until:
-                self.want_full_until = 0.0
-                if cal is False and self.gaze_on:
-                    self.start("full", "gaze mode came on without a calibration")
         if not self.eyes_seen(AWAY_MIN):
             self.away, self.back_since = True, None
         elif self.back_since is not None and not self.eyes_seen():
             self.back_since = None  # gone again before DON_DELAY
         elif self.back_since is not None and now - self.back_since >= DON_DELAY:
             self.away, self.back_since = False, None
+            self.full_armed = True  # a calibration that closed unfinished opens again
             self.auto_quick("the headset went on")
         if svc.kind == "own" and now - svc.own_at < 5:
             reseat = any(e.get("reseat") for e in (svc.own.get("eyes") or {}).values())
@@ -723,10 +760,12 @@ class Checks:
             elif not self.reseat_seen and self.can_run():
                 self.reseat_seen = True
                 self.auto_quick("our tracker asked for a click")
+        self.need_full("gaze mode is on without a calibration")
 
     def status(self):
         c = self.check
         st = {"check": None, "gaze_mode": self.gaze_on, "calibrated": self.calibrated(), "eyes": self.eyes_seen(),
+              "problem": self.problem(),
               "panel": self.panel_proc is not None,
               "last_quick_s": round(time.monotonic() - self.last_quick) if self.last_quick else None}
         if c:
