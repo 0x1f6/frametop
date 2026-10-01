@@ -40,7 +40,7 @@ The service runs after Bluetooth has started and never makes Bluetooth wait for 
 The install writes to `/etc`, so it needs `sudo` and the `steamos` user's password.
 
 - On the headset, `sudo` asks for the password in the terminal. If you've never set one, run `passwd` first.
-- From a PC over SSH, there's no terminal on the Frame to ask in, so put the password in a `.env` file at the repo root:
+- From a PC over SSH, the scripts ask for it in your terminal (through `ssh -t`). To skip the question, or with no terminal, put the password in a `.env` file at the repo root:
 
   ```
   steamos_root_pwd="your-password"

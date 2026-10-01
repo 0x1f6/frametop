@@ -5,9 +5,9 @@
 # Usage: hands/run.sh install|uninstall
 #        hands/run.sh caps      # give ft-camd its capabilities again (a rebuild clears them)
 #        hands/run.sh start|stop|restart|status|log [lines]
-# install and caps need the password (sudo setcap, once per build of ft-camd). On the Frame,
-# sudo asks in the terminal. From a PC (or with no terminal), the password comes from
-# steamos_root_pwd in the repo's .env and is sent to sudo -S on stdin, never on a command line.
+# install and caps need the password (sudo setcap, once per build of ft-camd): it's asked in
+# the terminal, on the Frame or from a PC (frame_sudo in scripts/_env.sh, which also takes it
+# from the repo's .env).
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$root/scripts/_env.sh"
@@ -17,17 +17,7 @@ units="frametop-camd.service frametop-hands.service"
 # format files. ft-camd drops them all once it has set up.
 caps=cap_sys_ptrace,cap_perfmon,cap_dac_read_search+ep
 
-sudo_run() {
-  if [ "$FRAME_LOCAL" = 1 ] && [ -t 0 ]; then
-    sudo bash -c "$1"  # asks for the password here
-    return
-  fi
-  local pw
-  pw=$(sed -n 's/^steamos_root_pwd=//p' "$root/.env" 2>/dev/null)
-  pw=${pw#[\"\']}; pw=${pw%[\"\']}  # .env values may be quoted
-  [ -n "$pw" ] || { echo "no terminal for sudo, and steamos_root_pwd is missing from $root/.env" >&2; exit 1; }
-  printf '%s\n' "$pw" | on_frame "sudo -S -p '' bash -c $(printf %q "$1")"
-}
+sudo_run() { frame_sudo "$1"; }
 
 set_caps() {  # only when missing: a rebuild clears them, a reinstall doesn't
   local bin

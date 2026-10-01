@@ -4,10 +4,9 @@
 # SteamVR's eyetracking process into /dev/shm/frametop-eyes-cams for ft-eyes, and only while
 # ft-eyes wants them. The gaze service (gaze/ft-gazed) runs ft-eyes itself, when Eye tracker
 # is Own tracker or the gaze probe uses it.
-# Needs host sudo, for the binary (/etc/frametop/ft-eyegrab, root's) and the unit. On the
-# Frame, sudo asks for the password in the terminal, or runs SUDO_ASKPASS when that's set.
-# From a PC (or with no terminal), the password comes from steamos_root_pwd in the repo's .env
-# and is sent to sudo -S on stdin, never on a command line.
+# Needs host sudo, for the binary (/etc/frametop/ft-eyegrab, root's) and the unit: it asks for
+# the password in the terminal, on the Frame or from a PC, or runs SUDO_ASKPASS when that's set
+# (frame_sudo in scripts/_env.sh, which also takes it from the repo's .env).
 # Usage: gaze/tracker/install.sh [install|uninstall|status|log [lines]]
 set -euo pipefail
 
@@ -16,21 +15,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 src=$FRAME_REPO/gaze/tracker
 unit=frametop-eyegrab.service
 
-sudo_run() {
-  if [ "$FRAME_LOCAL" = 1 ] && [ -n "${SUDO_ASKPASS:-}" ]; then
-    sudo -A bash -c "$1"  # SUDO_ASKPASS supplies the password
-    return
-  fi
-  if [ "$FRAME_LOCAL" = 1 ] && [ -t 0 ]; then
-    sudo bash -c "$1"  # asks for the password here
-    return
-  fi
-  local pw
-  pw=$(sed -n 's/^steamos_root_pwd=//p' "$root/.env" 2>/dev/null)
-  pw=${pw#[\"\']}; pw=${pw%[\"\']}  # .env values may be quoted
-  [ -n "$pw" ] || { echo "no terminal for sudo, and steamos_root_pwd is missing from $root/.env" >&2; exit 1; }
-  printf '%s\n' "$pw" | on_frame "sudo -S -p '' bash -c $(printf %q "$1")"
-}
+sudo_run() { frame_sudo "$1"; }
 
 case ${1:-install} in
   install)

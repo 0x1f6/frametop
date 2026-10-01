@@ -12,8 +12,8 @@ case ${1:-status} in
     "$root/gaze/build.sh"
     fill_template "$root/gaze/$unit" | on_frame "mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/$unit"
     on_frame "chmod +x gaze/ft-gazed gaze/ft-gazectl"
-    "$frame" --host "set -e; systemctl --user daemon-reload; systemctl --user enable --now $unit
-sleep 2; echo \"$unit: \$(systemctl --user is-active $unit)\"; journalctl --user -u $unit --no-pager -o cat -n 5" ;;
+    "$frame" --host "set -e; systemctl --user daemon-reload; systemctl --user enable $unit
+$(start_with_steamvr $unit)" ;;
   uninstall) "$frame" --host "systemctl --user disable --now $unit 2>/dev/null; rm -f ~/.config/systemd/user/$unit; systemctl --user daemon-reload; echo removed" ;;
   start|stop|restart) "$frame" --host "systemctl --user $1 $unit; systemctl --user is-active $unit" ;;
   status) "$frame" --host "systemctl --user is-active $unit" || true; on_frame "gaze/ft-gazectl status" || true ;;

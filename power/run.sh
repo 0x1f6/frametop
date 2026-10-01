@@ -13,10 +13,8 @@ case ${1:-status} in
     "$root/scripts/sync.sh" >/dev/null
     fill_template "$root/power/$unit" | on_frame "mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/$unit"
     "$frame" --host "set -e; pkill -x ft-powerd || true
-systemctl --user daemon-reload; systemctl --user enable --now $unit
-# It comes up once SteamVR runs (it starts with it); distrobox enter takes a few seconds.
-for i in \$(seq 20); do systemctl --user is-active --quiet $unit && break; sleep 1; done
-echo \"$unit: \$(systemctl --user is-active $unit)\"; journalctl --user -u $unit --no-pager -o cat -n 3" ;;
+systemctl --user daemon-reload; systemctl --user enable $unit
+$(start_with_steamvr $unit)" ;;
   uninstall) "$frame" --host "systemctl --user disable --now $unit 2>/dev/null; rm -f ~/.config/systemd/user/$unit; systemctl --user daemon-reload; echo removed" ;;
   start|stop|restart) "$frame" --host "systemctl --user $1 $unit; systemctl --user is-active $unit" ;;
   status) "$frame" --host "systemctl --user is-active $unit; python3 -c 'import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.bind(\"\"); s.settimeout(1); s.sendto(b\"status\", \"\\0ft_powerd\"); print(s.recv(256).decode())' 2>/dev/null || echo 'ft-powerd not answering'" ;;

@@ -58,3 +58,47 @@ on_frame_script() {
 fill_template() {
   sed "s|@REPO@|$FRAME_REPO|g" "$1"
 }
+
+# frame_sudo '<command>': run a shell command as root on the Frame host. sudo asks for the
+# password in this terminal: on the Frame directly (it reads the terminal itself, so this
+# works when stdin isn't one, as in install.sh's steps), or from a PC through ssh -t.
+# SUDO_ASKPASS on the Frame, or steamos_root_pwd in the repo's .env (sent to sudo -S on
+# stdin, never on a command line) answer it with no terminal; from a PC, .env comes first.
+frame_sudo() {
+  local tty=0 pw
+  { : </dev/tty; } 2>/dev/null && tty=1
+  if [ "$FRAME_LOCAL" = 1 ] && [ -n "${SUDO_ASKPASS:-}" ]; then
+    sudo -A bash -c "$1"
+    return
+  fi
+  if [ "$FRAME_LOCAL" = 1 ] && [ "$tty" = 1 ]; then
+    sudo bash -c "$1"
+    return
+  fi
+  pw=$(sed -n 's/^steamos_root_pwd=//p' "$REPO_ROOT/.env" 2>/dev/null)
+  pw=${pw#[\"\']}; pw=${pw%[\"\']}  # .env values may be quoted
+  if [ -n "$pw" ]; then
+    printf '%s\n' "$pw" | on_frame "sudo -S -p '' bash -c $(printf %q "$1")"
+  elif [ "$FRAME_LOCAL" = 0 ] && [ "$tty" = 1 ]; then
+    ssh -tt -o BatchMode=yes "$FRAME_HOST" "cd $(printf %q "$FRAME_REPO") && sudo bash -c $(printf %q "$1")" </dev/tty
+  else
+    echo "sudo needs a terminal for the password, or steamos_root_pwd in $REPO_ROOT/.env" >&2
+    return 1
+  fi
+}
+
+# start_with_steamvr UNIT: a host command for an installer. Units that need SteamVR
+# (Requisite=steamvr.service) can't start without it, so with SteamVR off (an install over
+# SSH, the headset asleep) they're left to start with it. With SteamVR on, the unit restarts,
+# so a re-install runs the new code, and the command waits for it and shows its last lines.
+start_with_steamvr() {
+  local unit=$1
+  printf '%s' "if systemctl --user is-active --quiet steamvr.service; then
+systemctl --user restart $unit
+# distrobox enter takes a few seconds.
+for i in \$(seq 20); do systemctl --user is-active --quiet $unit && break; sleep 1; done
+echo \"$unit: \$(systemctl --user is-active $unit)\"; journalctl --user -u $unit --no-pager -o cat -n 3
+else
+echo '$unit: enabled; SteamVR is off, so it starts with SteamVR'
+fi"
+}
