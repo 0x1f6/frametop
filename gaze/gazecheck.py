@@ -21,6 +21,12 @@ directions: look at each one.
           "calibrate". Frametop's screens hide while it runs. Quitting it while there's still
           no calibration turns gaze mode off (POINTER_GAZE=0); turning it on again reopens it.
 
+  fit     the headset fit check (on "fitcheck", Check headset fit on the Gaze page): live, a
+          card per eye (tracked or lost, the tracker's signal, how much of the last 10 s it was
+          seen) and hints, from the gaze probe's Headset fit (gaze/fitcheck.py), while you
+          adjust the headset. A left click or Meta+J runs its guided check (dots, then looks
+          down, up, left and right); a right click or Meta+K closes it, as does FIT_TIMEOUT.
+
 A dot captures itself: from CHECK_SETTLE after it shows (the eyes getting there), once the gaze
 has held within CHECK_SPREAD for CHECK_WINDOW (the probe's max spread and capture time). It's
 the gaze holding still that counts, not where the tracker puts it, so it works however far off
@@ -49,6 +55,7 @@ import sys
 import time
 from pathlib import Path
 
+from fitcheck import MIN_REGION, FitCheck, wrap
 from gazecal import DEFAULT_MODEL, EYE_LOST, STATE, steady_samples
 
 REPO = Path(__file__).resolve().parents[1]
@@ -80,6 +87,9 @@ ROUND_BG = (0.03, 0.33, 0.8)
 ROUND_NAMES = ("dark", "medium", "bright")
 RING_SCALE = (1.0, 0.5, 1.0)
 PANEL_RETRY = 10.0
+FIT_TIMEOUT = 300.0    # seconds the fit check stays up
+FIT_EVERY = 0.5        # seconds between its cards' updates (each is a new picture for the panel)
+FIT_HINT_WIDTH = 95    # characters a hint line holds in the panel
 
 
 def log(msg):
@@ -156,6 +166,7 @@ class Checks:
         self.gaze_heard = 0.0
         self.want_full_until = 0.0  # gaze mode came on before the tracker said whether it's calibrated
         self.last_quick = 0.0
+        self.sample_at = 0.0     # the tracker last sent anything
         self.seen_at = 0.0       # eyes last seen (SteamVR's tracker's variance for them, "unc")
         self.away = True         # no eyes for AWAY_MIN: their coming back is the headset going on
         self.back_since = None
@@ -291,6 +302,8 @@ class Checks:
             return "error a check is running"
         if not self.panel_proc:
             return "error the panel isn't running (gaze/build.sh builds it)"
+        if kind == "fit":
+            return self.start_fit(reason)
         if not self.can_run():
             return "error the headset is off or the tracker isn't sending"
         own = svc.kind == "own"
@@ -316,6 +329,62 @@ class Checks:
             self.last_quick = now
         return "ok"
 
+    def start_fit(self, reason):
+        # Eyes lost are what it's there to show, so it needs only the tracker sending.
+        if time.monotonic() - self.sample_at > 2:
+            return "error the headset is off or the eye tracker isn't sending"
+        now = time.monotonic()
+        self.check = {"kind": "fit", "reason": reason, "own": False, "dots": [], "i": 0, "started": now, "shown": now,
+                      "run": [], "accept": False, "done_at": None, "tries": 0, "skipped": 0, "captured": 0,
+                      "points": {}, "fit": FitCheck(), "drawn": {}, "drawn_at": 0.0, "step": None}
+        log(f"fit check: {reason}")
+        self.to_helper("calpanel 1")
+        self.to_panel("show fit")
+        self.to_panel("title Headset fit: adjust the headset while you watch")
+        self.to_panel("text Left click or Meta+J: guided check · Right click or Meta+K: done")
+        return "ok"
+
+    def fit_tick(self, now):
+        c = self.check
+        fit = c["fit"]
+        # The guided check: its dots at head-relative directions in the panel (the probe's
+        # screen fractions, spread over the middle of the panel), and its looks as the title.
+        step = fit.guide_step(now)
+        key = None if step is None else (step[0], step[1])
+        if key != c["step"]:
+            c["step"] = key
+            if step is None:
+                self.to_panel("dot 0 0 off")
+                self.to_panel("title Headset fit: adjust the headset while you watch")
+            elif step[0] == "dot":
+                fx, fy = step[1]
+                self.to_panel(f"dot {(0.5 - fx) * 32:.2f} {(0.5 - fy) * 24:.2f} look")
+                self.to_panel("title Look at the dot")
+            else:
+                self.to_panel("dot 0 0 off")
+                self.to_panel(f"title {step[1]}")
+        if now - c["drawn_at"] < FIT_EVERY:
+            return
+        c["drawn_at"] = now
+        drawn = c["drawn"]
+        for k in (0, 1):
+            word, (r, g, b) = fit.status(k)
+            sig, seen = fit.signal(k), fit.tracked_share(k, now)
+            cmd = (f"eye {k} {r:.2f} {g:.2f} {b:.2f} {-1 if sig is None else round(sig, 1):g} "
+                   f"{-1 if seen is None else round(seen * 20) / 20:g} {word.capitalize()}")
+            if drawn.get(k) != cmd:
+                drawn[k] = cmd
+                self.to_panel(cmd)
+        if fit.have_eye_data and fit.samples < 3 * MIN_REGION:
+            hints = ["Look around slowly: up, down, left and right. Or left click (Meta+J) for a guided check."]
+        else:
+            hints = fit.hints()
+        lines = [line for h in hints for line in wrap(h, FIT_HINT_WIDTH)][:8]
+        cmd = "hints " + "|".join(lines)
+        if drawn.get("hints") != cmd:
+            drawn["hints"] = cmd
+            self.to_panel(cmd)
+
     def show_dot(self):
         c = self.check
         yaw, pitch, rnd = c["dots"][c["i"]]
@@ -333,12 +402,16 @@ class Checks:
         c["run"], c["accept"], c["done_at"] = [], False, None
 
     def on_sample(self, s):
+        self.sample_at = time.monotonic()
         unc = (s["src"].get("mmap1") or {}).get("unc")
         if unc and min(unc) <= EYE_LOST:
             self.seen_at = time.monotonic()
             if self.away and self.back_since is None:
                 self.back_since = self.seen_at
         c = self.check
+        if c and c["kind"] == "fit":
+            c["fit"].feed(s, self.sample_at)
+            return
         if not c or c["done_at"]:
             return
         if c["own"]:
@@ -560,8 +633,12 @@ class Checks:
             return self.start("full" if self.calibrated() is False else "quick", "asked for")
         if cmd == "calibrate":
             return self.start("full", "asked for")
+        if cmd == "fitcheck":
+            return self.start("fit", "asked for")
         if cmd == "calaccept":
-            if self.check:
+            if self.check and self.check["kind"] == "fit":
+                self.check["fit"].toggle_guide(time.monotonic())
+            elif self.check:
                 self.check["accept"] = True
             return "ok"
         if cmd == "calquit":
@@ -590,6 +667,13 @@ class Checks:
         if not c:
             return
         now = time.monotonic()
+        if c["kind"] == "fit":
+            # Not closed when the eyes go: adjusting the headset loses them.
+            if now - c["started"] > FIT_TIMEOUT:
+                self.close("timed out")
+            else:
+                self.fit_tick(now)
+            return
         if c["done_at"] and now >= c["done_at"]:
             if c.get("closing"):
                 self.close()

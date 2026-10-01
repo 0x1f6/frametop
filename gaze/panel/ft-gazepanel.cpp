@@ -8,11 +8,13 @@
 // The panel sits POINTER-like at --distance (1.5 m, about where Frametop's screens are, so
 // the eyes converge as they do in use). "quick" is a small square, QUICK_DEG across, for the
 // one-dot check; "full" is FULL_DEG across (4:3), with a solid background whose brightness the
-// service sets per round (pupil size changes with it, and the tracker's error with it).
+// service sets per round (pupil size changes with it, and the tracker's error with it); "fit"
+// is FIT_DEG across (4:3), see-through like quick, for the headset fit check: a card per eye
+// (tracked or lost, the tracker's signal, how much of the last 10 s it was seen) and hints.
 //
 // Control socket: abstract unix datagram "@ft_gazepanel" (--socket NAME); a sender with an
 // address gets "ok" or "error ...":
-//   show quick|full              the panel, empty, in front of you
+//   show quick|full|fit          the panel, empty, in front of you
 //   hide
 //   bg <0..1>                    the background's brightness (full)
 //   dot <yaw> <pitch> <state> [<progress 0..1>]
@@ -20,6 +22,10 @@
 //                                look, capture (a ring filling to progress), done,
 //                                fail, off
 //   title <text> / text <text>   a line at the top / at the bottom (empty to clear)
+//   eye <0|1> <r> <g> <b> <signal 0..1|-1> <seen 0..1|-1> <word>
+//                                fit: an eye's card (0 left): its state in that colour, the
+//                                tracker's signal, the share of the last 10 s it was seen
+//   hints <line>|<line>|...      fit: lines under the cards (empty to clear)
 //   ping
 //
 // Options: --watch-stdin (quit when stdin closes: the service runs it), --socket NAME,
@@ -51,7 +57,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr double kQuickDeg = 16;      // QUICK_DEG: the one-dot check's square
 constexpr double kFullDeg = 64;       // FULL_DEG: the full calibration's width (4:3)
-constexpr int kQuickPx = 320, kFullW = 1024, kFullH = 768;
+constexpr double kFitDeg = 40;        // FIT_DEG: the headset fit check's width (4:3)
+constexpr int kQuickPx = 320, kFullW = 1024, kFullH = 768, kFitW = 800, kFitH = 600;
 std::atomic<bool> g_stop{false};
 
 // ---------------------------------------------------------------- text (as screens/keyboard.cpp)
@@ -112,8 +119,15 @@ std::vector<uint32_t> Codepoints(const std::string &s) {
 
 // ---------------------------------------------------------------- the picture
 
+struct EyeCard {
+    std::string word = "no data";
+    double r = 0.6, g = 0.6, b = 0.6, signal = -1, seen = -1;
+};
+
 struct Panel {
-    bool full = false;
+    bool full = false, fit = false;
+    EyeCard eyes[2];
+    std::vector<std::string> hints;
     int w = kQuickPx, h = kQuickPx;
     double wDeg = kQuickDeg;  // across
     std::vector<uint8_t> px;
@@ -153,7 +167,13 @@ void Disc(Panel &p, double cx, double cy, double outer, double inner, double r, 
         }
 }
 
-void Text(Panel &p, const std::string &s, int size, int cx, int cy, double lum) {
+void Rect(Panel &p, int x0, int y0, int x1, int y1, double r, double g, double b, double a) {
+    for (int y = std::max(y0, 0); y < std::min(y1, p.h); ++y)
+        for (int x = std::max(x0, 0); x < std::min(x1, p.w); ++x) Blend(p, x, y, r, g, b, a);
+}
+
+// Text centred on (x, cy), or starting at x (left).
+void Text(Panel &p, const std::string &s, int size, int x, int cy, double r, double g, double b, bool left = false) {
     if (!g_fontOk || s.empty()) return;
     const auto cps = Codepoints(s);
     int width = 0;
@@ -161,14 +181,48 @@ void Text(Panel &p, const std::string &s, int size, int cx, int cy, double lum) 
     int ascent, descent, gap;
     stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
     const float scale = stbtt_ScaleForPixelHeight(&g_font, float(size));
-    int x = cx - width / 2;
+    if (!left) x -= width / 2;
     const int baseline = cy + int(std::lround((ascent + descent) * scale / 2));
     for (uint32_t cp : cps) {
-        const Glyph &g = GetGlyph(cp, size);
-        for (int gy = 0; gy < g.h; ++gy)
-            for (int gx = 0; gx < g.w; ++gx)
-                Blend(p, x + g.xoff + gx, baseline + g.yoff + gy, lum, lum, lum, g.bitmap[size_t(gy) * g.w + gx] / 255.0);
-        x += g.advance;
+        const Glyph &gl = GetGlyph(cp, size);
+        for (int gy = 0; gy < gl.h; ++gy)
+            for (int gx = 0; gx < gl.w; ++gx)
+                Blend(p, x + gl.xoff + gx, baseline + gl.yoff + gy, r, g, b, gl.bitmap[size_t(gy) * gl.w + gx] / 255.0);
+        x += gl.advance;
+    }
+}
+
+void Text(Panel &p, const std::string &s, int size, int x, int cy, double lum, bool left = false) {
+    Text(p, s, size, x, cy, lum, lum, lum, left);
+}
+
+// The headset fit check (see the top): a card per eye, then the hints.
+void DrawFit(Panel &p, double pxPerDeg, int textSize, double faint) {
+    const int margin = int(p.w * 0.06), cw = int(p.w * 0.41), ch = int(p.h * 0.32), top = int(p.h * 0.12);
+    const int pad = int(pxPerDeg * 0.9), big = int(pxPerDeg * 1.6), small = int(pxPerDeg * 0.8);
+    for (int k = 0; k < 2; ++k) {
+        const EyeCard &e = p.eyes[k];
+        const int x0 = k == 0 ? margin : p.w - margin - cw;
+        Rect(p, x0, top, x0 + cw, top + ch, 1, 1, 1, 0.07);
+        Text(p, k ? "Right eye" : "Left eye", textSize, x0 + pad, top + pad + textSize / 2, faint, true);
+        Text(p, e.word, big, x0 + pad, top + int(ch * 0.40), e.r, e.g, e.b, true);
+        // The tracker's signal: a bar, red to green.
+        const int by = top + int(ch * 0.62), bh = std::max(4, int(pxPerDeg * 0.35)), bw = cw - 2 * pad;
+        Text(p, "Signal", small, x0 + pad, by - small, faint, true);
+        Rect(p, x0 + pad, by, x0 + pad + bw, by + bh, 1, 1, 1, 0.15);
+        if (e.signal >= 0) {
+            const double v = std::clamp(e.signal, 0.0, 1.0);
+            const double r = v < 0.5 ? 1.0 : 1.0 - 1.3 * (v - 0.5), g = v < 0.5 ? 0.3 + 0.9 * v : 0.75 + 0.5 * (v - 0.5);
+            Rect(p, x0 + pad, by, x0 + pad + int(bw * v), by + bh, r, g, 0.35, 0.95);
+        }
+        char seen[64] = "Seen: not yet";
+        if (e.seen >= 0) std::snprintf(seen, sizeof seen, "Seen %d%% of the last 10 s", int(std::lround(e.seen * 100)));
+        Text(p, seen, small, x0 + pad, top + ch - pad, faint, true);
+    }
+    int y = top + ch + pad * 2;
+    for (const std::string &line : p.hints) {
+        Text(p, line, textSize, margin, y, faint, true);
+        y += int(textSize * 1.4);
     }
 }
 
@@ -188,8 +242,8 @@ void Draw(Panel &p) {
         for (size_t i = 0; i < p.px.size(); i += 4)
             p.px[i] = p.px[i + 1] = p.px[i + 2] = uint8_t(std::lround(p.bg * 255)), p.px[i + 3] = 255;
     } else {
-        // The quick check: a dim rounded square, see-through, so it's clear of what's behind.
-        const double r = p.w * 0.12;
+        // The quick check and the fit check: a dim rounded panel, see-through, so it's clear of what's behind.
+        const double r = std::min(p.w, p.h) * 0.12;
         for (int y = 0; y < p.h; ++y)
             for (int x = 0; x < p.w; ++x) {
                 const double dx = std::max({r - x - 0.5, x + 0.5 - (p.w - r), 0.0});
@@ -203,6 +257,7 @@ void Draw(Panel &p) {
     const int titleSize = int(pxPerDeg * (p.full ? 1.5 : 1.1)), textSize = int(pxPerDeg * (p.full ? 1.2 : 0.9));
     Text(p, p.title, titleSize, p.w / 2, int(titleSize * 1.2), faint);
     Text(p, p.text, textSize, p.w / 2, p.h - int(textSize * 1.3), faint);
+    if (p.fit) DrawFit(p, pxPerDeg, textSize, faint);
     if (!p.dotOn || p.state == "off") return;
     double x, y;
     ToPixel(p, p.dotYaw, p.dotPitch, x, y);
@@ -302,13 +357,16 @@ int main(int argc, char **argv) {
             buf[n] = 0;
             std::string reply = "ok";
             char word[16] = "", state[16] = "";
-            double a = 0, b = 0, c = 0;
+            double a = 0, b = 0, c = 0, d = 0, e = 0;
+            int rest = 0;
             if (!std::strncmp(buf, "show ", 5)) {
                 p.full = !std::strcmp(buf + 5, "full");
-                p.w = p.full ? kFullW : kQuickPx;
-                p.h = p.full ? kFullH : kQuickPx;
-                p.wDeg = p.full ? kFullDeg : kQuickDeg;
+                p.fit = !std::strcmp(buf + 5, "fit");
+                p.w = p.full ? kFullW : p.fit ? kFitW : kQuickPx;
+                p.h = p.full ? kFullH : p.fit ? kFitH : kQuickPx;
+                p.wDeg = p.full ? kFullDeg : p.fit ? kFitDeg : kQuickDeg;
                 p.title.clear(), p.text.clear(), p.dotOn = false, p.state = "off";
+                p.eyes[0] = p.eyes[1] = EyeCard{}, p.hints.clear();
                 place();
                 ov->ShowOverlay(h);
                 visible = dirty = true;
@@ -320,6 +378,18 @@ int main(int argc, char **argv) {
             } else if (std::sscanf(buf, "dot %lf %lf %15s %lf", &a, &b, state, &c) >= 3) {
                 p.dotYaw = a, p.dotPitch = b, p.state = state, p.progress = c;
                 p.dotOn = std::strcmp(state, "off") != 0, dirty = true;
+            } else if (int k; std::sscanf(buf, "eye %d %lf %lf %lf %lf %lf %n", &k, &a, &b, &c, &d, &e, &rest) >= 6 &&
+                       rest > 0 && (k == 0 || k == 1)) {
+                p.eyes[k] = EyeCard{buf + rest, a, b, c, d, e}, dirty = true;
+            } else if (!std::strncmp(buf, "hints", 5)) {
+                p.hints.clear();
+                std::string s = buf[5] == ' ' ? buf + 6 : "";
+                for (size_t at = 0; !s.empty() && at <= s.size();) {
+                    const size_t bar = std::min(s.find('|', at), s.size());
+                    p.hints.push_back(s.substr(at, bar - at));
+                    at = bar + 1;
+                }
+                dirty = true;
             } else if (!std::strncmp(buf, "title", 5)) {
                 p.title = buf[5] == ' ' ? buf + 6 : "", dirty = true;
             } else if (!std::strncmp(buf, "text", 4)) {

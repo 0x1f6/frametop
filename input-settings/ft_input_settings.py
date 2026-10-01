@@ -993,14 +993,15 @@ class Backend(QObject):
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
 
     @Slot()
-    def openGazeProbe(self):
-        """Calibrate in ft-gazeprobe (a GTK app on the host, fullscreen on a Frametop screen)."""
-        self._open_probe([], "Opening the gaze probe: calibrate there, then close it")
+    def gazeFitCheck(self):
+        """The headset fit check, in the panel fixed to the headset (gaze/gazecheck.py)."""
+        self._gaze_check("fitcheck", "Headset fit: in the headset, adjust it while you watch; right click or Meta+K closes it")
 
     @Slot()
-    def openHeadsetFit(self):
-        """The probe's Headset fit mode: how well the tracker sees each eye, as you adjust."""
-        self._open_probe(["--mode", "fit"], "Opening the headset fit check in the gaze probe")
+    def openGazeProbe(self):
+        """ft-gazeprobe, the gaze tracking's development tool (a GTK app on the host, fullscreen on
+        a Frametop screen). Day to day, the checks and the calibration run in the headset panel."""
+        self._open_probe([], "Opening the gaze probe (a development tool)")
 
     def _open_probe(self, args, done):
         runner = ["distrobox-host-exec"] if shutil.which("distrobox-host-exec") else []

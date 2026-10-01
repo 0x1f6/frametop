@@ -1,5 +1,5 @@
-"""fitcheck: how well the eye tracker sees each eye, for fitting the headset (ft-gazeprobe's
-Headset fit mode).
+"""fitcheck: how well the eye tracker sees each eye, for fitting the headset (the headset
+panel's fit check, gazecheck.py, and ft-gazeprobe's Headset fit mode).
 
 From each ft-gaze sample it takes, per eye, whether the tracker has that eye (its variance
 for the eye's direction, "unc", under EYE_LOST; see gazecal), how open the eye is, and the

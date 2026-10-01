@@ -5,7 +5,7 @@ The Steam Frame's eye tracking as pointer input: a gaze mode for the 3D mouse (t
 - `ft-gaze` (C++, OpenVR, runs in the dev container) reads the eye tracker and prints one JSON line per sample (90 Hz). For each source, it gives the gaze direction relative to the head and the Frametop screen pixel it lands on.
 - `gazecal.py` has what the probe and the gaze service share: the correction models, filters, and the reader for SteamVR's eye tracking log.
 - `tracker/` is our own eye tracker, an alternative to SteamVR's: `ft-eyes` finds the pupils and glints in the eye-camera frames that `ft-eyegrab` (a small root service) copies out of SteamVR's tracker. See "Our own eye tracker" below.
-- `probe/ft-gazeprobe` (GTK 4, host Python) is a fullscreen playground. It runs ft-gaze, draws where you're looking, measures accuracy, and tries out hold-to-adjust clicking with a calibration that learns from your adjustments.
+- `probe/ft-gazeprobe` (GTK 4, host Python) is a fullscreen playground, for developing the gaze tracking: day to day, the calibration and the checks run in the headset panel (Quick check, Calibrate, and Check headset fit on the Gaze page). It runs ft-gaze, draws where you're looking, measures accuracy, and tries out hold-to-adjust clicking with a calibration that learns from your adjustments.
 
 ```
 gaze/build.sh                 # build ft-gaze
@@ -64,11 +64,13 @@ Ground rules, for anyone changing it:
 
 ## Headset fit
 
-The probe's Headset fit mode (Check headset fit on the Gaze page, or `ft-gazeprobe --mode fit`) shows, for each eye, whether the tracker has it, how open it is, and the tracker's confidence in it, and a map of where you looked coloured by how often it lost that eye there. Hints under the maps say which eye gets lost where, and what to try. Enter runs a guided check: dots around the screen, then looking down at the keyboard, up, left and right. R starts over. Adjust the headset while you watch it.
+Check headset fit on the Gaze page opens it in the headset panel: a card per eye (tracked or lost, the tracker's signal, how much of the last 10 s it was seen) and the hints, live while you adjust the headset. A left click or Meta+J runs the guided check (dots, then looks down, up, left and right), and a right click or Meta+K closes it. The probe's Headset fit mode (`ft-gazeprobe --mode fit`, for development) has the same check with maps: it shows, for each eye, whether the tracker has it, how open it is, and the tracker's confidence in it, and a map of where you looked coloured by how often it lost that eye there. Hints under the maps say which eye gets lost where, and what to try. Enter runs a guided check: dots around the screen, then looking down at the keyboard, up, left and right. R starts over. Adjust the headset while you watch it.
 
 Losing an eye is usually about where you look, not the tracker. On this Frame the left eye was lost 57 to 64 % of the time looking 30 to 50 degrees down (at the keyboard) and the right eye never; at screen height both were seen over 98 % of the time. Looking down, the lids come down over the eyes. That's harmless, since the gaze service ignores looks down past the screens: they show on the maps, but not in the counts or as a problem.
 
 ## Probe
+
+The probe is a development tool (in the Gaze page's overflow menu): calibration experiments, accuracy tests, and practice modes. Users calibrate and check in the headset panel instead.
 
 The trigger is Enter, Space, or a mouse button. Right-click anywhere in the window (or press the Menu key or Shift+F10) for a menu with Run calibration, Start accuracy test, Calibrate from last test, Reset calibration, the modes, the panel, fullscreen, and Quit. The buttons at the top right show and hide the panel, leave fullscreen, and quit. The arrow in the panel's title bar collapses it to just that bar, so the dot and targets behind it stay visible; the collapsed bar stays through tests. The keys do the same (Tab, C, F11, Esc), but only after you click the window once, since Frametop sends typing to the panel you clicked last. If ft-gaze stops, the probe starts it again after 3 s and shows why it stopped. Windowed mode stays on the screen it was on, and a small KWin script tells the probe where the window is, so the dot and targets are still in the right place.
 
