@@ -1161,9 +1161,13 @@ def main(argv):
                         apply()
                     except RuntimeError as e:
                         log(f"not arranged now: {e}")
+                        try:  # the screens stay put, but the profile's hidden ones still hide
+                            send_hidden(screens_socket(), layout)
+                        except RuntimeError:
+                            pass
                     else:
                         kwin_follow()
-                        open_apps(argv[2])
+                    open_apps(argv[2])  # floating windows go relative to the screens, wherever they are
                 else:
                     changes = apply_scales()
                     log("kwin: " + (" ".join(changes) if changes else "unchanged"))
