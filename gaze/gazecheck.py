@@ -2,12 +2,14 @@
 (gaze/panel/ft-gazepanel; ft-gazed runs it). Every kind is made of dots shown at head-relative
 directions: look at each one.
 
-  quick   one dot in the middle of your view. It opens DON_DELAY after the headset goes on
-          (SteamVR's eye tracking log says when), when our own tracker asks for a click (its
-          "reseat": the headset may sit differently on your face now), at most once every
-          QUICK_COOLDOWN, and on "quickcal" (Frametop Input Settings, or a mouse button or key
-          combination mapped to Gaze quick check). Ignored, it closes after QUICK_TIMEOUT and
-          changes nothing.
+  quick   one dot in the middle of your view. It opens when the headset goes on: eyes seen
+          for DON_DELAY after none for AWAY_MIN (SteamVR's tracker's variance for an eye under
+          EYE_LOST). SteamVR's "HMD on" can't say: it repeats every minute or so, and it can
+          stay on for hours with nobody in the headset. It also opens when our own tracker asks
+          for a click (its "reseat": the headset may sit differently on your face now), at most
+          once every QUICK_COOLDOWN, and on "quickcal" (Frametop Input Settings, or a mouse
+          button or key combination mapped to Gaze quick check). Ignored, it closes after
+          QUICK_TIMEOUT and changes nothing.
   five    the middle and four around it, when the first FIVE_COUNT lessons after a quick check
           were all over FIVE_LIMIT degrees off: the quick check didn't fix it.
   full    the calibration, as the gaze probe's: three rounds, dark, medium and bright (pupil
@@ -46,7 +48,7 @@ import sys
 import time
 from pathlib import Path
 
-from gazecal import DEFAULT_MODEL, STATE, steady_samples
+from gazecal import DEFAULT_MODEL, EYE_LOST, STATE, steady_samples
 
 REPO = Path(__file__).resolve().parents[1]
 PANEL_PROG = REPO / "gaze" / "build" / "ft-gazepanel"
@@ -66,7 +68,9 @@ ACCEPT_SPREAD = 2.5    # degrees: a capture asked for (calaccept) takes this muc
 DOT_TIMEOUT = 8.0      # seconds a dot of five or full waits; then it's skipped
 QUICK_TIMEOUT = 6.0
 QUICK_COOLDOWN = 120.0
-DON_DELAY = 3.0
+DON_DELAY = 3.0        # seconds of eyes after AWAY_MIN without: the headset went on
+AWAY_MIN = 3.0
+EYES_GONE = 2.0        # seconds without eyes that close a check: the headset came off
 FIVE_LIMIT = 2.0
 FIVE_COUNT = 3
 DONE_PAUSE = 0.35      # seconds the filled dot shows before the next
@@ -151,8 +155,9 @@ class Checks:
         self.gaze_heard = 0.0
         self.want_full_until = 0.0  # gaze mode came on before the tracker said whether it's calibrated
         self.last_quick = 0.0
-        self.worn_seen = svc.steam.worn()
-        self.don_at = None
+        self.seen_at = 0.0       # eyes last seen (SteamVR's tracker's variance for them, "unc")
+        self.away = True         # no eyes for AWAY_MIN: their coming back is the headset going on
+        self.back_since = None
         self.reseat_seen = False
         self.after_quick = None
         self.panel_proc = None
@@ -254,9 +259,12 @@ class Checks:
             return True
         return svc.models[svc.source].samples > 0
 
+    def eyes_seen(self, within=1.0):
+        return time.monotonic() - self.seen_at < within
+
     def can_run(self):
-        """The headset is on and the tracker is sending."""
-        return self.svc.steam.wearing() is not False and time.monotonic() - self.svc.last_sample < 2
+        """Someone's in the headset and the tracker is sending."""
+        return self.eyes_seen() and time.monotonic() - self.svc.last_sample < 2
 
     def on_gaze_on(self):
         cal = self.calibrated()
@@ -323,6 +331,11 @@ class Checks:
         c["run"], c["accept"], c["done_at"] = [], False, None
 
     def on_sample(self, s):
+        unc = (s["src"].get("mmap1") or {}).get("unc")
+        if unc and min(unc) <= EYE_LOST:
+            self.seen_at = time.monotonic()
+            if self.away and self.back_since is None:
+                self.back_since = self.seen_at
         c = self.check
         if not c or c["done_at"]:
             return
@@ -575,7 +588,7 @@ class Checks:
             else:
                 self.advance()
             return
-        if self.svc.steam.wearing() is False:
+        if not self.eyes_seen(EYES_GONE):
             self.close("the headset came off")
             return
         if c["done_at"]:
@@ -602,17 +615,13 @@ class Checks:
                 self.want_full_until = 0.0
                 if cal is False and self.gaze_on:
                     self.start("full", "gaze mode came on without a calibration")
-        worn = svc.steam.worn()
-        if worn and worn != self.worn_seen:
-            self.worn_seen = worn
-            self.don_at = worn + DON_DELAY
-        # Both wait for the tracker to send (it takes a moment after the headset goes on).
-        if self.don_at and time.time() >= self.don_at:
-            if self.can_run():
-                self.don_at = None
-                self.auto_quick("the headset went on")
-            elif time.time() > self.don_at + 20:
-                self.don_at = None
+        if not self.eyes_seen(AWAY_MIN):
+            self.away, self.back_since = True, None
+        elif self.back_since is not None and not self.eyes_seen():
+            self.back_since = None  # gone again before DON_DELAY
+        elif self.back_since is not None and now - self.back_since >= DON_DELAY:
+            self.away, self.back_since = False, None
+            self.auto_quick("the headset went on")
         if svc.kind == "own" and now - svc.own_at < 5:
             reseat = any(e.get("reseat") for e in (svc.own.get("eyes") or {}).values())
             if not reseat:
@@ -623,7 +632,7 @@ class Checks:
 
     def status(self):
         c = self.check
-        st = {"check": None, "gaze_mode": self.gaze_on, "calibrated": self.calibrated(),
+        st = {"check": None, "gaze_mode": self.gaze_on, "calibrated": self.calibrated(), "eyes": self.eyes_seen(),
               "panel": self.panel_proc is not None,
               "last_quick_s": round(time.monotonic() - self.last_quick) if self.last_quick else None}
         if c:
