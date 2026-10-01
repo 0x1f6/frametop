@@ -179,7 +179,15 @@
 // title bars, grab bars, and selections. Without gaze mode both still work from wherever the
 // pointer is.
 //   In gaze mode the mouse's left button is a gaze precision button (POINTER_GAZE_MOUSE =
-// precision, the default), or clicks at once where the pointer is (direct).
+// precision, the default), or clicks at once where the pointer is (direct). Pressing the right
+// button while the left one's press is held back clicks right there instead (correct with the
+// left, then right-click), and the left release does nothing.
+//   POINTER_GAZE_MOUSE_MOVE: held (the default) or free. Held: while the gaze has the pointer,
+// moving the mouse does nothing; it moves the pointer only during a press (as a correction,
+// like a keyboard click's head). So a bumped or drifting mouse can't pull the pointer off what
+// you're looking at, and every mouse move is a correction worth learning. With the gaze stale
+// for a second (the tracker stopped, eyes closed), in a game, or the headset off, the mouse
+// moves the pointer as usual. Free: the mouse takes the pointer whenever it moves.
 //   Keyboard clicks (the relay's gaze_left and gaze_right, Meta+J and Meta+K by default;
 // "gazekey left|right 1|0" here) work like gaze mode's mouse press, steered by the head: the
 // press stops the pointer where you look, and while the keys are held the pointer stays put in
@@ -696,6 +704,7 @@ int main() {
     // Gaze precision (see the top): POINTER_GAZE_MOUSE (precision: the mouse's left button
     // holds back its press in gaze mode; direct: it clicks at once), POINTER_ROLE.
     bool gazeMousePrecision = true;
+    bool gazeMouseHeld = true;  // POINTER_GAZE_MOUSE_MOVE (see the top)
     std::string role = "right";
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
@@ -733,6 +742,8 @@ int main() {
         typingHold = std::clamp(ConfDouble(conf, "POINTER_PINCH_TYPING", 1.0), 0.0, 5.0);
         const auto gm = conf.find("POINTER_GAZE_MOUSE");
         gazeMousePrecision = gm == conf.end() || gm->second != "direct";
+        const auto mm = conf.find("POINTER_GAZE_MOUSE_MOVE");
+        gazeMouseHeld = mm == conf.end() || mm->second != "free";
         const auto ro = conf.find("POINTER_ROLE");
         role = ro != conf.end() && (ro->second == "left" || ro->second == "stylus") ? ro->second : "right";
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
@@ -813,6 +824,8 @@ int main() {
     Clock::time_point movingSince[vr::k_unMaxTrackedDeviceCount] = {};
     // Tilt mode (see top of file).
     bool leftHeld = false, tilting = false, tiltStart = false, swallowedRight = false;
+    // Right pressed during the left's held-back press: a right click there; the left's release is then nothing.
+    bool chordRight = false;
     double tiltYaw = 0, tiltPitch = 0;
     double dragDistance = 0, lastDistance = 1.5;  // drag lock: distance from the anchor at the press
     bool onVrSettings = false;       // the cursor is on the SteamVR Settings page (kept while dragging)
@@ -980,6 +993,10 @@ int main() {
             pressLeft();
             return;
         }
+        if (chordRight) {  // it was a right click (see the top)
+            chordRight = false;
+            return;
+        }
         if (aimHeld && !aimHand) {
             aimHeld = false;
             clickPress = true;  // after this frame's pose, so it lands where the pointer was moved to
@@ -987,6 +1004,12 @@ int main() {
             return;
         }
         if (leftHeld) releaseLeft();
+    };
+    // POINTER_GAZE_MOUSE_MOVE=held (see the top): the gaze is fresh and nothing is pressed, so a
+    // mouse move doesn't move the pointer.
+    auto mouseMoveHeld = [&] {
+        return gazeOn && gazeMouseHeld && !inGame && !headsetOff && Clock::now() - gz.at < std::chrono::seconds(1) &&
+               !aimHeld && !leftHeld && !tilting && hold.src == Src::None && !clickPress && !clickRelease;
     };
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -1286,9 +1309,13 @@ int main() {
             }
             const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
                                     std::strncmp(buf, "scroll", 6) == 0;
-            if (mouseInput) lastMouse = Clock::now();
+            // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
+            // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
+            const bool moveHeldBack = std::strncmp(buf, "move", 4) == 0 && mouseMoveHeld();
+            if (mouseInput && !moveHeldBack) lastMouse = Clock::now();
             // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
             if (!active && mouseInput) wake(Clock::now());
+            if (moveHeldBack) continue;
             double a, b;
             char key[128];
             double px, py, pz, pyaw, ppitch, proll = 0, pgrab = -1;
@@ -1336,6 +1363,14 @@ int main() {
                 continue;
             } else if (std::strncmp(buf, "btn trigger 0", 13) == 0) {
                 leftButton(false);
+                continue;
+            } else if (std::strncmp(buf, "btn b 1", 7) == 0 && aimHeld && !aimHand) {
+                // Right during the left's held-back press: a right click where the pointer is now,
+                // the correction a lesson as with the left (see the top).
+                aimHeld = false;
+                pressRight = clickPress = true;
+                gazeBack = nudgeMoved < 0.2;
+                chordRight = swallowedRight = true;  // both releases are nothing
                 continue;
             } else if (std::strncmp(buf, "btn b 1", 7) == 0 && leftHeld) {
                 tilting = tiltStart = swallowedRight = true;  // right press while dragging: tilt, no right-click

@@ -833,6 +833,18 @@ class Backend(QObject):
             self.message.emit(f"Mouse in gaze mode: {GAZE_MOUSE[mode].lower()}", False)
 
     @Property(bool, notify=pointerChanged)
+    def gazeMouseHeld(self):
+        return read_conf().get("POINTER_GAZE_MOUSE_MOVE", "held") != "free"
+
+    @Slot(bool)
+    def setGazeMouseHeld(self, on):
+        write_conf_value("POINTER_GAZE_MOUSE_MOVE", "held" if on else "free")
+        self.reload_timer.start()
+        self.pointerChanged.emit()
+        self.message.emit("Mouse in gaze mode: " + ("moves the pointer only while a button is held" if on
+                                                    else "moves the pointer any time"), False)
+
+    @Property(bool, notify=pointerChanged)
     def gazeDotAlways(self):
         return read_conf().get("POINTER_GAZE_DOT", "always") != "moving"
 

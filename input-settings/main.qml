@@ -891,6 +891,30 @@ Kirigami.ApplicationWindow {
                     }
                 }
                 Controls.Switch {
+                    Kirigami.FormData.label: "Mouse movement:"
+                    text: "Only while a button is held (recommended)"
+                    checked: backend.gazeMouseHeld
+                    onToggled: backend.setGazeMouseHeld(checked)
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    text: backend.gazeMouseHeld
+                          ? "Your eyes move the pointer, so moving the mouse on its own does nothing. To fix a click "
+                            + "that's a little off, press and hold the left button: the pointer stops where you're "
+                            + "looking. Move the mouse onto what you meant and let go to click there, or press the "
+                            + "right button instead to right-click there. It's on because a bumped or drifting mouse "
+                            + "can't pull the pointer away from where you're looking, and every mouse move is a real "
+                            + "correction, which the eye tracker learns from to get more accurate. If the eye "
+                            + "tracker stops (the headset is off, or it lost your eyes), the mouse moves the "
+                            + "pointer as usual."
+                          : "The mouse moves the pointer any time, as without gaze; looking well away hands the "
+                            + "pointer back to your eyes. Mouse moves that weren't corrections can teach the eye "
+                            + "tracker the wrong thing, so it may get less accurate."
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
+                }
+                Controls.Switch {
                     Kirigami.FormData.label: "Gaze dot:"
                     text: "Always shown (off: only while the mouse moves it)"
                     checked: backend.gazeDotAlways
