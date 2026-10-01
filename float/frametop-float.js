@@ -48,11 +48,20 @@ function info(w) {
         frame: rect(w.frameGeometry), client: rect(w.clientGeometry), popup: w.popupWindow,
         transient: w.transient, parent: w.transientFor ? String(w.transientFor.internalId) : "",
         normal: w.normalWindow, dialog: w.dialog, fullScreen: w.fullScreen, minimized: w.minimized,
-        onAllDesktops: w.onAllDesktops, maximized: w.maximizeMode === 3
+        onAllDesktops: w.onAllDesktops, maximized: isMaximized(w)
     };
 }
 
+// KWin 6.2's scripts have no maximize mode to read: a window is maximized when it fills its
+// output's maximize area.
+function isMaximized(w) {
+    if (!w.normalWindow || !w.output) return false;
+    const a = workspace.clientArea(KWin.MaximizeArea, w), g = w.frameGeometry;
+    return g.x === a.x && g.y === a.y && g.width === a.width && g.height === a.height;
+}
+
 function report(type, w) {
+    if (w.deleted) return;  // a window on its way out still changes output and size
     const ev = info(w);
     ev.ev = type;
     send(ev);
