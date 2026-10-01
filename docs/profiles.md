@@ -1,6 +1,6 @@
 # Profiles (plan)
 
-Status: design settled with the user on 2026-09-30, and built the same day on the branch `profiles`, which builds on `screen-hide` (screens hidden one at a time). Tested offline: saving, renaming, and deleting profiles with their launcher entries, against a stand-in ft-floatd. Still to try on the desktop: capturing and opening real apps, and starting the desktop in a profile.
+Status: design settled with the user on 2026-09-30, and built the same day on the branch `profiles`, which builds on `screen-hide` (screens hidden one at a time). Tried on the live desktop the same day (headset off). A profile with a maximized Dolphin on screen 1, a floating Konsole, and screen 3 hidden saved correctly. Opened from nothing, it launched both into place. Opened over moved windows, it moved them back without launching anything. `ft-layout start` with `FT_PROFILE` and `ft-layout open` worked as well. Not yet tried: starting the desktop in a profile from its launcher entry or `default_profile` (needs a desktop restart), and the relay's `profile:NAME` action (the running relay is another branch's).
 
 A profile is a named layout that also opens apps. It holds:
 

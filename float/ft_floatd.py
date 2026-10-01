@@ -280,6 +280,7 @@ class Daemon:
         self.slots = [Slot(k, args.screens) for k in range(args.slots)]
         self.floats = {}         # window id -> Float
         self.windows = {}        # window id -> last info from the script
+        self.gone = set()        # ids of windows that closed (KWin's ids aren't reused)
         self.pending = []        # commands for the script
         self.waiter = None       # (reply callback, timeout source) while the script waits
         self.screens = Screens(args.control)
@@ -354,7 +355,10 @@ class Daemon:
             # The script reports every window after "config"; spares nothing floats on are off.
             GLib.timeout_add(1500, self.disable_unused)
             return
+        if wid in self.gone:
+            return  # an event that came after the window closed (it would bring it back)
         if kind == "removed":
+            self.gone.add(wid)
             self.windows.pop(wid, None)
             if wid in self.floats:
                 log(f"{wid[:9]} closed")
@@ -639,7 +643,18 @@ class Daemon:
         saved = f.saved or {"output": "WL-0", "frame": dict(f.frame or {"x": 100, "y": 100, "w": 800, "h": 600}),
                             "onAllDesktops": False}
         fr = frame or saved["frame"]
-        output = output or saved["output"]
+        if not output:
+            output = saved["output"]
+            m = re.match(r"WL-(\d+)$", output)
+            hidden = self.concealed()
+            if m and int(m.group(1)) + 1 in hidden:
+                # It came from a screen that's hidden now: onto the first one that shows.
+                shown = [i for i in range(self.screens_n) if i + 1 not in hidden]
+                if shown:
+                    x0, y0, ow, oh = output_rects().get(f"WL-{shown[0]}", (0, 0, 0, 0))
+                    output = f"WL-{shown[0]}"
+                    w, h = min(fr["w"], ow or fr["w"]), min(fr["h"], oh or fr["h"])
+                    fr = {"x": x0 + max(0, (ow - w) / 2), "y": y0 + max(0, (oh - h) / 2), "w": w, "h": h}
         log(f"{f.id[:9]} back to {output}")
         self.command(cmd="place", id=f.id, output=output, x=fr["x"], y=fr["y"], w=fr["w"], h=fr["h"],
                      onAllDesktops=bool(saved.get("onAllDesktops")), maximized=maximized)
