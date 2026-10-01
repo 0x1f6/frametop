@@ -842,9 +842,11 @@ Kirigami.ApplicationWindow {
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 30
                     wrapMode: Text.WordWrap
-                    text: "Gaze works with the mouse. The Frame controllers don't take part, and moving one hands the "
-                          + "pointer back to the controllers. Gaze pointer on/off, Gaze precision, and Gaze drag can go on "
-                          + "a mouse button (Buttons page) or a key combination below."
+                    text: "Gaze works with the mouse and the keyboard. Keyboard clicks (Meta+J left, Meta+K right by "
+                          + "default): tap to click where you look, or hold, turn your head until the dot sits on the "
+                          + "target, and let go; hold still to drag. The Frame controllers don't take part, and moving "
+                          + "one hands the pointer back to them. Gaze pointer on/off, Gaze precision, and Gaze drag can "
+                          + "also go on a mouse button (Buttons page)."
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }

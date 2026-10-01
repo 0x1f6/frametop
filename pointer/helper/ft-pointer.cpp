@@ -175,6 +175,18 @@
 // pointer is.
 //   In gaze mode the mouse's left button is a gaze precision button (POINTER_GAZE_MOUSE =
 // precision, the default), or clicks at once where the pointer is (direct).
+//   Keyboard clicks (the relay's gaze_left and gaze_right, Meta+J and Meta+K by default;
+// "gazekey left|right 1|0" here) work like gaze mode's mouse press, steered by the head: the
+// press stops the pointer where you look, and while the keys are held the pointer stays put in
+// your view, so turning your head carries it onto what you meant (past
+// POINTER_HEAD_DEADZONE, 0.5 deg, so a still head doesn't wobble it). The release clicks there
+// (left, or right for gaze_right), and a correction is a lesson for the gaze tracker, as with
+// the mouse. Held still for POINTER_GAZE_HOLD instead, it's a real press, and the head drags.
+// A quick tap (let go within POINTER_KEY_TAP, 0.25 s) clicks where the dot was at the press,
+// whatever the head did meanwhile, and tells the gaze tracker it was right there (a lesson
+// with no correction). Pressing gaze_right while gaze_left aims (Meta+K with Meta+J held)
+// presses the left button where the dot is now, so you can correct first and then drag; the
+// first key let go drops it. Without gaze mode they work from wherever the pointer is.
 //   POINTER_ROLE (right, left, or stylus): the hand role our device takes while connected. A
 // Frame controller in your hand counts as used through its touch sensors and takes its hand's
 // role back, and then no click lands (see "no hand role" in the main loop): with a controller
@@ -257,7 +269,8 @@
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
 // POINTER_HANDS (0), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
 // POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.35 m), POINTER_PINCH_TYPING (1 s): hands, above.
-// POINTER_GAZE_MOUSE (precision), POINTER_ROLE (right): gaze precision, above.
+// POINTER_GAZE_MOUSE (precision), POINTER_HEAD_DEADZONE (0.5 deg), POINTER_KEY_TAP (0.25 s),
+// POINTER_ROLE (right): gaze precision and keyboard clicks, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -666,6 +679,7 @@ int main() {
     bool gazeOn = false, gazeConf = false;
     double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
     bool gazeDotAlways = true;  // POINTER_GAZE_DOT (see the top)
+    double headDeadzone = 0.5, keyTap = 0.25;  // POINTER_HEAD_DEADZONE, POINTER_KEY_TAP (keyboard clicks, see the top)
     // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
     bool handsOn = false;
     double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, handBelow = 0.35, typingHold = 1.0;
@@ -695,6 +709,8 @@ int main() {
         gazeNudgeMax = std::clamp(ConfDouble(conf, "POINTER_GAZE_NUDGE_MAX", 8), 1.0, 30.0);
         gazeHold = std::clamp(ConfDouble(conf, "POINTER_GAZE_HOLD", 0.5), 0.1, 5.0);
         gazeShow = std::clamp(ConfDouble(conf, "POINTER_GAZE_SHOW", 1), 0.0, 30.0);
+        headDeadzone = std::clamp(ConfDouble(conf, "POINTER_HEAD_DEADZONE", 0.5), 0.0, 5.0);
+        keyTap = std::clamp(ConfDouble(conf, "POINTER_KEY_TAP", 0.25), 0.0, 1.0);
         const auto gd = conf.find("POINTER_GAZE_DOT");
         gazeDotAlways = gd == conf.end() || gd->second != "moving";
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
@@ -844,13 +860,17 @@ int main() {
     // hand: seen from the eye then, in the room), and the pointer then.
     HandGestures handFile;
     PoseHistory poses;
-    enum class Src { None, Hand, Mouse };
+    enum class Src { None, Hand, Mouse, Head };
     struct Hold {
         Src src = Src::None;
         int side = -1;          // a hand's side (0 left, 1 right)
         bool grip = false;      // pressed at once and dragging (a grip, gaze drag), not a click on release
         bool engaged = false;   // past the dead zone
         bool pressed = false;   // a real press went out (a grip or gaze drag, or a pinch without gaze mode)
+        bool promote = false;   // held still for POINTER_GAZE_HOLD, it becomes a real press (keyboard clicks)
+        bool right = false;     // the right button (gaze_right)
+        bool keyDrag = false;   // gaze_right pressed while gaze_left aimed: a left press, either key ends it
+        double pressYaw = 0, pressPitch = 0;  // the pointer at the press (a quick tap clicks there)
         Vec3 origin;
         double refYaw = 0, refPitch = 0, startYaw = 0, startPitch = 0, lastYaw = 0, lastPitch = 0;
     } hold;
@@ -860,6 +880,11 @@ int main() {
         bool drag, down;
     };
     std::vector<DevicePress> devicePresses;
+    // "gazekey left|right 1|0" from the relay (keyboard clicks), done in the frame.
+    struct KeyPress {
+        bool right, down;
+    };
+    std::vector<KeyPress> keyPresses;
     uint32_t seenBegins[2][2] = {}, seenEnds[2][2] = {};  // [pinch, grip][side], as last read
     bool handBaseline = false;
     int handOpens = 0;
@@ -870,14 +895,18 @@ int main() {
     bool inGame = false, gazeAwake = false;
     Clock::time_point inGameAt{}, gazeAwakeAt{};
     Clock::time_point lastMove{}, lastHeld{}, pulseAt{};
-    // The left button, as sent to the driver.
+    // The left button, as sent to the driver; pressRight: the next press is the right button
+    // instead (gaze_right), heldButton: the one pressed.
+    bool pressRight = false;
+    std::string heldButton = "trigger";
+    bool confirmLesson = false;  // a keyboard click's quick tap: a lesson with no correction (see the top)
     auto pressLeft = [&] {
         // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
         // its own screens, but only we know when one lands on another panel.
         SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
         // A click after nudging the gaze-placed pointer: the nudge is a lesson (see the top).
         if (gazeOn && nudging && !gazeOwns && havePoint && Clock::now() - nudgeAt < std::chrono::seconds(10) &&
-            nudgeMoved >= 0.2 && nudgeMoved <= gazeNudgeMax) {
+            (confirmLesson || (nudgeMoved >= 0.2 && nudgeMoved <= gazeNudgeMax))) {
             const Vec3 d = RotateInverse(nudgeHead, Normalize(lastPoint - Position(nudgeHead)));
             char msg[160];
             std::snprintf(msg, sizeof msg, "lesson %.3f %.3f %.3f %.3f", nudgeRawHy, nudgeRawHp,
@@ -886,7 +915,7 @@ int main() {
             if (debug) std::printf("gaze %s (nudged %.2f deg)\n", msg, nudgeMoved);
             if (debug) std::fflush(stdout);
         }
-        nudging = false;
+        nudging = confirmLesson = false;
         leftHeld = true;
         dragDistance = lastDistance;
         pressKey.clear();
@@ -900,14 +929,16 @@ int main() {
         tiltYaw = tiltPitch = 0;  // a new drag starts untilted
         dropHoldUntil = {};
         pulseAt = Clock::now();
-        SendTo(out, "ft_pointer", "btn trigger 1");
+        heldButton = pressRight ? "b" : "trigger";
+        pressRight = false;
+        SendTo(out, "ft_pointer", "btn " + heldButton + " 1");
     };
     auto releaseLeft = [&] {
         leftHeld = false;
         tilting = false;
         // Hold the drag pose (tilt, frozen distance) while SteamVR finishes the drop.
         dropHoldUntil = Clock::now() + std::chrono::milliseconds(500);
-        SendTo(out, "ft_pointer", "btn trigger 0");
+        SendTo(out, "ft_pointer", "btn " + heldButton + " 0");
         // ft-screens releases a button held on its screens in KWin even when SteamVR hands
         // the release to some other overlay (its catcher usually gets it; this is the backstop).
         SendTo(out, "ft_screens", "up");
@@ -1165,6 +1196,13 @@ int main() {
                     lastMouse = Clock::now();
                     if (!active) wake(Clock::now());
                     devicePresses.push_back({source, !std::strcmp(kind, "gazedrag"), v != 0});
+                    continue;
+                }
+                if (std::sscanf(buf, "gazekey %15s %d", source, &v) == 2 &&
+                    (!std::strcmp(source, "left") || !std::strcmp(source, "right"))) {
+                    lastMouse = Clock::now();
+                    if (!active) wake(Clock::now());
+                    keyPresses.push_back({!std::strcmp(source, "right"), v != 0});
                     continue;
                 }
             }
@@ -1454,11 +1492,14 @@ int main() {
                     if (gazeOn) gazeOwns = true, nudging = false;  // no click: the pointer goes back to the gaze
                 } else {
                     clickPress = true;  // the click is on the release, where the pointer is now
+                    pressRight = hold.right;
                     gazeBack = nudgeMoved < 0.2;
                 }
             }
             if (debug)
-                std::printf("hold %s %s%s\n", hold.src == Src::Hand ? (hold.grip ? "grip" : "pinch") : hold.grip ? "gaze drag" : "gaze precision",
+                std::printf("hold %s %s%s\n", hold.src == Src::Hand ? (hold.grip ? "grip" : "pinch")
+                                              : hold.src == Src::Head ? (hold.right ? "key right" : "key left")
+                                              : hold.grip ? "gaze drag" : "gaze precision",
                             lost ? "lost" : "released", hold.pressed ? "" : lost ? " (no click)" : " (click)");
             if (debug) std::fflush(stdout);
             hold = {};
@@ -1493,7 +1534,12 @@ int main() {
             }
             yaw = std::remainder(hold.startYaw + gain * dy, 360.0);
             pitch = std::clamp(hold.startPitch + gain * dp, -85.0, 85.0);
-            if (!hold.pressed) nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
+            // How far the nudge went: for a keyboard click, from where the dot was at the press
+            // (a head wobbles on the way); otherwise the path, as with the mouse.
+            if (!hold.pressed && hold.src == Src::Head)
+                nudgeMoved = std::hypot(std::remainder(yaw - hold.pressYaw, 360.0), pitch - hold.pressPitch);
+            else if (!hold.pressed)
+                nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
             hold.lastYaw = yaw, hold.lastPitch = pitch;
             lastMove = tnow;  // the dot shows while it moves (gaze mode)
         };
@@ -1551,6 +1597,54 @@ int main() {
             if (debug) std::fflush(stdout);
         }
         devicePresses.clear();
+        // Keyboard clicks (see the top): held back at the gaze, steered by the head.
+        auto headAngles = [&](double &hy, double &hp) {
+            if (!hmd.bPoseIsValid) return false;
+            const Vec3 f = Normalize({-hm[0][2], -hm[1][2], -hm[2][2]});
+            hy = std::atan2(-f.x, -f.z) * 180 / M_PI;
+            hp = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
+            return true;
+        };
+        for (const KeyPress &k : keyPresses) {
+            if (!k.down) {
+                if (hold.src == Src::Head && (hold.right == k.right || hold.keyDrag)) {
+                    if (!hold.pressed && aimHeld && tnow - aimSince < std::chrono::duration<double>(keyTap)) {
+                        // A quick tap: a click where the dot was at the press, and the gaze was right.
+                        yaw = hold.pressYaw, pitch = hold.pressPitch;
+                        nudgeMoved = 0;
+                        confirmLesson = true;
+                    }
+                    endHold(false);
+                }
+                continue;
+            }
+            if (k.right && hold.src == Src::Head && !hold.right && !hold.pressed && aimHeld) {
+                // gaze_right while gaze_left aims: press the left button where the dot is now
+                // (the correction is a lesson), then the head drags.
+                aimHeld = aimHand = false;
+                hold.pressed = hold.grip = hold.keyDrag = true, hold.promote = false, hold.engaged = false;
+                headAngles(hold.refYaw, hold.refPitch);
+                gazeBack = gazeOn;
+                pressRight = false;
+                pressLeft();
+                if (debug) std::printf("hold key left: pressed (right key)\n");
+                if (debug) std::fflush(stdout);
+                continue;
+            }
+            if (hold.src != Src::None || leftHeld || aimHeld || clickPress || clickRelease) continue;
+            Hold h;
+            h.src = Src::Head, h.promote = true, h.right = k.right, h.pressYaw = yaw, h.pressPitch = pitch;
+            if (!headAngles(h.refYaw, h.refPitch)) continue;
+            hold = h;
+            startHold(false);
+            if (debug) std::printf("hold key %s began\n", k.right ? "right" : "left");
+            if (debug) std::fflush(stdout);
+        }
+        keyPresses.clear();
+        if (hold.src == Src::Head) {
+            double hy, hp;
+            if (headAngles(hy, hp)) steer(hy, hp, hold.pressed ? 0.3 : headDeadzone, 1.0);
+        }
         fh_gestures_t hg;
         const bool handOk = handsOn && handFile.Read(hg);
         if (handOk && (hg.seq != handSeq || handFile.opens != handOpens)) {
@@ -1950,6 +2044,23 @@ int main() {
             aimHeld = false;
             gazeBack = true;
             pressLeft();
+        }
+        // A keyboard click held still for POINTER_GAZE_HOLD: a real press, then the head drags
+        // (from where it is now).
+        if (aimHeld && aimHand && hold.promote && !hold.engaged &&
+            tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
+            aimHeld = aimHand = false;
+            hold.pressed = hold.grip = true;
+            if (hmd.bPoseIsValid) {
+                const Vec3 f = Normalize({-hm[0][2], -hm[1][2], -hm[2][2]});
+                hold.refYaw = std::atan2(-f.x, -f.z) * 180 / M_PI;
+                hold.refPitch = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
+            }
+            gazeBack = gazeOn;
+            pressRight = hold.right;
+            pressLeft();
+            if (debug) std::printf("hold key %s: pressed (held still)\n", hold.right ? "right" : "left");
+            if (debug) std::fflush(stdout);
         }
         if (clickPress) {
             clickPress = false;

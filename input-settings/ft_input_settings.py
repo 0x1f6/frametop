@@ -62,6 +62,9 @@ ACTION_LABELS = {
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
     "gaze_precision": "Gaze precision: hold to steer, release to click",
     "gaze_drag": "Gaze drag: press where you look, steer, release",
+    "gaze_left": "Gaze left click: tap, or hold and turn your head to aim",
+    "gaze_right": "Gaze right click: tap, or hold and turn your head to aim",
+    "gaze_quickcal": "Gaze quick check (one dot)",
     "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
@@ -87,8 +90,14 @@ CONTROLLER_BUTTONS = {
     "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
     "right/thumbstick": "Right stick click",
 }
-# Not the gaze actions: gaze mode is a mouse feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
-CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none", "gaze_toggle", "gaze_precision", "gaze_drag")]
+# Gaze mode is a mouse and keyboard feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
+GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
+CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none") + GAZE_ACTIONS]
+# Key combinations take any action but key and none; the keyboard clicks only work there.
+SHORTCUT_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none")]
+KEYBOARD_ONLY = ("gaze_left", "gaze_right")
+# The relay's DEFAULT_KEY_BINDINGS: used while the rules file has no "key_bindings" (Meta+J, Meta+K).
+DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right"}
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
@@ -469,7 +478,7 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def actions(self):
-        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items()]
+        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items() if k not in KEYBOARD_ONLY]
 
     @Slot(str, result="QVariantList")
     def mappings(self, device_id):
@@ -842,13 +851,19 @@ class Backend(QObject):
 
     @Property("QVariantList", notify=mappingsChanged)
     def keyShortcuts(self):
-        bound = read_json(RULES_PATH).get("key_bindings", {}) or {}
+        bound = self._key_bindings(read_json(RULES_PATH))
         return [{"combo": c, "label": self.comboName(c), "action": a, "actionLabel": ACTION_LABELS.get(a, a)}
                 for c, a in sorted(bound.items())]
 
     @Property("QVariantList", constant=True)
     def shortcutActions(self):
-        return [{"value": a, "text": ACTION_LABELS[a]} for a in CONTROLLER_ACTIONS]
+        return [{"value": a, "text": ACTION_LABELS[a]} for a in SHORTCUT_ACTIONS]
+
+    @staticmethod
+    def _key_bindings(rules):
+        """The key combinations in effect: the defaults until the rules file has its own."""
+        bound = rules.get("key_bindings")
+        return dict(DEFAULT_KEY_BINDINGS) if bound is None else bound
 
     @Property(bool, notify=shortcutCaptureChanged)
     def capturingShortcut(self):
@@ -856,7 +871,7 @@ class Backend(QObject):
 
     @Slot(str)
     def startShortcutCapture(self, action):
-        if action in CONTROLLER_ACTIONS:
+        if action in SHORTCUT_ACTIONS:
             self._capture_combo = action
             self._combo_mods = set()
             self._send("watch 60")
@@ -869,14 +884,16 @@ class Backend(QObject):
 
     def _save_shortcut(self, combo, action):
         rules = read_json(RULES_PATH)
-        rules.setdefault("key_bindings", {})[combo] = action
+        rules["key_bindings"] = self._key_bindings(rules)  # the defaults stay when the first one is added
+        rules["key_bindings"][combo] = action
         self._save_rules(rules)
         self.message.emit(f"{self.comboName(combo)} → {ACTION_LABELS[action]}", False)
 
     @Slot(str)
     def removeShortcut(self, combo):
         rules = read_json(RULES_PATH)
-        (rules.get("key_bindings") or {}).pop(combo, None)
+        rules["key_bindings"] = self._key_bindings(rules)
+        rules["key_bindings"].pop(combo, None)
         self._save_rules(rules)
         self.message.emit(f"{self.comboName(combo)} removed", False)
 
