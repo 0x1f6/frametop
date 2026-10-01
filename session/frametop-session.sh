@@ -196,6 +196,14 @@ else
   rm -f "$autostart"
 fi
 
+# Launch as Standalone in every app's right-click menu (float/ft_apps.py): copies of the
+# apps' desktop files with that action, first in XDG_DATA_DIRS, so only this desktop sees
+# them. Written now, before Plasma reads them; ft-floatd keeps them up to date.
+if [ "$float_slots" -gt 0 ]; then
+  python3 "$here/../float/ft_apps.py" >/dev/null 2>&1 || true
+  export XDG_DATA_DIRS=$HOME/.local/share/frametop/apps:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+fi
+
 # With floating windows, the session's windows get Frametop's own decoration: Breeze's look
 # plus a float button left of Close (decoration/, a QML decoration KWin's Aurorae engine
 # loads; docs/floating-windows.md). It's copied, not linked: KPackage doesn't list linked

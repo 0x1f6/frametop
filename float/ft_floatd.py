@@ -12,6 +12,7 @@ which window floats on which spare output and panel, and connects three parts:
 Commands and ft-screens' events arrive as datagrams on @frametop_float (ft-float is the
 command-line side). Replies go to the sender:
   float [ID|active|pointer]   dock [ID|active|all]   close ID   list   quit   (ft-float)
+  launch APP.desktop   run ["argv", ...]   (start an app and float its first window)
   ("float pointer" is the float key: the window under the pointer, else the active one,
   floated or docked; the input relay sends it for float_toggle, and "dock all" for dock_all)
   dock N | close N | resize N W H | scale N STEPS                      (ft-screens, N = its screen)
@@ -24,6 +25,17 @@ layout, all within Xwayland's 32767-pixel limit.
 Usage: ft-floatd [--screens N] [--slots N] [--margin PX] [--control NAME] [--socket NAME]
 Defaults: FT_SCREEN_COUNT (from the session) or the layout's count, FLOAT_SLOTS and
 FLOAT_MARGIN from ~/.config/frametop.conf (8 and 300), @ft_screens, @frametop_float.
+
+Launching floating: "launch" starts a desktop file's app (Gio), "run" a command. The next
+normal window from that process (or a child), or with that desktop file name, within
+LAUNCH_SECONDS floats: where that app last floated, or in front of you. Single-instance and
+D-Bus-activated apps open their window from a process that was already running, hence the
+name. Each app's last floating place (its pose relative to the primary screen, so it moves
+with the screens' layout), size in pixels, and scale are kept in PLACES_PATH, by desktop
+file name, whenever one of its windows stops floating.
+
+Launch as Standalone (float/ft_apps.py): copies of the apps' desktop files with that action,
+which only the Frametop desktop reads. ft-floatd rewrites them when apps change.
 """
 import argparse
 import json
@@ -38,11 +50,12 @@ import time
 import dbus
 import dbus.mainloop.glib
 import dbus.service
-from gi.repository import GLib
+from gi.repository import Gio, GLib
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "layout"))
 import ft_layout  # noqa: E402  (config and layout)
+import ft_apps  # noqa: E402  (Launch as Standalone)
 
 SERVICE = IFACE = "org.frametop.Float"
 PATH = "/Float"
@@ -51,6 +64,9 @@ POLL_SECONDS = 20        # NextCommand answers empty after this (KWin's D-Bus ti
 SPARE_X, SPARE_CELL = 12000, 5000  # spares in KWin's layout: a grid from here, 4 across
 PULL_OUT = 0.3           # a floated window starts this far in front of its screen (metres), clear of it
 DEFAULT_MPP = 1.6 / 1920  # metres per pixel when ft-screens can't say (no SteamVR)
+PLACES_PATH = os.path.expanduser("~/.config/frametop-float.json")  # each app's last floating place
+LAUNCH_SECONDS = 30      # a launched app's window must show up within this
+IN_FRONT = 2.0           # at most this far in front of you, for an app with no remembered place
 DEBUG = os.environ.get("FT_FLOAT_DEBUG") == "1"  # log every event from the script
 
 
@@ -118,6 +134,66 @@ def output_scales():
     return {o["name"]: float(o.get("scale", 1)) for o in data.get("outputs", []) if o.get("name")}
 
 
+def load_places():
+    try:
+        with open(PLACES_PATH) as f:
+            places = json.load(f)
+        return places if isinstance(places, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_places(places):
+    tmp = PLACES_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(places, f, indent=1)
+    os.replace(tmp, PLACES_PATH)
+
+
+def to_local(ref, g):
+    """A panel's pose (ft_layout.parse_get) in the frame of another panel (ref): its centre
+    and axes, 12 numbers."""
+    axes = (ref["x"], ref["y"], ref["z"])
+    d = [g["center"][k] - ref["center"][k] for k in range(3)]
+    out = [ft_layout.dot(d, a) for a in axes]
+    for v in (g["x"], g["y"], g["z"]):
+        out += [ft_layout.dot(v, a) for a in axes]
+    return [round(v, 5) for v in out]
+
+
+def to_world(ref, local):
+    """to_local's inverse: (centre, x, y, z) in the world."""
+    axes = (ref["x"], ref["y"], ref["z"])
+
+    def turn(v):
+        return [sum(v[i] * axes[i][k] for i in range(3)) for k in range(3)]
+    c = turn(local[0:3])
+    c = [c[k] + ref["center"][k] for k in range(3)]
+    return c, turn(local[3:6]), turn(local[6:9]), turn(local[9:12])
+
+
+def pid_chain(pid):
+    """A process and its ancestors, nearest first."""
+    out = []
+    while pid > 1 and len(out) < 32:
+        out.append(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return out
+
+
+class Launch:
+    """An app we started, whose first window floats."""
+
+    def __init__(self, app, pid):
+        self.app = app            # its desktop file name, without .desktop ("" for a command)
+        self.pid = pid            # the process we started (None when D-Bus started it)
+        self.until = time.monotonic() + LAUNCH_SECONDS
+
+
 class Float:
     """A floating window."""
 
@@ -134,6 +210,7 @@ class Float:
         self.unfull_until = 0.0   # left full screen just now (see follow)
         self.move_from = None     # frame when a title-bar move started (put back after)
         self.subs = {}            # popup or dialog id -> number on the panel
+        self.app = ""             # its desktop file name (for its remembered place)
 
 
 class Slot:
@@ -160,6 +237,8 @@ class Daemon:
         self.screens = Screens(args.control)
         self.sub_numbers = {}    # popup/dialog id -> (window id, number)
         self.next_sub = 1
+        self.launches = []       # Launch: apps we started, waiting for their window
+        self.places = load_places()  # app -> {"rel": pose by the primary screen, "pixels", "scale"}
 
     # ------------------------------------------------------------ the script
 
@@ -234,6 +313,11 @@ class Daemon:
         if wid:
             self.windows[wid] = ev
         f = self.floats.get(wid)
+        if kind == "added" and self.launches and not f:
+            launch = self.launched(ev)
+            if launch:
+                self.float_launched(ev, launch)
+                return
         if kind == "float-request":
             self.float_window(ev)
         elif kind == "dock-request":
@@ -352,23 +436,26 @@ class Daemon:
                     return float(metres) / max(1, int(size.split("x")[0]))
         return DEFAULT_MPP
 
-    def float_window(self, ev):
+    def float_window(self, ev, place=None, mpp=None):
+        """Float a window: its panel in front of where it was on its screen, or at place (centre
+        and axes in the world), at the density of its screen, or mpp. Returns its Float."""
         wid = ev["id"]
         if wid in self.floats:
-            return
+            return self.floats[wid]
         slot = self.free_slot()
         if slot is None:
             self.command(cmd="mark", id=wid)  # the title bar button set keep-below for nothing
             self.notify(f"All {len(self.slots)} floating windows are in use. Put one back on the desktop "
                         "to float another.")
-            return
+            return None
         f = Float(wid, slot, {"output": ev["output"], "frame": ev["frame"], "onAllDesktops": ev.get("onAllDesktops")})
+        f.app = ev.get("app", "")
         slot.window = f
         self.floats[wid] = f
         scales = output_scales()
         f.scale = scales.get(ev["output"], 1.0)
         slot.kscale = scales.get(slot.output, slot.kscale)
-        f.mpp = self.screen_mpp(ev["output"])
+        f.mpp = mpp or self.screen_mpp(ev["output"])
         fr, s, m = ev["frame"], f.scale, self.margin
         w, h = round(fr["w"] * s), round(fr["h"] * s)
         log(f"{wid[:9]} ({ev.get('cls')}) floats on {slot.output}: {w}x{h} px, scale {s:g}")
@@ -379,12 +466,20 @@ class Daemon:
         self.set_size(slot, (w + 2 * m, h + 2 * m), whole(slot.kscale, s))
         self.screens.ask(f"scale {slot.index} {s:g}")  # for pointer positions (KWin's units)
         self.set_panel(f, (m, m, w, h), title=round((ev["client"]["y"] - fr["y"]) * s))
-        self.place_panel(f, ev)
+        if place:
+            self.pose(f, *place)
+        else:
+            self.place_panel(f, ev)
         kscreen(f"output.{slot.output}.enable", f"output.{slot.output}.scale.{s:g}",
                 f"output.{slot.output}.position.{slot.pos[0]},{slot.pos[1]}")
         self.rescaled(slot, s)
         self.command(cmd="place", id=wid, output=slot.output, x=slot.pos[0] + m / s, y=slot.pos[1] + m / s,
                      w=fr["w"], h=fr["h"], onAllDesktops=True)
+        return f
+
+    def pose(self, f, c, xa, ya, za):
+        rows = [f"{xa[k]:.5f} {ya[k]:.5f} {za[k]:.5f} {c[k]:.4f}" for k in range(3)]
+        self.screens.ask(f"pose {f.slot.index} {' '.join(rows)}")
 
     def set_panel(self, f, crop, title=0):
         x, y, w, h = crop
@@ -403,8 +498,7 @@ class Daemon:
         dx = ((fr["x"] - out["x"]) + fr["w"] / 2 - out["w"] / 2) * s * f.mpp
         dy = ((fr["y"] - out["y"]) + fr["h"] / 2 - out["h"] / 2) * s * f.mpp
         p = [c[k] + xa[k] * dx - ya[k] * dy + za[k] * PULL_OUT for k in range(3)]
-        rows = [f"{xa[k]:.5f} {ya[k]:.5f} {za[k]:.5f} {p[k]:.4f}" for k in range(3)]
-        self.screens.ask(f"pose {f.slot.index} {' '.join(rows)}")
+        self.pose(f, p, xa, ya, za)
 
     def follow(self, f, ev):
         """The window moved or resized on its output: crop the panel to it, and keep the
@@ -437,8 +531,12 @@ class Daemon:
         panel stays the same size (KWin's output scale, in steps of 10%)."""
         if not f.frame or f.full or steps == 0:
             return
-        s = min(3.0, max(0.5, round(f.scale * 1.1 ** steps * 20) / 20))
-        if s == f.scale:
+        self.set_scale(f, round(f.scale * 1.1 ** steps * 20) / 20)
+
+    def set_scale(self, f, s):
+        """The window's scale (KWin's output scale), at the same size in pixels."""
+        s = min(3.0, max(0.5, s))
+        if not f.frame or f.full or s == f.scale or self.floats.get(f.id) is not f:
             return
         w, h = round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale)
         slot, m = f.slot, self.margin
@@ -473,8 +571,24 @@ class Daemon:
         self.command(cmd="place", id=f.id, output=saved["output"], x=fr["x"], y=fr["y"], w=fr["w"], h=fr["h"],
                      onAllDesktops=bool(saved.get("onAllDesktops")))
 
+    def remember(self, f):
+        """Keep where an app's window floated (before its panel goes)."""
+        if not f.app or not f.frame:
+            return
+        g, ref = self.panel_get(f.slot.index), self.reference()
+        if not g or not ref:
+            return
+        pixels = list(f.normal or (round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale)))
+        self.places[f.app] = {"rel": to_local(ref, g), "pixels": pixels, "scale": f.scale,
+                              "mpp": round(f.mpp, 8)}
+        try:
+            save_places(self.places)
+        except OSError as e:
+            log(f"couldn't save {PLACES_PATH}: {e}")
+
     def release(self, f):
         """Its window left: hide the panel and turn the spare off."""
+        self.remember(f)
         slot = f.slot
         if slot.window is f:
             slot.window = None
@@ -483,6 +597,98 @@ class Daemon:
             self.drop_sub(sub_id)
         self.screens.ask(f"unfloat {slot.index}", quiet=True)
         kscreen(f"output.{slot.output}.disable")
+
+    # ------------------------------------------------------------ launching floating
+
+    def panel_get(self, index):
+        reply = self.screens.ask(f"get {index}", quiet=True)
+        return ft_layout.parse_get(reply) if reply.startswith("ok") else None
+
+    def primary(self):
+        """The primary screen (0-based): the one with the taskbar."""
+        try:
+            return min(ft_layout.primary_screen(ft_layout.load_layout()), self.screens_n - 1)
+        except (OSError, ValueError, KeyError):
+            return 0
+
+    def reference(self):
+        """The primary screen's panel: remembered places are relative to it, so they move with
+        the screens' layout."""
+        return self.panel_get(self.primary() + 1)
+
+    def in_front(self):
+        """A place in front of you, facing you, a little nearer than the primary screen (so text
+        looks as big as on the screens, at their density)."""
+        reply = self.screens.ask("head", quiet=True)
+        ref = self.reference()
+        if not reply.startswith("ok"):
+            return None
+        h = reply.split()
+        eye, heading = [float(v) for v in h[1:4]], float(h[4])
+        # (Within reach: you may have walked away from the screens since they were arranged.)
+        d = min(IN_FRONT, max(0.8, math.dist(eye, ref["center"]) - PULL_OUT)) if ref else IN_FRONT
+        fwd = ft_layout.turn_yaw((0.0, 0.0, -1.0), heading)
+        c = [eye[k] + fwd[k] * d for k in range(3)]
+        c[1] -= 0.1 * d  # a little below eye level, like a screen
+        return c, ft_layout.turn_yaw((1.0, 0.0, 0.0), heading), (0.0, 1.0, 0.0), ft_layout.turn_yaw((0.0, 0.0, 1.0), heading)
+
+    def launch(self, app=None, argv=None):
+        """Start an app (a desktop file name) or a command; its first window will float."""
+        if app:
+            app = app.removesuffix(".desktop")
+            info = Gio.DesktopAppInfo.new(app + ".desktop")
+            if info is None:
+                return f"error no app {app}"
+            pids = []
+            try:
+                info.launch_uris_as_manager([], Gio.AppLaunchContext(), GLib.SpawnFlags.SEARCH_PATH,
+                                            None, None, lambda _info, pid, *_: pids.append(pid), None)
+            except GLib.Error as e:
+                return f"error {app}: {e.message}"
+            self.launches.append(Launch(app, pids[0] if pids else None))
+            log(f"launched {app} (pid {pids[0] if pids else 'by D-Bus'})")
+        else:
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError as e:
+                return f"error {argv[0]}: {e}"
+            GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, lambda *_: None)  # reap it
+            self.launches.append(Launch("", proc.pid))
+            log(f"started {argv[0]} (pid {proc.pid})")
+        return "ok"
+
+    def launched(self, ev):
+        """Is this new window the one an app we started was to open? Takes it off the list."""
+        now = time.monotonic()
+        self.launches = [la for la in self.launches if la.until > now]
+        if not ev.get("normal") or ev.get("popup") or ev.get("transient"):
+            return None
+        chain = pid_chain(int(ev.get("pid") or 0))
+        app = ev.get("app", "")
+        for la in self.launches:
+            if (la.pid and la.pid in chain) or (la.app and app and la.app == app):
+                self.launches.remove(la)
+                return la
+        return None
+
+    def float_launched(self, ev, launch):
+        """Float a launched app's window where that app last floated (its size and scale too),
+        or in front of you, at the primary screen's density."""
+        app = ev.get("app") or launch.app
+        known = self.places.get(app) if app else None
+        ref = self.reference()
+        place = to_world(ref, known["rel"]) if known and ref and len(known.get("rel", [])) == 12 else self.in_front()
+        mpp = (known or {}).get("mpp") or self.screen_mpp(f"WL-{self.primary()}")
+        if known and known.get("pixels"):
+            ev = dict(ev, frame=dict(ev["frame"]))
+            s = output_scales().get(ev["output"], 1.0)
+            ev["frame"]["w"], ev["frame"]["h"] = known["pixels"][0] / s, known["pixels"][1] / s
+        # The remembered scale isn't applied yet: changing a floating window's scale can set
+        # off a loop between its size and its output's (KWin keeps the window's margins when
+        # the output resizes, and follow resizes the output after the window), which needs
+        # fixing first (docs/floating-windows.md, Known problems).
+        self.float_window(dict(ev, app=app), place=place, mpp=mpp)
 
     # ------------------------------------------------------------ popups and dialogs
 
@@ -526,6 +732,16 @@ class Daemon:
         if not words:
             return "error empty"
         cmd, rest = words[0], words[1:]
+        if cmd == "launch" and len(rest) == 1:
+            return self.launch(app=rest[0])
+        if cmd == "run" and rest:
+            try:
+                argv = json.loads(text.split(None, 1)[1])
+            except ValueError:
+                return "error run takes a JSON list"
+            if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+                return "error run takes a JSON list"
+            return self.launch(argv=argv)
         if cmd == "list":
             return "ok " + " ".join(f"{s.output}:{s.window.id if s.window else '-'}" for s in self.slots)
         if cmd == "quit":
@@ -596,6 +812,34 @@ class Service(dbus.service.Object):
         self.daemon.wait(reply)
 
 
+def watch_apps(daemon):
+    """Keep Launch as Standalone's desktop file copies up to date (float/ft_apps.py), in a
+    session that reads them (the session script puts them in XDG_DATA_DIRS)."""
+    ours = os.path.realpath(ft_apps.OUT_ROOT)
+    if ours not in (os.path.realpath(d) for d in os.environ.get("XDG_DATA_DIRS", "").split(":") if d):
+        return
+    later = []
+
+    def write():
+        later.clear()
+        try:
+            log(f"Launch as Standalone: {ft_apps.write_all()} apps")
+        except OSError as e:
+            log(f"Launch as Standalone: {e}")
+        return False
+
+    def changed(*_):
+        if not later:  # wait for an install or update to settle
+            later.append(GLib.timeout_add_seconds(3, write))
+    write()
+    daemon.app_monitors = []
+    for d in ft_apps.app_dirs():
+        if os.path.isdir(d):
+            m = Gio.File.new_for_path(d).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            m.connect("changed", changed)
+            daemon.app_monitors.append(m)
+
+
 def main():
     conf = ft_layout.read_conf()
     p = argparse.ArgumentParser(description="Floating windows for the Frametop desktop")
@@ -636,6 +880,7 @@ def main():
 
     log(f"{args.screens} screens, {args.slots} floating slots (WL-{args.screens} and up), margin {args.margin} px")
     daemon.load_script(bus)
+    watch_apps(daemon)
     daemon.loop.run()
 
 
