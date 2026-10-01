@@ -409,6 +409,31 @@ class Backend(QObject):
     def pins(self):
         return self._pins
 
+    @Property("QVariantList", notify=changed)
+    def screensShown(self):
+        """For each screen, whether it shows (False: hidden on its own, ft-layout hide N)."""
+        layout = ft_layout.load_layout()
+        return [not ft_layout.screen_entry(layout, i).get("hidden") for i in range(ft_layout.screen_count(layout))]
+
+    @Slot(int, bool)
+    def setScreenShown(self, index, shown):
+        """Hide screen `index` (0-based) on its own, whatever the visibility mode, or show it."""
+        layout = ft_layout.load_layout()
+        screens = layout.setdefault("screens", [])
+        while len(screens) <= index:
+            screens.append({})
+        if shown:
+            screens[index].pop("hidden", None)
+        else:
+            screens[index]["hidden"] = True
+        ft_layout.save_layout(layout)
+        self.changed.emit()
+        if self._running:
+            reply = self._ask_screens(f"{'reveal' if shown else 'conceal'} {index + 1}")
+            if not (reply and reply.startswith("ok")):
+                self.message.emit("Saved; the desktop applies it when it next starts "
+                                  "(its compositor is older than hiding screens one at a time)", False)
+
     @Slot(str, str)
     def pin(self, which, where):
         """Pin screen `which` (1-based, or "all") to "left", "right", or "head" as it is

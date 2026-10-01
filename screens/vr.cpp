@@ -31,6 +31,9 @@
 //   - visibility modes: always (the hide hotkey toggles), only with the SteamVR dashboard
 //     open, while you look at a chosen controller (the wrist gesture), or toggle only
 //     (hidden until the hotkey shows them).
+//   - a screen hidden on its own ("conceal <screen>", from ft-layout and profiles) stays
+//     hidden whatever the mode or the hotkey says, until "reveal <screen>". (Not "hide
+//     <screen>": an older build reads anything starting with "hide" as the hotkey's hide.)
 //   - controllers on the screens: while visible, the screens can keep SteamVR's laser mouse
 //     on (VROverlayFlags_MakeOverlaysInteractiveIfVisible), so controllers use them with
 //     the dashboard closed. That also takes the controllers away from a VR game, so by
@@ -245,6 +248,7 @@ struct Screen {
     double curve = 0;             // cylinder radius in metres; 0 = flat
     const void *shown = nullptr;  // a frame arrived
     bool visible = false;         // shown in VR right now
+    bool alone = false;           // hidden on its own (conceal <screen>), whatever the mode
     float alpha = 1;
     vr::TrackedDeviceIndex_t pinned = kNone;  // riding on this controller
     Mat pinRel = Identity();                  // controller -> screen
@@ -788,7 +792,7 @@ void UpdateVisibility() {
     Mat head;
     const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
     for (auto &[i, s] : g_screens) {
-        bool visible = s.shown && (shared || s.drag != Drag::None);
+        bool visible = s.shown && (shared || s.drag != Drag::None) && !s.alone;
         // A floating window's panel: while a window floats on it, its output is on, and the
         // window isn't minimized (and once it has a crop).
         if (s.floating) visible = visible && s.floatOn && s.outputOn && !s.minimized && s.cropW > 0;
@@ -1944,6 +1948,8 @@ void ft_vr_keyboard_hide(void) {
 //   wrist <degrees>           a pinned screen shows while you see its front within this
 //   gesture <left|right> <degrees>   the gesture mode: look within this of that controller
 //   hide | show | toggle      the manual switch (see g_manual)
+//   conceal <screen|all> | reveal <screen|all>   a screen hidden on its own, whatever the mode
+//   concealed     -> "ok [<screen> ...]"   the screens hidden on their own
 //   controllers always|outside_games|dashboard   when controllers' lasers work the screens
 //   ingames hide|visible      during a VR game, "always" acts like "only with the dashboard"
 //                             (hide), or stays as it is (visible)
@@ -2075,6 +2081,18 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
     } else if (std::sscanf(cmd, "gesture %15s %lf", hand, &w) == 2) {
         g_gestureHand = std::strcmp(hand, "right") == 0 ? "right" : "left";
         g_gestureAngle = std::clamp(w, 5.0, 90.0);
+        std::snprintf(reply, size, "ok");
+    } else if (std::strncmp(cmd, "concealed", 9) == 0) {
+        int len = std::snprintf(reply, size, "ok");
+        for (auto &[i, s] : g_screens)
+            if (len < size && !s.floating && s.alone) len += std::snprintf(reply + len, size - len, " %d", i + 1);
+    } else if (std::sscanf(cmd, "conceal %15s", word) == 1 || std::sscanf(cmd, "reveal %15s", word) == 1) {
+        const bool hide = cmd[0] == 'c';
+        const Screen *one = std::strcmp(word, "all") ? Find(std::atoi(word)) : nullptr;
+        if (std::strcmp(word, "all") && (!one || one->floating))
+            return (void)std::snprintf(reply, size, "error no screen %s", word);
+        each(word, [&](Screen &s) { s.alone = hide; });
+        UpdateVisibility();
         std::snprintf(reply, size, "ok");
     } else if (!std::strncmp(cmd, "hide", 4) || !std::strncmp(cmd, "show", 4) || !std::strncmp(cmd, "toggle", 6)) {
         const bool always = EffectiveMode() == Mode::Always;

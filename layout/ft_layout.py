@@ -28,6 +28,8 @@ you face (yaw only), like a recenter. It lives in ~/.config/frametop-layout.json
                 "pin": {"hand": "left", "rel": [12]},  ft-screens: riding on that controller
                                                       (left | right), or on the headset (head)
                 "scale": 1.0,                         KWin output scale (1.0 = 100%)
+                "hidden": true,                       ft-screens: hidden on its own, whatever the
+                                                      visibility mode (ft-layout hide N)
                 "pos": [x, y, z], "face": [yaw, pitch], "roll": 0,   custom layout
                 "rotation": "normal" | "left" | "right"}, ...],      gamescope only
    "panel_size": [w, h]}              gamescope: last measured panel size
@@ -52,6 +54,9 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout screen-args              ft-screens' --screen arguments for the session script
   ft-layout remote-view              the primary screen's place in the workspace, for the VNC bridge
   ft-layout toggle                   hide or show all screens (ft-screens)
+  ft-layout hide N|all               hide a screen on its own (it stays hidden whatever the
+  ft-layout show N|all               visibility mode or the hotkey say), or show it again
+  ft-layout hidden                   the screens hidden on their own
   ft-layout pin all|N left|right|head  pin screens to a wrist or your head as they are;
                                      unpin all|N
 """
@@ -393,6 +398,42 @@ def send_visibility(sock, layout):
     sock.ask(f"ingames {v['in_games']}")
 
 
+def send_hidden(sock, layout):
+    """Screens hidden on their own (ft-screens' conceal/reveal)."""
+    for i in range(screen_count(layout)):
+        word = "conceal" if screen_entry(layout, i).get("hidden") else "reveal"
+        try:
+            sock.ask(f"{word} {i + 1}")
+        except RuntimeError as e:
+            log(f"screens hidden on their own: {e}")  # an ft-screens from before conceal
+            return
+
+
+def set_hidden(which, hidden):
+    """Hide (or show) screen N (1-based) or "all" on its own: saved, and applied if the
+    desktop runs."""
+    layout = load_layout()
+    n = screen_count(layout)
+    picked = range(n) if which == "all" else [int(which) - 1] if which.isdigit() else []
+    if not picked or not all(0 <= i < n for i in picked):
+        raise RuntimeError(f"no screen {which} (1 to {n})")
+    screens = layout.setdefault("screens", [])
+    while len(screens) < n:
+        screens.append({})
+    for i in picked:
+        if hidden:
+            screens[i]["hidden"] = True
+        else:
+            screens[i].pop("hidden", None)
+    save_layout(layout)
+    try:
+        sock = screens_socket()
+        for i in picked:
+            sock.ask(f"{'conceal' if hidden else 'reveal'} {i + 1}")
+    except RuntimeError as e:
+        log(f"saved; not applied now: {e}")
+
+
 def parse_get(reply):
     """ft-screens' "get": pose, size, curve, and the pin (hand and controller->screen)."""
     f = reply.split()[1:]
@@ -441,6 +482,7 @@ def apply_screens(wait=0):
                 sock.ask(f"pin {i + 1} {pin['hand']} " + " ".join(f"{v:.5f}" for v in pin["rel"]))
             except RuntimeError as e:
                 log(f"screen {i + 1}: {e}")  # that controller isn't on
+    send_hidden(sock, layout)
     try:
         sock.ask("vrkeyboard close")  # the keyboard, if open, goes too: a reset starts over
     except RuntimeError:
@@ -855,6 +897,11 @@ def main(argv):
             print(remote_view())
         elif cmd == "toggle":
             log(screens_socket().ask("toggle"))
+        elif cmd in ("hide", "show") and len(argv) == 3:
+            set_hidden(argv[2], cmd == "hide")
+        elif cmd == "hidden":
+            layout = load_layout()
+            print(" ".join(str(i + 1) for i in range(screen_count(layout)) if screen_entry(layout, i).get("hidden")))
         elif cmd == "layouts":
             layout = load_layout()
             for name in layout_names(layout):
@@ -887,6 +934,7 @@ def main(argv):
                                 while screens_up(sock) < screen_count() and time.time() < deadline:
                                     time.sleep(1)
                                 send_visibility(sock, load_layout())
+                                send_hidden(sock, load_layout())
                             except RuntimeError as e:
                                 log(f"visibility: {e}")
                     else:

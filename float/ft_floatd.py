@@ -126,6 +126,20 @@ def kscreen(*args):
         return ""
 
 
+def output_rects():
+    """Each output's place and size in KWin's layout (logical)."""
+    try:
+        data = json.loads(kscreen("-j") or "{}")
+    except ValueError:
+        return {}
+    out = {}
+    for o in data.get("outputs", []):
+        pos, size, scale = o.get("pos") or {}, o.get("size") or {}, float(o.get("scale", 1)) or 1.0
+        if o.get("name") and size:
+            out[o["name"]] = (pos.get("x", 0), pos.get("y", 0), size.get("width", 0) / scale, size.get("height", 0) / scale)
+    return out
+
+
 def output_scales():
     try:
         data = json.loads(kscreen("-j") or "{}")
@@ -318,6 +332,11 @@ class Daemon:
             if launch:
                 self.float_launched(ev, launch)
                 return
+        if kind == "added" and not f and self.on_hidden_screen(ev):
+            # Nobody would see it there (a profile can hide every screen): it floats instead.
+            log(f"{wid[:9]} ({ev.get('cls')}) opened on a hidden screen")
+            self.float_launched(ev, None)
+            return
         if kind == "float-request":
             self.float_window(ev)
         elif kind == "dock-request":
@@ -387,8 +406,16 @@ class Daemon:
                                        for o in self.floats.values()):
             self.float_window(ev)
         else:
-            self.command(cmd="place", id=wid, output="WL-0", x=ev["frame"]["x"] % 400 + 100,
-                         y=ev["frame"]["y"] % 300 + 100, w=ev["frame"]["w"], h=ev["frame"]["h"])
+            # Onto the first screen that shows (or floating, if none does).
+            hidden = self.concealed()
+            shown = [i for i in range(self.screens_n) if i + 1 not in hidden]
+            if not shown:
+                self.float_launched(ev, None)
+                return
+            name = f"WL-{shown[0]}"
+            x0, y0, _, _ = output_rects().get(name, (0, 0, 0, 0))
+            self.command(cmd="place", id=wid, output=name, x=x0 + ev["frame"]["x"] % 400 + 100,
+                         y=y0 + ev["frame"]["y"] % 300 + 100, w=ev["frame"]["w"], h=ev["frame"]["h"])
 
     # ------------------------------------------------------------ floating and docking
 
@@ -672,10 +699,24 @@ class Daemon:
                 return la
         return None
 
+    def concealed(self):
+        """The screens (1-based) hidden on their own (ft-layout hide N)."""
+        reply = self.screens.ask("concealed", quiet=True)
+        return {int(w) for w in reply.split()[1:] if w.isdigit()} if reply.startswith("ok") else set()
+
+    def on_hidden_screen(self, ev):
+        """A new top-level window on a screen that's hidden on its own."""
+        m = re.match(r"WL-(\d+)$", ev.get("output", ""))
+        if not m or int(m.group(1)) >= self.screens_n:
+            return False
+        if not ev.get("normal") or ev.get("popup") or ev.get("transient") or ev.get("cls") == "ksplashqml":
+            return False
+        return int(m.group(1)) + 1 in self.concealed()
+
     def float_launched(self, ev, launch):
-        """Float a launched app's window where that app last floated (its size and scale too),
-        or in front of you, at the primary screen's density."""
-        app = ev.get("app") or launch.app
+        """Float a launched app's window (or one that opened on a hidden screen) where that app
+        last floated (its size too), or in front of you, at the primary screen's density."""
+        app = ev.get("app") or (launch.app if launch else "")
         known = self.places.get(app) if app else None
         ref = self.reference()
         place = to_world(ref, known["rel"]) if known and ref and len(known.get("rel", [])) == 12 else self.in_front()
