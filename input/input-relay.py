@@ -1152,7 +1152,10 @@ def main():
                     if node.role == "passthrough" and etype == EV_KEY:
                         if value == 1 and code < BTN_MISC and now - last_typing >= 0.25:
                             last_typing = now
-                            screens_sock.sendto(b"typing", HELPER)
+                            try:
+                                screens_sock.sendto(b"typing", HELPER)
+                            except OSError:
+                                pass  # helper not running (SteamVR not running)
                         to_screens(code, value)
                         if node.grabbed and code < BTN_MISC and value in (0, 1):
                             share_key(node, code, value)
