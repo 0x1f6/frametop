@@ -18,15 +18,15 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 
 1. In the launcher, choose Launch a program → Desktop.
 2. In the application menu, open System → Konsole.
-3. Clone the repo and run the installer:
+3. Run:
 
    ```
-   git clone https://github.com/DeeJanuz/frametop.git ~/frametop
-   cd ~/frametop
-   ./install.sh
+   curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash
    ```
 
-   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you three things along the way: whether to install the Bluetooth fixes, whether to install hand tracking (experimental), and whether to restart SteamVR. The Bluetooth fixes and hand tracking need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
+   It asks which version you want: stable (the `main` branch, tested releases) or experimental (the `experimental` branch, the newest features, less tested). Then it clones the repo into `~/frametop` and runs `install.sh`. To choose without the question, add `-s -- --stable` or `-s -- --experimental` after `bash`. By hand, the same is `git clone https://github.com/DeeJanuz/frametop.git ~/frametop`, then `cd ~/frametop` and `./install.sh` (add `--branch experimental` to the clone for experimental).
+
+   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you four things along the way: whether to install gaze mode (experimental, yes by default), the Bluetooth fixes, and hand tracking (experimental), then whether to restart SteamVR. The Bluetooth fixes and hand tracking need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
@@ -68,7 +68,7 @@ Restarting the desktop (Restart desktop in Frametop Display Settings) closes its
 
 ### Experimental: gaze and hand tracking
 
-Gaze mode makes the pointer go where you look. The installer doesn't set it up: run `gaze/run.sh install`, then turn it on and calibrate on the Gaze page of Frametop Input Settings. Meta+J left-clicks and Meta+K right-clicks where you look; hold the key and turn your head to correct the aim, then let go. The mouse's buttons work the same way, with the mouse doing the correcting, and the corrections teach the gaze tracker.
+Gaze mode makes the pointer go where you look. The installer offers it (or run `gaze/run.sh install` later); turn it on and calibrate on the Gaze page of Frametop Input Settings. Meta+J left-clicks and Meta+K right-clicks where you look; hold the key and turn your head to correct the aim, then let go. The mouse's buttons work the same way, with the mouse doing the correcting, and the corrections teach the gaze tracker.
 
 Hand tracking, which the installer offers, shows your hands through the screens. Turn it on with `ft-handsctl on` and off with `ft-handsctl off`. With `POINTER_HANDS=1` in `~/.config/frametop.conf`, a pinch clicks and a grip drags. [docs/reference.md](docs/reference.md) has the details of both.
 
@@ -107,9 +107,13 @@ This writes `frametop-report-<date>.txt` with version numbers, service states, s
 
 ## Update
 
+Run the same command again. It updates `~/frametop` to the latest of the version you have (or switches, if you pick the other one) and installs it:
+
 ```
-cd ~/frametop && git pull && ./install.sh
+curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash
 ```
+
+Or by hand: `cd ~/frametop && git pull && ./install.sh`.
 
 ## Uninstall
 
@@ -135,6 +139,7 @@ A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland com
 
 | Folder | What it is |
 | --- | --- |
+| `get.sh` | The one-line installer: picks stable or experimental, clones or updates the repo, and runs `install.sh`. |
 | `install.sh` | The one-step installer. Safe to re-run. |
 | `desktops.sh` | Start, stop, and configure the desktop, and install the input relay. |
 | `screens/` | ft-screens, the compositor (wlroots and OpenVR). |
@@ -166,13 +171,13 @@ The scripts also work from a Linux or WSL PC over SSH, which is easier for editi
        IdentityFile ~/.ssh/<your-key>
    ```
 
-3. The Bluetooth fixes need `sudo`, and there's no terminal on the Frame to type the password into, so put it in `.env` at the repo root. It's gitignored and never synced:
+3. The Bluetooth fixes and hand tracking need `sudo` on the Frame. The installer asks for the password in your terminal (over `ssh -t`). To skip the question, or to install with no terminal, put it in `.env` at the repo root instead. It's gitignored and never synced:
 
    ```
    steamos_root_pwd="<password>"
    ```
 
-Then run `./install.sh` from the PC. Daily use:
+Then run `./install.sh` from the PC. If SteamVR isn't running on the Frame, the services that need it start with it later. Daily use:
 
 ```
 scripts/doctor.sh                  # is the Frame reachable and ready?

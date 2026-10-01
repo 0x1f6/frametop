@@ -1018,7 +1018,8 @@ Kirigami.ApplicationWindow {
                     Kirigami.FormData.label: "Service:"
                     text: backend.gazeServiceRunning
                           ? (gpage.status.ft_gaze ? "running" : "running, eye tracker reader restarting")
-                          : "not running (frametop-gaze.service, starts with SteamVR)"
+                          : backend.gazeServiceInstalled ? "not running (frametop-gaze.service, starts with SteamVR)"
+                          : "not installed: run gaze/run.sh install in the Frametop folder, in a terminal"
                     color: backend.gazeServiceRunning ? Kirigami.Theme.textColor : Kirigami.Theme.negativeTextColor
                 }
                 Controls.Label {

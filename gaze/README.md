@@ -7,7 +7,7 @@ The Steam Frame's eye tracking as pointer input: a gaze mode for the 3D mouse (t
 - `tracker/` is our own eye tracker, an alternative to SteamVR's: `ft-eyes` finds the pupils and glints in the eye-camera frames that `ft-eyegrab` (a small root service) copies out of SteamVR's tracker. See "Our own eye tracker" below.
 - `probe/ft-gazeprobe` (GTK 4, host Python) is a fullscreen playground, for developing the gaze tracking: day to day, the calibration and the checks run in the headset panel (Quick check, Calibrate, and Check headset fit on the Gaze page). It runs ft-gaze, draws where you're looking, measures accuracy, and tries out hold-to-adjust clicking with a calibration that learns from your adjustments.
 
-Day to day, install the gaze service, then turn gaze mode on and calibrate on the Gaze page of Frametop Input Settings (Calibrate). The installer doesn't install any of this.
+Day to day, install the gaze service, then turn gaze mode on and calibrate on the Gaze page of Frametop Input Settings (Calibrate). The installer offers the gaze service (`gaze/run.sh install`); the probe and our own tracker are installed by hand.
 
 ```
 gaze/run.sh install           # the gaze service: builds ft-gaze and the panel, starts with SteamVR

@@ -826,6 +826,10 @@ class Backend(QObject):
     def gazeServiceRunning(self):
         return bool(self._gaze)
 
+    @Property(bool, notify=gazeChanged)
+    def gazeServiceInstalled(self):
+        return os.path.exists(os.path.expanduser("~/.config/systemd/user/frametop-gaze.service"))
+
     @Property(int, notify=gazeChanged)
     def gazeMode(self):
         """The helper's gaze mode now: 1 on, 0 off, -1 no answer (helper not running)."""
