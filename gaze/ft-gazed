@@ -61,6 +61,10 @@ GAZE_TRACKER=own or the gaze probe asks for it ("eyes SECONDS", a lease the prob
 reads the eye-camera frames the root service frametop-eyegrab copies (gaze/tracker/install.sh),
 which copies them only while ft-eyes runs.
 
+Checks and calibration (gaze/gazecheck.py): a one-dot quick check when the headset goes on or
+our tracker asks for a click, and the full calibration when gaze mode comes on without one,
+both in a panel fixed to the headset (gaze/panel/ft-gazepanel, which this service runs too).
+
 Nothing here writes to SteamVR, its eye tracker, or its files: ft-gaze reads the eye
 tracker's shared memory read-only.
 
@@ -71,6 +75,10 @@ Control socket: abstract unix datagram "@ft_gazed":
   reload                           read calibration.json and the settings again
   eyes <seconds>                   keep our own tracker running that much longer (at most 120),
                                    whatever GAZE_TRACKER says: the probe's lease. Reply: "ok"
+  quickcal                         the one-dot check now (the calibration if there's none)
+  calibrate                        the full calibration in the panel
+  calaccept | calquit              from the pointer helper while the panel is up: take this dot
+                                   now (a left click, Meta+J) | close it (a right click, Meta+K)
 
 Options: --source action|mmap1|mmap2 (the older one-source path with that source, whatever
 the settings say; set 2 was a little quieter in the probe, but loses the pointer whenever
@@ -96,6 +104,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gazecal import (DEFAULT_MODEL, EYE_FOUND, EYE_LOST, MODELS, STATE, Correction, EyeFallback,  # noqa: E402
                      EyeWeights, Fixation, LiveCorrection, SteamEyeLog)
+from gazecheck import Checks  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
@@ -209,6 +218,7 @@ class Service:
         self.sel = selectors.DefaultSelector()
         self.sel.register(self.sock, selectors.EVENT_READ, "control")
         self.sel.register(self.eyes_sock, selectors.EVENT_READ, "own")
+        self.checks = Checks(self, self.sel)
         self.proc = None
         self.buf = b""
         self.restart_at = 0.0
@@ -272,6 +282,13 @@ class Service:
                                    "misses": {t: w.misses for t, w in self.weights.items()}}))
         tmp.replace(LESSONS)
         self.dirty = False
+
+    def forget_lessons(self):
+        """Drop what the lessons taught (the calibration stays)."""
+        self.lives = {name: PointerLessons() for name in SOURCES}
+        self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
+        self.refit()
+        self.save_lessons()
 
     def refit(self):
         for name, live in self.lives.items():
@@ -505,6 +522,7 @@ class Service:
         return low
 
     def on_sample(self, s):
+        self.checks.on_sample(s)
         kind = self.kind
         if kind != self.last_kind:
             log({"own": "our own tracker", "eyes": "SteamVR's eyes, each calibrated",
@@ -636,6 +654,7 @@ class Service:
             if words[:1] == ["lesson"] and len(words) == 5:
                 try:
                     rec = self.lesson(*map(float, words[1:]))
+                    self.checks.after_lesson(rec)
                     reply = "refused" if "refused" in rec else f"ok {rec['lesson_deg']:.2f}"
                     log(f"lesson {rec['lesson_deg']:.2f} deg at {rec['raw'][0]:+.1f},{rec['raw'][1]:+.1f}"
                         + (f", eyes off {', '.join('-' if m is None else f'{m:.2f}' for m in rec['miss'])}"
@@ -646,11 +665,10 @@ class Service:
             elif words[:1] == ["status"]:
                 reply = json.dumps(self.status())
             elif words[:1] == ["forget"]:
-                self.lives = {name: PointerLessons() for name in SOURCES}
-                self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
-                self.refit()
-                self.save_lessons()
+                self.forget_lessons()
                 reply = "ok"
+            elif words[:1] and words[0] in ("quickcal", "calibrate", "calaccept", "calquit"):
+                reply = self.checks.command(words)
             elif words[:1] == ["eyes"] and len(words) == 2:
                 try:
                     secs = min(max(float(words[1]), 0.0), EYES_LEASE_MAX)
@@ -713,7 +731,7 @@ class Service:
                    if self.last_sample else None, "headset_on": self.steam.wearing(),
                    "headset_on_since": self.steam.worn(), "last": [round(v, 2) for v in self.last] if self.last else None,
                    "eyes_lost": self.lost, "fallback_ready": [self.fallback.ready(0), self.fallback.ready(1)],
-                   **self.counts})
+                   "checks": self.checks.status(), **self.counts})
         return st
 
     def periodic(self):
@@ -737,6 +755,7 @@ class Service:
                 self.eyes_sock.sendto(b"status", EYES_SOCKET)
             except OSError:
                 pass  # not up yet: status() says so once the last answer is old
+        self.checks.periodic()
         if self.dirty:
             self.save_lessons()
 
@@ -747,9 +766,13 @@ class Service:
             now = time.monotonic()
             if not self.proc and now >= self.restart_at:
                 self.start_helper()
-            for key, _ in self.sel.select(timeout=0.5):
+            for key, _ in self.sel.select(timeout=0.05 if self.checks.active else 0.5):
                 if key.data == "control":
                     self.on_control()
+                elif key.data == "checks":
+                    self.checks.on_readable()
+                elif key.data == "panel" and self.checks.panel_proc:
+                    self.checks.read_panel()
                 elif key.data == "own":
                     self.on_own()
                 elif key.data == "eyes" and self.eyes_proc:
@@ -758,12 +781,14 @@ class Service:
                     self.read_stdout()
                 elif key.data == "stderr" and self.proc:
                     self.read_stderr()
+            self.checks.tick()
             if now >= next_periodic:
                 self.periodic()
                 next_periodic = now + 1.0
             if self.verbose and now >= next_verbose:
                 log(json.dumps(self.status()))
                 next_verbose = now + 5
+        self.checks.stop()
         self.stop_helper()
         self.stop_eyes()
         if self.dirty:

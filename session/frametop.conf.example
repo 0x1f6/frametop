@@ -34,6 +34,8 @@ POINTER_GAZE_HOLD=0.5      # gaze mode: a press held this long (s) without movin
 POINTER_GAZE_DOT=always    # gaze mode: the dot shows all the time (always) | only while the mouse moves it (moving)
 POINTER_GAZE_SHOW=1        # gaze mode, with POINTER_GAZE_DOT=moving: the dot shows this long (s) after the mouse moves it; also while a press is held, and a pulse per click
 POINTER_GAZE_MOUSE=precision # gaze mode: the left button holds back its press, the mouse steers, the release clicks (precision) | clicks right away (direct)
+POINTER_HEAD_DEADZONE=0.5  # keyboard clicks at the gaze (Meta+J, Meta+K): degrees the head turns before the held dot moves with it
+POINTER_KEY_TAP=0.25       # keyboard clicks: let go within this (s) and it clicks where the dot was at the press, and tells the gaze tracker it was right
 GAZE_TRACKER=steam         # gaze service: steam = SteamVR's eye tracker | own = our own (gaze/tracker: its frame grabber needs gaze/tracker/install.sh; calibrated in the gaze probe with Own tracker)
 GAZE_EYE=auto              # gaze service: eye bias. auto = each eye weighted by how far off it was at your recent nudges | left | right = that eye counts twice
 HANDS_SWAP_SIDES=0         # hand tracking (hands/run.sh install): 1 = the side cameras' names are swapped, which some SteamVR restarts cause (hands/tools/check_sides.py --ring tells)

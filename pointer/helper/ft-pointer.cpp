@@ -187,6 +187,10 @@
 // with no correction). Pressing gaze_right while gaze_left aims (Meta+K with Meta+J held)
 // presses the left button where the dot is now, so you can correct first and then drag; the
 // first key let go drops it. Without gaze mode they work from wherever the pointer is.
+//   The gaze calibration panel (gaze/panel/ft-gazepanel, run by the gaze service): while
+// ft-gazed says it's up ("calpanel 1", renewed every second; it lapses 3 s after the last),
+// the dot hides and a press answers the panel instead of clicking: a left click or gaze_left
+// sends "calaccept" to @ft_gazed (take this dot now), a right click or gaze_right "calquit".
 //   POINTER_ROLE (right, left, or stylus): the hand role our device takes while connected. A
 // Frame controller in your hand counts as used through its touch sensors and takes its hand's
 // role back, and then no click lands (see "no hand role" in the main loop): with a controller
@@ -533,6 +537,7 @@ private:
             if (rest.find("Thumbnail") != std::string::npos || rest.find("Subview") != std::string::npos) continue;
             if (key.rfind("system.pointer", 0) == 0 || key.rfind("system.cursor", 0) == 0 ||
                 key.rfind("frametop.pointer", 0) == 0 || key.rfind("frametop.guide", 0) == 0 ||
+                key == "frametop.gazepanel" ||  // the gaze calibration panel, fixed to the headset
                 key == "frametop.catcher" ||  // ft-screens' release catcher: only on a laser mid-drag
                 key == "system.HeadsetView" || key == "system.toast")
                 continue;
@@ -900,6 +905,10 @@ int main() {
     bool pressRight = false;
     std::string heldButton = "trigger";
     bool confirmLesson = false;  // a keyboard click's quick tap: a lesson with no correction (see the top)
+    // The gaze calibration panel is up until then ("calpanel 1"; see the top); calOpened: it just
+    // came up, so a press in progress ends without a click.
+    Clock::time_point calPanelUntil{};
+    bool calOpened = false;
     auto pressLeft = [&] {
         // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
         // its own screens, but only we know when one lands on another panel.
@@ -1187,6 +1196,27 @@ int main() {
             if (std::sscanf(buf, "gz %lf %lf %lf %lf", &g[0], &g[1], &g[2], &g[3]) == 4) {
                 gz = {g[0], g[1], g[2], g[3], Clock::now()};
                 continue;
+            }
+            // The gaze calibration panel (see the top): presses answer it instead of clicking.
+            {
+                int on;
+                if (std::sscanf(buf, "calpanel %d", &on) == 1) {
+                    const bool was = Clock::now() < calPanelUntil;
+                    calPanelUntil = on ? Clock::now() + std::chrono::seconds(3) : Clock::time_point{};
+                    if (on && !was) calOpened = true;
+                    continue;
+                }
+            }
+            if (Clock::now() < calPanelUntil) {
+                const bool accept = !std::strncmp(buf, "btn trigger 1", 13) || !std::strncmp(buf, "gazekey left 1", 14);
+                const bool quit = !std::strncmp(buf, "btn b 1", 7) || !std::strncmp(buf, "gazekey right 1", 15);
+                if (accept || quit) {
+                    SendTo(out, "ft_gazed", accept ? "calaccept" : "calquit");
+                    continue;
+                }
+                if (!std::strncmp(buf, "btn ", 4) || !std::strncmp(buf, "gazekey ", 8) ||
+                    !std::strncmp(buf, "precision ", 10) || !std::strncmp(buf, "gazedrag ", 9))
+                    continue;  // their releases, and the other buttons: nothing to click now
             }
             {
                 char kind[16], source[16];
@@ -1641,6 +1671,12 @@ int main() {
             if (debug) std::fflush(stdout);
         }
         keyPresses.clear();
+        if (calOpened) {  // the calibration panel came up: a press in progress ends, no click
+            calOpened = false;
+            if (hold.src != Src::None) endHold(true);
+            if (leftHeld) releaseLeft();
+            aimHeld = aimHand = clickPress = false;
+        }
         if (hold.src == Src::Head) {
             double hy, hp;
             if (headAngles(hy, hp)) steer(hy, hp, hold.pressed ? 0.3 : headDeadzone, 1.0);
@@ -1951,6 +1987,7 @@ int main() {
                     auto secs = [&](Clock::time_point t) { return std::chrono::duration<double>(tnow - t).count(); };
                     alpha = std::clamp(1 - std::min(secs(lastMove) - gazeShow, secs(lastHeld)) / 0.25, 0.0, 1.0);
                 }
+                if (tnow < calPanelUntil) alpha = 0;
                 overlay->SetOverlayAlpha(marker, float(alpha));
                 overlay->SetOverlayWidthInMeters(marker, float(2 * SETTINGS_DOT * std::tan(cursorDeg * M_PI / 360)));
                 auto mm = Billboard(near, eye);
@@ -1980,6 +2017,7 @@ int main() {
                         alpha = std::max(alpha, std::clamp((0.6 - pulse) / 0.3, 0.0, 1.0));
                     }
                 }
+                if (tnow < calPanelUntil) alpha = 0;  // the calibration panel is up (see the top)
                 overlay->SetOverlayAlpha(show, float(alpha));
                 overlay->SetOverlayWidthInMeters(show, float(2 * dist * std::tan(scale * cursorDeg * M_PI / 360)));
                 auto m = Billboard(at, eye);

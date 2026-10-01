@@ -274,6 +274,7 @@ class Backend(QObject):
         self._gaze_prev = None  # the status before, for rates
         self._gaze_at = 0.0
         self._gaze_mode = None  # the helper's gaze mode: True, False, None (no answer)
+        self._check_asked = 0.0  # when quickcal or calibrate went to the gaze service (its errors)
         self._driver_block = ""  # set by _check_driver
         self._panels = None  # SteamVR's overlays, from the helper; None until it answers
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -337,6 +338,10 @@ class Backend(QObject):
             except BlockingIOError:
                 return
             text = data.decode(errors="replace")
+            if text.startswith("error ") and self._check_asked and time.monotonic() - self._check_asked < 3:
+                self._check_asked = 0.0  # the gaze service's answer to quickcal or calibrate
+                self.message.emit("Gaze check: " + text[6:], True)
+                continue
             if text in ("ok on", "ok off"):  # the helper's answer to "gaze ?" (from an unbound socket)
                 self._gaze_mode = text == "ok on"
                 self._gaze_at = time.monotonic()
@@ -955,6 +960,23 @@ class Backend(QObject):
     def reloadGazeCalibration(self):
         if self._send("reload", GAZED):
             self.message.emit("The gaze service read the calibration again", False)
+        else:
+            self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def gazeQuickCheck(self):
+        """The gaze service's one-dot check, in the panel fixed to the headset."""
+        self._gaze_check("quickcal", "Quick check: look at the dot in front of you")
+
+    @Slot()
+    def gazeCalibrate(self):
+        """The full calibration in the panel fixed to the headset (gaze/gazecheck.py)."""
+        self._gaze_check("calibrate", "Calibration: look at each dot in the headset; right click or Meta+K stops")
+
+    def _gaze_check(self, command, done):
+        if self._send(command, GAZED):
+            self._check_asked = time.monotonic()
+            self.message.emit(done, False)
         else:
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
 

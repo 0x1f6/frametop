@@ -815,9 +815,23 @@ Kirigami.ApplicationWindow {
             property var status: backend.gazeStatus
             actions: [
                 Kirigami.Action {
-                    text: "Calibrate…"
+                    text: "Quick check"
                     icon.name: "crosshairs"
-                    tooltip: "Open the gaze probe to calibrate (fullscreen on a Frametop screen)"
+                    enabled: backend.gazeServiceRunning
+                    tooltip: "One dot in front of you in the headset: look at it, and the gaze tracker relearns where it sits"
+                    onTriggered: backend.gazeQuickCheck()
+                },
+                Kirigami.Action {
+                    text: "Calibrate"
+                    icon.name: "crosshairs"
+                    enabled: backend.gazeServiceRunning
+                    tooltip: "The full calibration in the headset: 21 dots in three rounds, dark to bright"
+                    onTriggered: backend.gazeCalibrate()
+                },
+                Kirigami.Action {
+                    text: "Gaze probe…"
+                    icon.name: "crosshairs"
+                    tooltip: "The lab tool: calibrate, test, and practise on a Frametop screen"
                     onTriggered: backend.openGazeProbe()
                 },
                 Kirigami.Action {
