@@ -196,4 +196,23 @@ else
   rm -f "$autostart"
 fi
 
+# With floating windows, the session's windows get Frametop's own decoration: Breeze's look
+# plus a float button left of Close (decoration/, a QML decoration KWin's Aurorae engine
+# loads; docs/floating-windows.md). It's copied, not linked: KPackage doesn't list linked
+# packages. Desktop Mode keeps its own kwinrc, so it keeps Breeze.
+deco=kwin4_decoration_qml_frametop
+deco_dir=${XDG_DATA_HOME:-$HOME/.local/share}/kwin/decorations/$deco
+kwinrc=$XDG_CONFIG_HOME/kwinrc
+if [ "$float_slots" -gt 0 ]; then
+  rm -rf "$deco_dir"
+  mkdir -p "$(dirname "$deco_dir")"
+  cp -r "$here/../decoration" "$deco_dir"
+  rm -f "$deco_dir/apply.sh"
+  kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library org.kde.kwin.aurorae
+  kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme "$deco"
+elif [ "$(kreadconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme)" = "$deco" ]; then
+  kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library --delete
+  kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
+fi
+
 dbus-run-session startplasma-wayland

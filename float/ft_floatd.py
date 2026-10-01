@@ -355,6 +355,7 @@ class Daemon:
             return
         slot = self.free_slot()
         if slot is None:
+            self.command(cmd="mark", id=wid)  # the title bar button set keep-below for nothing
             self.notify(f"All {len(self.slots)} floating windows are in use. Put one back on the desktop "
                         "to float another.")
             return
