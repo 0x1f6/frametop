@@ -6,10 +6,14 @@
                                active one), or put it back if it floats
   ft-float dock [ID|active]    put a floating window back on the desktop
   ft-float dock all            put every floating window back
+  ft-float launch APP          start an app (its desktop file name, e.g. org.kde.dolphin) and
+                               float its first window where that app last floated
+  ft-float run COMMAND [ARG...]  the same for a command
   ft-float close ID            close a window
   ft-float list                the spare outputs and what floats on them
 FT_FLOAT_SOCKET names ft-floatd's socket (default frametop_float).
 """
+import json
 import os
 import socket
 import sys
@@ -20,7 +24,8 @@ s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 s.bind("")
 s.settimeout(5)
 try:
-    s.sendto(" ".join(sys.argv[1:]).encode(), "\0" + os.environ.get("FT_FLOAT_SOCKET", "frametop_float"))
+    text = "run " + json.dumps(sys.argv[2:]) if sys.argv[1] == "run" else " ".join(sys.argv[1:])
+    s.sendto(text.encode(), "\0" + os.environ.get("FT_FLOAT_SOCKET", "frametop_float"))
     reply = s.recv(8192).decode()
 except OSError as e:
     sys.exit(f"ft-floatd didn't answer ({e}); is the Frametop desktop running?")
