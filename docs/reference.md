@@ -208,9 +208,11 @@ In gaze mode the 3D mouse's pointer goes where you look, and the mouse or the ke
 
 [gaze/README.md](../gaze/README.md) has the details, our own eye tracker, and the gaze probe, a development tool.
 
-## Hand tracking (experimental)
+## Hand tracking (experimental, deferred)
 
-Your hands show over the screens: where a tracked hand is between an eye and a screen, ft-screens lets that eye see the room through the screen. The same tracker detects pinches and grips, and with `POINTER_HANDS=1` in `~/.config/frametop.conf` they work the pointer. In gaze mode a pinch clicks where you look when it opens; hold it and move the hand to correct the pointer first. Without gaze mode a pinch is a press like the mouse's button, so a held pinch drags. A grip (closing the hand) presses and drags. It's optional: `hands/run.sh install`, or the last question of `install.sh`.
+Deferred: it costs a lot of the headset's CPU and needs more work, so `install.sh` doesn't offer it. It still builds and runs, installed by hand, for working on it.
+
+Your hands show over the screens: where a tracked hand is between an eye and a screen, ft-screens lets that eye see the room through the screen. The same tracker detects pinches and grips, and with `POINTER_HANDS=1` in `~/.config/frametop.conf` they work the pointer. In gaze mode a pinch clicks where you look when it opens; hold it and move the hand to correct the pointer first. Without gaze mode a pinch is a press like the mouse's button, so a held pinch drags. A grip (closing the hand) presses and drags. To install it: `hands/run.sh install`.
 
 - `ft-camd` borrows XRService's camera buffers and publishes the four IR tracking cameras to `/run/user/UID/frametop-hands/cam-ring`. It runs on the host as `frametop-camd.service`, with file capabilities that `hands/run.sh install` sets through sudo, and it drops them once set up. A rebuild clears them: `hands/run.sh caps`.
 - `ft-hands` runs in the `dev` container as `frametop-hands.service`. It finds and triangulates the hands, and publishes `hands` (read by ft-screens' cutouts) and `gestures` (pinches and grips, read by the pointer helper) next to the ring.

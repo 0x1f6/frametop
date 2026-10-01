@@ -18,9 +18,11 @@ packages=(
   mesa-libgbm-devel wayland-devel vulkan-loader-devel vulkan-headers plasma-wayland-protocols wlroots-devel
   # ft_pointer SteamVR driver: static C++ runtime (the host has an older glibc)
   libstdc++-static
-  # hand tracking: ft-hands reads the calibration with jsoncpp; ft-camd runs on the host, linked
-  # statically; the Python tools (hands/tools) need NumPy and OpenCV
-  jsoncpp-devel glibc-static python3-numpy python3-opencv
+  # hand tracking (deferred: not installed by install.sh; hands/run.sh install builds it): ft-hands
+  # reads the calibration with jsoncpp; ft-camd runs on the host, linked statically. Its Python
+  # tools (hands/tools) need NumPy and OpenCV, which aren't here: Fedora's python3-opencv pulls
+  # in over a gigabyte (hands/README.md says how to get them)
+  jsoncpp-devel glibc-static
   # Frametop Input Settings app (Kirigami, PySide6)
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)

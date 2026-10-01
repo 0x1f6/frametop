@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install everything on the Steam Frame: the build container, Frametop (multi-screen
-# desktop, input relay, universal 3D mouse, settings app), and optionally gaze mode, the
-# Bluetooth fixes, and hand tracking. Run it on the headset in a terminal, from this repo.
-# It's safe to re-run, for example after `git pull`.
+# desktop, input relay, universal 3D mouse, settings app), and optionally gaze mode and the
+# Bluetooth fixes. Run it on the headset in a terminal, from this repo. It's safe to re-run,
+# for example after `git pull`. (Hand tracking, hands/, is deferred: it isn't offered here.)
 # (It also works from a PC over SSH; see "Developing from a PC" in the README.)
 #
 # Usage: ./install.sh [--yes] [--no-bluetooth]
-#   --yes           don't ask; installs gaze mode, skips the Bluetooth fixes, hand tracking,
-#                   and the SteamVR restart
+#   --yes           don't ask; installs gaze mode, skips the Bluetooth fixes and the SteamVR
+#                   restart
 #   --no-bluetooth  don't offer the Bluetooth fixes
 set -euo pipefail
 
@@ -50,7 +50,7 @@ if [ "$FRAME_LOCAL" = 0 ] || [ -n "${SSH_CONNECTION:-}" ]; then
   echo "that need SteamVR start with it if it isn't running now."
 fi
 
-step "1/10 distrobox (container tool, installed in your home folder)"
+step "1/9 distrobox (container tool, installed in your home folder)"
 if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 else
@@ -60,25 +60,25 @@ else
 cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
 
-step "2/10 build container (Fedora 44 'dev', about 1-2 GB the first time)"
+step "2/9 build container (Fedora 44 'dev', about 1-2 GB the first time)"
 "$root/setup/dev-container.sh"
 
-step "3/10 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
+step "3/9 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
 "$root/desktops.sh" relay install
 
-step "4/10 3D mouse: SteamVR driver"
+step "4/9 3D mouse: SteamVR driver"
 "$root/pointer/driver/build.sh"
 "$root/pointer/driver/install.sh" install 2>&1 | grep -v xdg-open
 
-step "5/10 3D mouse: pointer helper service"
+step "5/9 3D mouse: pointer helper service"
 "$root/pointer/helper/build.sh"
 "$root/pointer/helper/run.sh" install
 
-step "6/10 power service (turns the displays off while the headset isn't used, even on a stand)"
+step "6/9 power service (turns the displays off while the headset isn't used, even on a stand)"
 "$root/power/build.sh"
 "$root/power/run.sh" install
 
-step "7/10 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
+step "7/9 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
 "$root/screens/build.sh"
 "$root/desktops.sh" install >/dev/null
 "$root/input-settings/install.sh"
@@ -87,25 +87,18 @@ step "7/10 multi-screen desktop (ft-screens), Frametop Input Settings, and Frame
 on_frame "sed -i 's/^POINTER=0/POINTER=1/' ~/.config/frametop.conf; grep -q '^POINTER=' ~/.config/frametop.conf || echo 'POINTER=1' >> ~/.config/frametop.conf"
 echo "the launcher's Desktop entry now opens the multi-screen desktop; 3D mouse on (POINTER=1 in ~/.config/frametop.conf)"
 
-step "8/10 gaze mode (optional, experimental: the pointer goes where you look)"
+step "8/9 gaze mode (optional, experimental: the pointer goes where you look)"
 if ask "Install gaze mode? You turn it on and calibrate it in Frametop Input Settings, on the Gaze page." y; then
   "$root/gaze/run.sh" install
 else
   echo "skipped. Install later with: gaze/run.sh install"
 fi
 
-step "9/10 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
+step "9/9 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
 if [ "$bluetooth" = 1 ] && ask "Install the Bluetooth fixes? They need your password (sudo)." n; then
   "$root/setup/bluetooth/install.sh" install
 else
   echo "skipped. Install later with: setup/bluetooth/install.sh install"
-fi
-
-step "10/10 hand tracking (optional, experimental: your hands show over the screens)"
-if ask "Install hand tracking? It needs your password (sudo) to let its camera service read the headset cameras." n; then
-  "$root/hands/run.sh" install
-else
-  echo "skipped. Install later with: hands/run.sh install"
 fi
 
 step "Done"

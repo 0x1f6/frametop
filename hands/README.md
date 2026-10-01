@@ -1,6 +1,8 @@
-# Hands (experimental)
+# Hands (experimental, deferred)
 
-Hand tracking from the headset's own cameras. It serves two things in Frametop:
+Hand tracking from the headset's own cameras. It's deferred: it costs a lot of the headset's CPU and needs more work, so `install.sh` doesn't offer it and the README doesn't list it. It still builds and runs, installed by hand (below), for working on it.
+
+It serves two things in Frametop:
 
 - **Hand cutouts:** where your hand is between an eye and a screen, that eye sees the room through the screen (ft-screens, `screens/handcut.cpp`), so your hands show over the screens the way they do on a Vision Pro.
 - **Pinches and grips:** with `POINTER_HANDS=1`, the pointer helper takes them as clicks and drags. Look at something and pinch to click it, with the eye tracker doing the looking (`gaze/`), or close your hand to press and drag what the pointer is on. See "Pinches and grips in the pointer" below.
@@ -10,7 +12,7 @@ Two programs, each a user service that stops when SteamVR does:
 - `ft-camd` (`camd/`, C) borrows XRService's camera buffers and publishes the four IR tracking cameras' frames to a shared-memory ring. It runs on the host.
 - `ft-hands` (`track/`, C++) finds hands in those frames with MediaPipe's palm and landmark models on ncnn, triangulates them, and publishes them. It runs in the dev container.
 
-They don't start with SteamVR. `hands/run.sh install` builds them, gives ft-camd its capabilities, installs both services disabled, and links `hands/ft-handsctl` into `~/.local/bin`. Then `ft-handsctl on` starts hand tracking and `ft-handsctl off` stops it. `install.sh` offers the install as its last, optional step.
+They don't start with SteamVR. `hands/run.sh install` builds them, gives ft-camd its capabilities, installs both services disabled, and links `hands/ft-handsctl` into `~/.local/bin`. Then `ft-handsctl on` starts hand tracking and `ft-handsctl off` stops it. `install.sh` doesn't install it.
 
 ```
 ft-handsctl on | off            # on the Frame: start or stop hand tracking (SteamVR must be running)
@@ -188,7 +190,7 @@ hands/build/ft-handreplay ~/.local/share/frametop/hands/rec-20260929-120000 --co
 
 ## Tools
 
-Python, with NumPy and OpenCV (in the dev container: `python3-numpy`, `python3-opencv`, which `setup/dev-container.sh` installs). Off the Frame, `FRAME_JOB_DEVICE_ROOT` can point at a folder with copies of the headset's calibration files.
+Python, with NumPy and OpenCV. `setup/dev-container.sh` doesn't install them, because Fedora's `python3-opencv` pulls in over a gigabyte; in the dev container, run `sudo dnf install python3-numpy python3-opencv` once. Off the Frame, `FRAME_JOB_DEVICE_ROOT` can point at a folder with copies of the headset's calibration files.
 
 - `tools/check_sides.py --ring` (or a recording): are the side cameras named right?
 - `tools/check_color.py REC`: how the colour module's calibration maps onto its images.
