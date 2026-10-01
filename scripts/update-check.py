@@ -321,6 +321,30 @@ def check_services(sockets, desktop_up):
         report("FAIL", "XRService", "not running, so hand tracking has no cameras")
 
 
+def check_steam_ui():
+    """Steam's UI calls the Steam menu shortcut uses (steam/ft-steam). They're Steam client
+    internals, so a Steam update can change them too, not just a SteamOS one."""
+    # Run from stdin (over SSH) there's no __file__: try the usual checkouts.
+    repos = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))] if "__file__" in globals() else []
+    repos += [os.path.join(HOME, "frametop"), os.path.join(HOME, "dev/frametop")]
+    tool = next((t for t in (os.path.join(r, "steam/ft-steam") for r in repos) if os.path.exists(t)), None)
+    if not tool:
+        report("skip", "Steam menu shortcut", "steam/ft-steam isn't in a checkout here")
+        return
+    try:
+        p = subprocess.run([tool, "check"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        report("warn", "Steam menu shortcut", f"ft-steam check didn't run ({e})")
+        return
+    detail = (p.stdout + p.stderr).strip()
+    if p.returncode == 0:
+        report("ok", "Steam menu shortcut", "Steam's UI still has the calls steam/ft-steam makes")
+    elif detail.startswith("ft-steam:"):
+        report("skip", "Steam menu shortcut", detail[len("ft-steam:"):].strip())
+    else:
+        report("warn", "Steam menu shortcut", f"{detail}; a Meta tap won't open the Steam menu (steam/ft-steam)")
+
+
 def check_eye_tracker():
     gaze = systemctl("is-enabled", "frametop-gaze") == "enabled"
     try:
@@ -369,6 +393,7 @@ def main():
         check_openvr()
         check_overlays(desktop_up)
         check_services(sockets, desktop_up)
+        check_steam_ui()
         check_eye_tracker()
 
     if args == ["--mark-good"]:
