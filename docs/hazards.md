@@ -16,8 +16,8 @@ The input relay takes the volume keys from every device that has them, so gamesc
 
 ft-screens drops keys while no screen has focus or the SteamVR dashboard is open, but always lets through the release of a key the desktop saw pressed, so a modifier held as the dashboard opens doesn't stay down.
 
-- **A release that never arrives leaves the key held in the desktop.** KWin repeats held keys itself, so a stuck letter repeats and a stuck modifier changes every later key (Ctrl+Alt held turns T into Konsole). Pressing and releasing the key again clears it.
-- **A keyboard that disconnects mid-press is one way to get there.** The relay forgets the held key without telling ft-screens. The same goes for the relay restarting while a key is down.
+- **A key whose release never arrives stays held in the desktop until the relay clears it, within about a second.** KWin repeats held keys itself, so a stuck letter repeats and a stuck modifier changes every later key (Ctrl+Alt held turns T into Konsole). The relay remembers which keys it told the desktop went down, and once a second it releases any that no keyboard holds (`reconcile_desktop_keys`, which asks the kernel with `EVIOCGKEY`). Pressing and releasing the key again also clears it.
+- **A keyboard that disconnects mid-press, or a relay restart with a key down, is how it happens.** The once-a-second check catches the first. A relay that starts doesn't know what an earlier one left down, so it releases the modifiers on the desktop; another key left down that way stays until it's pressed and released again.
 - **To see where a key went,** run `scripts/keys-report.py` and reproduce the problem while it records. It logs the modifiers, Tab, and Esc (no other keys) as the relay reads them and as its virtual keyboard sends them on, with the device roles and grabs, which programs have each keyboard open, and the relay's and desktop's logs.
 - **Switching where typing goes waits for keys to come up.** The relay changes a keyboard's grab only while none of its keys are down, so a press and its release go to the same side. A key held for a long time delays the switch until it's let go.
 

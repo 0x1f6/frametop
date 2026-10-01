@@ -1,6 +1,6 @@
 # Gaze with the controllers: a dead end
 
-Gaze mode is a mouse feature. On 2026-09-30 we tried to make the Frame controllers its buttons: with gaze mode on and no game running, either controller's trigger would click where you look (a tap clicks, moving the hand steers the pointer, holding still drags), the controllers' lasers would be muted, and SteamVR's dashboard would follow the gaze too. It can't be done cleanly, for the reasons below. The work is kept on the `gaze-first` branch, which isn't merged.
+Gaze mode is a mouse and keyboard feature. On 2026-09-30 we tried to make the Frame controllers its buttons: with gaze mode on and no game running, either controller's trigger would click where you look (a tap clicks, moving the hand steers the pointer, holding still drags), the controllers' lasers would be muted, and SteamVR's dashboard would follow the gaze too. It can't be done cleanly, for the reasons below. The work wasn't merged, and it's kept outside the published history.
 
 ## What worked
 
@@ -23,6 +23,6 @@ Gaze mode is a mouse feature. On 2026-09-30 we tried to make the Frame controlle
 - Frametop as a transparent VR app (a scene application using OpenXR's alpha blend mode) whenever gaze mode is on. That would cut Steam off while the dashboard is closed, but Steam's dashboard pages would still take the controllers, and it costs a scene layer all the time.
 - Patching Steam's running process, with an eBPF probe that writes its memory or an injected hook, to drop the controller reports while gaze mode is on. It would cover everything, but it changes Valve's software, needs Steam's client library reverse-engineered, and breaks with Steam updates.
 
-## Where the work is
+## What was built
 
-Branch `gaze-first`: the plan and the test log (`docs/gaze-first.md`), the probes (`pointer/probe/lasertest`, `focustest`, `vrsetting`), the web socket reader (`input/vrws.py`), the filter for Steam's UI (`input/steam-gamepad-filter.js`), and the relay's and helper's controller code. Only the gaze dot setting (`POINTER_GAZE_DOT`) came over.
+The attempt had a plan and a test log, probes for the laser, input focus, and SteamVR settings, a reader for vrserver's web socket, a filter for Steam's UI, and controller code in the relay and the helper. None of it is in this repo. Only the gaze dot setting (`POINTER_GAZE_DOT`) came over.

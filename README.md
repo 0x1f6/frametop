@@ -26,7 +26,7 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
    ./install.sh
    ```
 
-   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you two things along the way. The Bluetooth fixes need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
+   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you three things along the way: whether to install the Bluetooth fixes, whether to install hand tracking (experimental), and whether to restart SteamVR. The Bluetooth fixes and hand tracking need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
@@ -65,6 +65,12 @@ If you work in the desktop for long stretches, or leave the headset on a stand, 
 You can map the mouse's extra buttons to actions such as Toggle SteamVR dashboard, Recenter pointer, or Head follow on/off on the Buttons page of Frametop Input Settings, and the Frame controllers' buttons on its Controllers page. Pointer speed, dot size, and the rest are on its Pointer page and take effect immediately. If a panel you only look at, such as a performance overlay that follows your view, keeps catching the dot, tick it (or its whole app) on the Ignored panels page, and the pointer passes through it. Head follow, which is experimental and off by default, makes the pointer come along when you turn your head: it stays put until your head turns past the leash angle, then glides back to its place in your view, and a leash of 0 keeps it fixed in your view. It's only lightly tested and not polished; tuning its settings, or improving how it feels, is open to anyone who wants to take it further.
 
 Restarting the desktop (Restart desktop in Frametop Display Settings) closes its windows, but background work you started in it, such as servers, tmux sessions, or builds, keeps running.
+
+### Experimental: gaze and hand tracking
+
+Gaze mode makes the pointer go where you look. The installer doesn't set it up: run `gaze/run.sh install`, then turn it on and calibrate on the Gaze page of Frametop Input Settings. Meta+J left-clicks and Meta+K right-clicks where you look; hold the key and turn your head to correct the aim, then let go. The mouse's buttons work the same way, with the mouse doing the correcting, and the corrections teach the gaze tracker.
+
+Hand tracking, which the installer offers, shows your hands through the screens. Turn it on with `ft-handsctl on` and off with `ft-handsctl off`. With `POINTER_HANDS=1` in `~/.config/frametop.conf`, a pinch clicks and a grip drags. [docs/reference.md](docs/reference.md) has the details of both.
 
 ### Leave the headset on a stand and reach it remotely
 
@@ -115,7 +121,12 @@ power/run.sh uninstall
 pointer/driver/install.sh uninstall    # then restart SteamVR
 input-settings/install.sh uninstall
 display-settings/install.sh uninstall
+remote/install.sh uninstall
 setup/bluetooth/install.sh uninstall   # if you installed the Bluetooth fixes
+hands/run.sh uninstall                 # if you installed hand tracking
+gaze/run.sh uninstall                  # if you installed the gaze service
+gaze/tracker/install.sh uninstall      # if you installed our own eye tracker's frame grabber
+gaze/probe/install.sh uninstall        # if you installed the gaze probe
 ```
 
 ## How it works
@@ -134,7 +145,10 @@ A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland com
 | `input/` | The input relay (Bluetooth mice and keyboards, button maps). |
 | `pointer/` | The 3D mouse: SteamVR driver, helper service, and a probe tool. |
 | `power/` | ft-powerd: turns the displays off while the headset isn't used. |
+| `gaze/` | Gaze mode (experimental): the gaze service, its calibration panel, our own eye tracker, and the gaze probe. See [gaze/README.md](gaze/README.md). |
+| `hands/` | Hand tracking (experimental): the camera broker and the tracker, for the hands over the screens and pinch clicks. See [hands/README.md](hands/README.md). |
 | `display-settings/`, `input-settings/` | The two settings apps (Kirigami, Python). |
+| `remote/` | Frametop Remote Access, the app that turns remote desktop over VNC on and off. |
 | `setup/` | The build container and the Bluetooth fixes. See [setup/README.md](setup/README.md). |
 | `scripts/` | Helpers the installers use. They run commands locally on the Frame, or over SSH from a PC. |
 

@@ -3,26 +3,39 @@
 Hand tracking from the headset's own cameras. It serves two things in Frametop:
 
 - **Hand cutouts:** where your hand is between an eye and a screen, that eye sees the room through the screen (ft-screens, `screens/handcut.cpp`), so your hands show over the screens the way they do on a Vision Pro.
-- **Pinches:** look at something and pinch to click it, pinch and move to drag, with the eye tracker doing the looking (`gaze/`). The tracker publishes the pinches. The pointer helper doesn't read them yet.
+- **Pinches and grips:** with `POINTER_HANDS=1`, the pointer helper takes them as clicks and drags. Look at something and pinch to click it, with the eye tracker doing the looking (`gaze/`), or close your hand to press and drag what the pointer is on. See "Pinches and grips in the pointer" below.
 
-Two programs, each a user service that starts and stops with SteamVR:
+Two programs, each a user service that stops when SteamVR does:
 
 - `ft-camd` (`camd/`, C) borrows XRService's camera buffers and publishes the four IR tracking cameras' frames to a shared-memory ring. It runs on the host.
 - `ft-hands` (`track/`, C++) finds hands in those frames with MediaPipe's palm and landmark models on ncnn, triangulates them, and publishes them. It runs in the dev container.
 
+They don't start with SteamVR. `hands/run.sh install` builds them, gives ft-camd its capabilities, installs both services disabled, and links `hands/ft-handsctl` into `~/.local/bin`. Then `ft-handsctl on` starts hand tracking and `ft-handsctl off` stops it. `install.sh` offers the install as its last, optional step.
+
 ```
-hands/run.sh install            # build, give ft-camd its capabilities (sudo, once per build), enable
-hands/run.sh status             # the services, and ft-hands' last status lines
-hands/run.sh log [lines]
+ft-handsctl on | off            # on the Frame: start or stop hand tracking (SteamVR must be running)
+ft-handsctl status              # the services, and ft-hands' last status lines
+ft-handsctl log [lines]
+ft-handsctl cutouts on|off|state  # ft-screens' hand cutouts, without stopping tracking
+ft-handsctl gestures            # pinches and grips, live (tools/watch_gestures.py --distance)
+
+hands/run.sh install            # build, give ft-camd its capabilities (sudo, once per build), install disabled
+hands/run.sh start|stop         # start or stop the services
 hands/run.sh restart            # after changing a setting
+hands/run.sh status
+hands/run.sh log [lines]
 hands/run.sh caps               # after rebuilding ft-camd (a rebuild clears its capabilities)
 hands/run.sh uninstall
 ```
 
-Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides them):
+Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides them), read when ft-camd and ft-hands start:
 
 - `HANDS_SWAP_SIDES=1`: the two side cameras' names are swapped (see ft-camd below). Check with `tools/check_sides.py --ring`.
 - `HANDS_CPUS=5,6,7`: the CPUs the model threads run on (below).
+- `HANDS_CAMERAS` (`auto`), `HANDS_BRIGHT` (`all`), `HANDS_BRIGHT_ON` (40), `HANDS_BRIGHT_OFF` (25): which cameras ft-hands tracks with, as `--cams`, `--bright`, `--bright-on` and `--bright-off` (see ft-hands). `HANDS_CAMERAS=mono` also keeps ft-camd off the colour cameras.
+- `HANDS_COLOR_LEFT` (`color_video0`), `HANDS_COLOR_CROP` (`subtract`): how the colour module's calibration maps onto its images, as `--color-left` and `--color-crop`.
+
+The pointer helper's `POINTER_HANDS` and `POINTER_PINCH_*`/`POINTER_GRIP_*` settings are in "Pinches and grips in the pointer" below.
 
 Files, all in `/run/user/UID/frametop-hands/` (private to the user; not `/run/user/UID/frametop/`, which the desktop session deletes whenever it starts):
 
@@ -30,9 +43,9 @@ Files, all in `/run/user/UID/frametop-hands/` (private to the user; not `/run/us
 | --- | --- | --- | --- |
 | `cam-ring` | ft-camd | `camd/fhring.h` | ft-hands, `tools/ring.py` |
 | `hands` | ft-hands | `include/fh_hands.h` | ft-screens (`screens/handcut.cpp`) |
-| `gestures` | ft-hands | `include/fh_gestures.h` | `tools/watch_gestures.py`; the pointer helper, later |
+| `gestures` | ft-hands | `include/fh_gestures.h` | the pointer helper (`pointer/helper/ft-pointer.cpp`), `tools/watch_gestures.py` |
 
-The source keeps the `fh_` names and magic strings of frame-hands, where this was developed (`~/Desktop/Projects/frame-hands` on the developer's Frame, which keeps the recordings, probes and Python prototype). So its recordings and tools still work.
+The source keeps the `fh_` names and magic strings of frame-hands, the project it started as, so recordings made with it still work.
 
 ## ft-camd
 
@@ -45,7 +58,7 @@ Polling buffers for changes can catch a frame while the camera is still writing 
 - The two upper cameras share one run of buffers. For them, only allocation order can tell the cameras apart.
 - It also re-maps an index on the fly when its buffer holds no new frame.
 
-**Privileges.** Setting up needs three things. `pidfd_getfd` on XRService needs `CAP_SYS_PTRACE`, because the Frame has `ptrace_scope=1`. The system-wide tracepoint needs `CAP_PERFMON`, because `perf_event_paranoid` is 2. Its format files are root-only, which needs `CAP_DAC_READ_SEARCH`. `hands/run.sh install` gives the binary those capabilities with `sudo setcap`. ft-camd drops them all once it has set up, before it reads a frame, and then runs as you. XRService runs as you too. It also runs under `sudo`, for trying it by hand, and then drops to the user who ran sudo. It reads nothing from the ring's readers.
+**Privileges.** Setting up needs three things. `pidfd_getfd` on XRService needs `CAP_SYS_PTRACE`, because the Frame has `ptrace_scope=1`. The system-wide tracepoint needs `CAP_PERFMON`, because `perf_event_paranoid` is 2. Its format files are root-only, which needs `CAP_DAC_READ_SEARCH`. `hands/run.sh install` gives the binary those capabilities with `sudo setcap`. File capabilities need a filesystem mounted without `nosuid`. The Frame's `/home` (ext4) has no `nosuid`. ft-camd drops them all once it has set up, before it reads a frame, and then runs as you. XRService runs as you too. It also runs under `sudo`, for trying it by hand, and then drops to the user who ran sudo. It reads nothing from the ring's readers.
 
 The ring is mode 0600, in a folder only you can write. Frame handling:
 
@@ -55,11 +68,13 @@ The ring is mode 0600, in a folder only you can write. Frame handling:
 
 Options:
 
+- `--dark R`: a frame dimmer than R times the camera's recent brightest counts as near-black. Default 0.4.
 - `--with-dark`: also publish the near-black frames, as extra ring cameras flagged `FH_CAM_DARK`. They show only light sources, so they're no use for hands.
-- `--with-color` (the service uses it): also publish the two Arcturus colour cameras, flagged `FH_CAM_COLOR`. Each is the luma of the 10-bit frame's valid 1972x2464 (the top 8 bits), at half size (`--color-scale 2`: 986x1232). They run at `--color-idle` (2 fps), enough for ft-hands to tell how bright it is, until a reader asks for more in `/run/user/UID/frametop-hands/color-fps` (ft-hands writes 30 while it tracks or records with them), up to `--color-fps` (30; the cameras run at 60). `HANDS_CAMERAS=mono` leaves them out. Frames that carry the module's warped half-size copy are dropped. Their `capture_ns` is on the colour module's clock (2.2 s off the mono cameras' on 2026-09-29), so line them up with the mono cameras by `dqbuf_ns`. Each frame costs about 0.65 ms of cache sync and 1.1 ms of decoding, so both cameras at 30 fps take about 11% of a core.
+- `--with-color`: also publish the two Arcturus colour cameras, flagged `FH_CAM_COLOR`. The service leaves it off and runs the mono cameras only (see "Known issues"). To try the colour cameras, add it to `ExecStart` in `hands/frametop-camd.service` and run `hands/run.sh install` again; ft-hands then picks the cameras by the light. Each is the luma of the 10-bit frame's valid 1972x2464 (the top 8 bits), at half size (`--color-scale 2`: 986x1232). They run at `--color-idle` (2 fps), enough for ft-hands to tell how bright it is, until a reader asks for more in `/run/user/UID/frametop-hands/color-fps` (ft-hands writes 30 while it tracks or records with them), up to `--color-fps` (30; the cameras run at 60). `HANDS_CAMERAS=mono` leaves them out. Frames that carry the module's warped half-size copy are dropped. Their `capture_ns` is on the colour module's clock (2.2 s off the mono cameras' on 2026-09-29), so line them up with the mono cameras by `dqbuf_ns`. Each frame costs about 0.65 ms of cache sync and 1.1 ms of decoding, so both cameras at 30 fps take about 11% of a core.
 - Each mono camera's latest near-black frame's mean goes in the ring (`dark_mean`): a short fixed exposure, so it follows the room's IR light, sunlight above all.
 - The ring holds 8 cameras: 4 mono, plus 4 dark twins or 2 colour cameras.
-- Colour isn't reliable yet. In the lit-room test of 2026-09-30, the colour cameras kept losing their buffer mapping while the headset was worn: 30 frames in a row looked unchanged, the camera relearned, and after 5 relearns ft-camd exited. Each relearn probed all 32 colour buffers, a whole-buffer cache sync each, which also made the mono cameras miss frames. Runs with the headset idle had none of this. So the passthrough compositor may be writing into the colour buffers while Room View shows. Since then a colour camera never takes the mono ones down: it probes at most 4 buffers a frame, and one that goes stale twice in a row is paused (10 s, doubling up to 160 s) and learned again, without ft-camd exiting. Whether a frame is new is judged on the luma rows only: the chroma after them hardly changes in a lit room. `FT_CAMD_DEBUG=1` prints, at each colour stale frame, how many sampled words changed in every candidate buffer.
+- Colour isn't reliable yet. In the lit-room test of 2026-09-30, the colour cameras kept losing their buffer mapping while the headset was worn: 30 frames in a row looked unchanged, the camera relearned, and after 5 relearns ft-camd exited. Each relearn probed all 32 colour buffers, a whole-buffer cache sync each, which also made the mono cameras miss frames. Runs with the headset idle had none of this. So the passthrough compositor may be writing into the colour buffers while Room View shows. Since then a colour camera never takes the mono ones down: it probes at most 4 buffers a frame, and one that goes stale twice in a row is paused (10 s, doubling up to 160 s) and learned again, without ft-camd exiting. Whether a frame is new is judged on the luma rows only: the chroma after them hardly changes in a lit room.
+- `FT_CAMD_DEBUG=1` in the environment: at each stale colour frame, ft-camd logs to stderr the camera, the frame's time, V4L2 index and sequence number, and, for every candidate buffer, how many of its sampled words changed, in all and in the last eighth of the samples.
 - `--sensor S`: only the mono cameras whose sensor name contains S.
 - `--status S`: a status line every S seconds (0: never).
 
@@ -91,14 +106,15 @@ Options:
 - `--record-only`: record without tracking or publishing, so it can run beside the live tracker. Give it `--record DIR`, since SIGUSR1 would reach both trackers. With `ft-camd --with-dark`, recordings also hold each camera's newest dark frame as `<name>_dk`, which doubles the rate. With `--with-color`, each colour camera's newest frame is saved with every set, as `color_video<N>`, which adds about 70 MB/s. Run the recorder at normal I/O priority: idle I/O priority stalled a 165 MB/s recording.
 - `--keep-presence P`: the landmark presence a tracked view needs to stay tracked. New views always need 0.5. Default 0.5. Lowering it to 0.2 barely helped in the bright recording, because lost hands drop to near-zero presence.
 - `--ring PATH`: read frames from another ring, such as `ft-ringplay`'s.
-- `--cams auto|mono|color|all` (`HANDS_CAMERAS`, default `auto`): which cameras to track with. The mono IR cameras light the hands themselves and track well in dim rooms, but in bright light they expose for the room and the hands come out dark. The colour pair is the other way round. `auto` goes by the colour frames' mean brightness: at `--bright-on` (`HANDS_BRIGHT_ON`, 40) or over for 2 s it tracks with `--bright` (`HANDS_BRIGHT`: `all`, every camera, the default, or `color`), and under `--bright-off` (`HANDS_BRIGHT_OFF`, 25) for 2 s with the mono cameras again. A dim evening room read 9. The switch is logged (`cameras: mono -> all (...)`), and the status line gives the colour level, the mono cameras' ambient IR, and how many steps had colour frames. Colour frames arrive on their own schedule, so a step holds the mono set, the colour pair, or both, and views wait in their camera for its next frame.
+- `--cams auto|mono|color|all` (`HANDS_CAMERAS`, default `auto`): which cameras to track with. The mono IR cameras light the hands themselves and track well in dim rooms, but in bright light they expose for the room and the hands come out dark. The colour pair is the other way round. `auto` goes by the colour frames' mean brightness: at `--bright-on` (`HANDS_BRIGHT_ON`, 40) or over for 2 s it tracks with `--bright` (`HANDS_BRIGHT`: `all`, every camera, the default, or `color`), and under `--bright-off` (`HANDS_BRIGHT_OFF`, 25) for 2 s with the mono cameras again. A dim evening room read 9. The switch is logged (`cameras: mono -> all (...)`), and the status line gives the colour level, the mono cameras' ambient IR, and how many steps had colour frames. Colour frames arrive on their own schedule, so a step holds the mono set, the colour pair, or both, and views wait in their camera for its next frame. With no colour cameras in the ring (ft-camd without `--with-color`, as the service runs it), ft-hands tracks with the mono cameras whatever this says.
 - `--color-left NODE` (`HANDS_COLOR_LEFT`, `color_video0`) and `--color-crop subtract|none` (`HANDS_COLOR_CROP`, `subtract`): how the colour module's calibration maps onto the images. Not settled yet: `tools/check_color.py` on a recording with a lit, textured view tells.
-- `--grip-begin R`, `--grip-end R`: the grip detector (below).
+- `--grip-begin R`, `--grip-end R`: the grip detector (below). Defaults 1.2 and 1.45.
+- `--gesture-log`: print what the pinch and grip detectors measure, 10 times a second: each hand's thumb-to-index distance (world and triangulated), its palm-down reading and its finger curl.
 
 **Gestures** (`/run/user/UID/frametop-hands/gestures`, `include/fh_gestures.h`), for the pointer helper:
 
-- A pinch: the thumb and index tips within 2 cm, ending past 3.5 cm. Not begun with the palm facing down (`--pinch-palm-down`, 0.6), which is how typing looks.
-- A grip, a closed hand: every finger's tip nearer the wrist than 1.2 times its knuckle is (from the model's 3D hand, so hand size doesn't matter), ending when they open past 1.45 on average. It begins only on a hand seen open within the last second (closing it is the gesture), with the palm at most 35 degrees below straight ahead and at least 15 cm in front of the eyes. A grip ends a pinch on the same hand, as lost. In the 2026-09-30 lit recording (no deliberate fists), the checks cut false grips from 14 to 6, all with the hands on the desk while looking down at it; the pointer helper ignores grips that begin more than 30 cm below the eyes, which it can tell and ft-hands can't.
+- A pinch: the thumb and index tips within 2 cm, ending past 3.5 cm (see "Pinch" below).
+- A grip, a closed hand: every finger's tip nearer the wrist than 1.2 times its knuckle is (from the model's 3D hand, so hand size doesn't matter), ending when they open past 1.45 on average. It begins only on a hand seen open within the last second (closing it is the gesture), with the palm at most 35 degrees below straight ahead and at least 15 cm in front of the eyes, and not with the thumb within 3 cm of the index tip (that's a pinch with the other fingers curled). A grip ends a pinch on the same hand, as lost. In the 2026-09-30 lit recording (no deliberate fists), the checks cut false grips from 14 to 6, all with the hands on the desk while looking down at it. The pointer helper ignores grips that begin more than `POINTER_GRIP_BELOW` (0.35 m) below the eyes, which it can tell and ft-hands can't.
 - `tools/watch_gestures.py --distance` shows both live; `ft-handreplay --timeline` logs them and each hand's finger curl.
 
 The status line also says how often a hand was on each side (by where the wrist is), and why views and hands came and went: views lost (the landmark model stopped seeing the hand), handoff misses (a crop projected from the hand's 3D position found nothing), duplicates, splits (two views disagreed in 3D), and hands created, merged and forgotten.
@@ -125,13 +141,30 @@ How good the depth is, measured from recordings (2026-09-30, `--depth` below): t
 ft-hands detects a pinch per hand (`track/pinch.h`) and publishes it to the gestures file. The layout, and how to read it without missing quick taps, is in `include/fh_gestures.h`.
 
 - A pinch begins when the thumb and index tips come within `--pinch-begin` (default 0.020 m). It ends when they open past `--pinch-end` (0.035 m) for 2 processed frames in a row, or when the hand stays lost for 0.25 s (flagged lost).
-- The distance comes from MediaPipe's world landmarks: the model's own 3D hand pose, averaged over the hand's views, at the user's hand size. `--pinch-triangulated` uses the triangulated tips instead. On two recordings without deliberate pinches, the world landmarks came under 2 cm in 0.2-1% of frames, against 3.3-4.5% for the triangulated tips. In the dim recording, typing still gave 2 pinches a minute before the palm check below.
-- No pinch begins while the palm faces down (`--pinch-palm-down MAX`: the palm normal's share of the head's up axis, default 0.6; 1 turns it off), and a close held back that way has to open again before a pinch can begin. Typing curls the thumb onto the index. In the lit recording of 2026-09-30, typing on a keyboard in the lap began 23 pinches in about 2 minutes, all with the palm facing down (0.69-1.00), while the 26 deliberate ones read 0.00-0.50. The limit held back every typing pinch and none of the deliberate ones. Looking down tilts the head frame, which lowers the reading for a hand on a keyboard, so the consumer's gaze check stays the other guard.
+- The distance comes from MediaPipe's world landmarks: the model's own 3D hand pose, averaged over the hand's views, at the user's hand size. `--pinch-triangulated` uses the triangulated tips instead. On two recordings without deliberate pinches, the world landmarks came under 2 cm in 0.2-1% of frames, against 3.3-4.5% for the triangulated tips. In the dim recording, typing still gave 2 pinches a minute (see the next point).
+- `--pinch-palm-down MAX` holds back pinches begun with the palm facing down (MAX is the palm normal's share of the head's up axis). The default, 1, turns it off. A close held back that way has to open again before a pinch can begin. Typing curls the thumb onto the index: in the lit recording of 2026-09-30, typing on a keyboard in the lap began 23 pinches in about 2 minutes, all with the palm facing down (0.69-1.00), while the 26 deliberate ones read 0.00-0.50. But in the headset, deliberate pinches with the hand raised in front read 0.90-0.99 too, so the limit is off. Typing is caught by the pointer helper instead: the input relay tells it when you press a key, and no pinch begins within `POINTER_PINCH_TYPING` of one.
 - A hand a pinch is down on stays with that side until the pinch ends. The left/right call is a running average of the model's, and when it flipped mid-pinch, the other side took the same hand and both sides pinched at once.
-- The pinch point is midway between the thumb and index tips. A drag is the pinch point now, minus where it was when the pinch began, both turned into the room with the HMD pose at their capture times.
+- The pinch point is between the index and middle knuckles, which hold still while the fingers open and close. The tips' midpoint moved 1-2 cm as a pinch opened, which dragged every release off its press. A drag is the pinch point now, minus where it was when the pinch began, both turned into the room with the HMD pose at their capture times.
 - `tools/watch_gestures.py` prints begins, ends and drag offsets live, and `--distance` prints each hand's distance.
 
-The pointer helper is the natural consumer. Its gaze mode already treats a press as "stop where the gaze put it, drag onto the target, click on release", and "hold still for half a second, then move" as a drag. A pinch begin would be the press, the end the release, and the pinch point's movement the drag.
+## Pinches and grips in the pointer
+
+With `POINTER_HANDS=1`, the pointer helper (`pointer/helper/ft-pointer.cpp`) reads the gestures file every frame. It's off by default.
+
+- **Pinch to click.** In gaze mode a pinch works like the mouse's press: the pointer stops where the gaze put it, and the click comes when the pinch opens, where the pointer is then. A quick tap clicks where you looked. Held, the pinching hand moves the pointer to correct the gaze, and the correction is a lesson for the gaze tracker, as with the mouse.
+- **Without gaze mode,** a pinch is a real press, like the mouse's button: pressed when it closes, released when it opens, and while it's held the hand drags the pointer. A tap is still a click where the pointer is.
+- **Grip to drag.** Closing the hand presses where the pointer is, the hand moves the pointer, and opening the hand releases. So a title bar moves its window, a panel's grab bar carries the panel, and text gets selected.
+- A pinch ended by losing the hand, or by a grip taking over, doesn't click.
+- The hand's movement is taken in the room, from where the eye was when the gesture began, so turning your head doesn't move the pointer. The first gesture while the pointer is off only wakes it. Gestures are ignored in a VR game (unless the dashboard is up), with the headset off, and while the mouse's button is held.
+
+Settings in `~/.config/frametop.conf`:
+
+- `POINTER_HANDS` (0): 1 turns pinches and grips on.
+- `POINTER_PINCH_GAIN` (0.5): a held pinch moves the pointer this many times the hand's angle, seen from the eye. Under 1 gives precision.
+- `POINTER_PINCH_DEADZONE` (1.5): how many degrees the pinching hand moves before the pointer does, so a tap's jitter and the pinch point shifting as the fingers close don't move it.
+- `POINTER_GRIP_GAIN` (1): a grip moves the pointer this many times the hand's angle.
+- `POINTER_GRIP_BELOW` (0.35): grips that begin more than this many metres below the eyes are ignored, because hands resting on a desk curl like a loose fist. Pinches have no such limit: deliberate ones sat 0.35-0.45 m below the eyes with the elbow resting.
+- `POINTER_PINCH_TYPING` (1): no pinch begins within this many seconds of a key press, because typing touches thumb to index.
 
 ## Recordings
 
@@ -160,10 +193,22 @@ Python, with NumPy and OpenCV (in the dev container: `python3-numpy`, `python3-o
 - `tools/check_sides.py --ring` (or a recording): are the side cameras named right?
 - `tools/check_color.py REC`: how the colour module's calibration maps onto its images.
 - `tools/show_set.py REC`: a recording's frame sets as images.
-- `tools/watch_gestures.py [--distance]`: pinches, live.
+- `tools/watch_gestures.py [--distance]`: pinches and grips, live.
 - `tools/depth_report.py DEPTH`: the depth measures above.
+- `tools/cut_sets.py REC OUT [--sets N | --at I,J,...]`: copies a few frame sets (by default 8, spread evenly) out of a recording into a small one, to look at or check elsewhere without moving gigabytes. Plain Python, so it also runs on the Frame's host.
 - `tools/convert_models.py`: how `models/ncnn` was made from the OpenCV Zoo ONNX ports of MediaPipe's models (see `models/NOTICE`).
+
+To try the hand cutouts without restarting the desktop, `screens/build/ft-handtest [--distance m] [--width m] [--seconds s]` (built by `screens/build.sh`, run in the dev container, with hand tracking on) shows a test panel of its own, a light grid 1 m wide and 0.8 m ahead by default, and cuts your hands out of it the way ft-screens cuts them out of the screens.
 
 ## Build
 
-`hands/build.sh` builds in the dev container on the Frame, into `hands/build/`, with `hands/Makefile`. The first build fetches ncnn at a pinned tag and builds it into `hands/build/ncnn`, which takes a few minutes; `NCNN=DIR` points at an ncnn install already built instead. ft-camd is linked statically, because it runs on the host, which has an older glibc than the container.
+`hands/build.sh` builds in the dev container on the Frame, into `hands/build/`, with `hands/Makefile`. The first build fetches ncnn at a pinned tag (`NCNN_TAG` in the Makefile) and builds it into `hands/build/ncnn`, which takes a few minutes; `NCNN=DIR` points at an ncnn install already built instead. ft-camd is linked statically, because it runs on the host, which has an older glibc than the container.
+
+## Known issues
+
+- **The side cameras can come out swapped.** ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and some XRService restarts reverse it. For now it's caught by hand: `tools/check_sides.py --ring`, then `HANDS_SWAP_SIDES=1`. It needs a fix in ft-camd, or at least an automatic check when it starts.
+- **The colour cameras can't be used while the headset is worn.** The colour module then writes only a half-size image into the top-left quarter of its buffers, and ft-camd drops those frames. So the service runs the mono cameras only, and tracking in bright light, where the mono cameras see dark hands, doesn't get the colour pair's help.
+- **The colour calibration mapping isn't settled.** Which colour camera is `passthrough_left` (`HANDS_COLOR_LEFT`) and how the module's crop applies (`HANDS_COLOR_CROP`) still need `tools/check_color.py` on a recording with a lit, textured view.
+- **Depth when one camera loses the hand.** A hand seen in one camera drifts 10% per update toward the one-camera depth guess (`kMonoDepthGain`, 0.1, in `track/tracker.cpp`). In the 2026-09-30 replays that was worse than keeping the last distance (see "3D" above). A smaller gain, such as 0.02, is the next thing to try.
+- **Pinches aren't reliable enough for everyday use yet.** That's why hand tracking stays off until `ft-handsctl on`, and `POINTER_HANDS` is 0 by default.
+- **Floating windows don't get hand cutouts.** Their panels show crops of the client buffer, which the cutouts' side-by-side buffer doesn't match (`screens/vr.cpp`, `UpdateCutouts`).
