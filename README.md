@@ -54,6 +54,7 @@ If you work in the desktop for long stretches, or leave the headset on a stand, 
 | Set a screen to On your head (Frametop Display Settings, Visibility & pins) | Pins it to your head where it is, like a HUD. Grab its bar to move it; it stays on your head |
 | Save current arrangement… (Frametop Display Settings, Layout) | Saves where the screens are, with their sizes and pins, under a name. Pick a saved layout under Arrangement and press Arrange now to switch to it |
 | Meta+Shift+R in the desktop | Puts the screens back in their layout (also in the menu as Reset Screen Layout, and mappable to a mouse button) |
+| Meta+Shift+F over a desktop window | Floats that window in VR as a panel of its own, or puts it back on its screen if it floats. It acts on the window under the pointer, or the active one if the pointer is over the wallpaper. Rebind it, or map it to a mouse or controller button, in Frametop Input Settings (Keyboard page, or Buttons and Controllers as Float window in VR). Float in VR is also in every window's menu (Alt+F3) |
 | Meta+Shift+H in the desktop | Hides or shows all screens (also in the menu as Hide/Show Screens, and mappable). The Visibility & pins tab of Frametop Display Settings can instead show them only with the dashboard open, or while you look at your wrist |
 | Leave the headset on a stand | Its displays turn off once it has gone unused for the time set in Frametop Display Settings → Power, even if the stand covers its proximity sensor. Pick it up, or use any mouse, keyboard, or button, and they come back on |
 | Play a VR game | The screens hide and your controllers stay in the game. Open the SteamVR dashboard, or press Meta+Shift+H, to see and use them. To keep them visible over games, change During VR games on the Visibility & pins tab; the controllers still stay in the game, and you use the screens with the mouse or the dashboard |
@@ -125,6 +126,7 @@ A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland com
 | `screens/` | ft-screens, the compositor (wlroots and OpenVR). |
 | `session/` | The desktop session script and its config example. |
 | `layout/` | ft-layout: where the screens float, and their sizes. |
+| `float/` | Floating windows: ft-floatd and the KWin script that float a desktop window in VR. |
 | `input/` | The input relay (Bluetooth mice and keyboards, button maps). |
 | `pointer/` | The 3D mouse: SteamVR driver, helper service, and a probe tool. |
 | `power/` | ft-powerd: turns the displays off while the headset isn't used. |

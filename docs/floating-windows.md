@@ -10,7 +10,9 @@ Built so far (2026-09-29; the KWin side tested on the headless test desktop, `sc
 - The session adds `FLOAT_SLOTS` spares and starts ft-floatd from the desktop's autostart; ft-layout leaves the spares alone.
 - The 3D mouse's drag lock crosses onto other Frametop panels (not while carrying one).
 
-Not built yet: phase 2 (the ghost, tear-off by dragging, push-flush docking), phase 3 (launching floating, the Frametop Apps entry and picker, remembered placement), and phase 4. Frametop Apps (decision 10) needs a per-screen hide, which ft-screens doesn't have yet: its hide and show are for all screens.
+Not built yet: phase 2 (the ghost, tear-off by dragging, push-flush docking), phase 3 (launching floating, Launch as Standalone, remembered placement), and phase 4.
+
+Build order from 2026-09-30, each merged into `experimental` when done: (1) the float key and docking everything, (2) the title bar button, (3) phase 3, (4) hiding screens one at a time, (5) profiles (`docs/profiles.md`).
 
 The goal is to let any desktop app float in VR in a panel of its own, like SteamVR's floating windows, while it stays part of the Frametop desktop. That means drag and drop, the clipboard, and focus keep working between floating windows and the screens.
 
@@ -20,7 +22,7 @@ The goal is to let any desktop app float in VR in a panel of its own, like Steam
 
 ## Decisions
 
-Settled with the user on 2026-09-29. The sections below follow them.
+Settled with the user on 2026-09-29 (1 to 21) and 2026-09-30 (22 to 27). The sections below follow them.
 
 | # | Question | Decision |
 |---|---|---|
@@ -30,10 +32,10 @@ Settled with the user on 2026-09-29. The sections below follow them.
 | 4 | Docking by dragging | Push the window flush against a screen (within about 10 cm), with the landing spot highlighted, and let go |
 | 5 | Visibility | Floating windows follow the same rules as the screens: the hide hotkey, the visibility modes, and the games rule |
 | 6 | Windows a floating app opens | They float too |
-| 7 | Launching floating from the headset | One "Frametop Apps" launcher entry with a picker |
+| 7 | Launching floating from the headset | ~~One "Frametop Apps" launcher entry with a picker~~ Replaced by 26 and profiles (27) |
 | 8 | Build order | The catcher first, as a fix that stands on its own; `pointer-ignore` and `layouts-headpin` merged before phase 1; the hand cutouts stay out |
 | 9 | Show Desktop (Meta+D) | Floating windows stay |
-| 10 | Frametop Apps and visibility | The entry starts the desktop with each screen hidden on its own (the existing per-screen hide), so only floating windows show. No special mode |
+| 10 | Frametop Apps and visibility | ~~The entry starts the desktop with each screen hidden on its own, so only floating windows show~~ Replaced: a profile can hide screens (27) |
 | 11 | Window frame | KWin's title bar and border stay. Frametop's bar, close, and "back to desktop" are extras |
 | 12 | Resizing | The window's own edges and Frametop's corner tab both change the size in pixels at the same density; the output follows |
 | 13 | Margin | 300 px on each side, configurable |
@@ -44,7 +46,13 @@ Settled with the user on 2026-09-29. The sections below follow them.
 | 18 | Bigger text | A scale for each window (KWin's output scale): Meta+scroll over the window, or +/- on its bar. Remembered for each app |
 | 19 | Switching to a window you can't see | It's focused, and a glow at the edge of your view points to it. Moving it in front of you is a setting |
 | 20 | Full screen | The window fills its own panel. The margin drops to zero while it's full screen, and the panel keeps its size and place |
-| 21 | Named layouts | They cover the screens only. Floating windows use the placement remembered for each app |
+| 21 | Named layouts | ~~They cover the screens only~~ Replaced by profiles (27). Outside a profile, floating windows use the placement remembered for each app |
+| 22 | The float key | One toggle: it floats a window, or docks it if it already floats. The input relay owns it (`float_toggle`), Meta+Shift+F by default, rebindable in Frametop Input Settings and mappable to mouse and controller buttons. KWin has no shortcut of its own for it, so one press can't fire twice |
+| 23 | Which window the key acts on | The window under the desktop's pointer; the active window if there's none there (the wallpaper, the taskbar) |
+| 24 | Docking everything | A `dock_all` action, with no default binding |
+| 25 | A button on every window | A float button left of Close in the title bar, from Frametop's own QML window decoration, made to look like Breeze. It shows a dock icon on floating windows. Apps that draw their own title bar (Chromium, Electron, GTK) use the key |
+| 26 | Launching one app floating | "Launch as Standalone" in the right-click menu of every app in the Application Launcher and the taskbar, from copies of the apps' desktop files that only the Frametop desktop reads. It replaces the Frametop Apps entry (7, 10) |
+| 27 | Profiles | Named layouts become profiles: the screens' places, which screens show, and the apps and their windows, floating or not. See `docs/profiles.md` |
 
 Also assumed: floating windows get the wrist pin, the head pin, and pass-through (`pointer-ignore`) like screens. Every gesture works with the controllers as well as the 3D mouse. A window launched floating uses the primary screen's density. VNC shows only the primary screen, as now. Anything that restarts the live desktop waits for the user's OK.
 
@@ -121,13 +129,22 @@ Program names stay within 15 characters (`ft-floatd`). Overlay keys are `frameto
 - **Dragging.** Carry the floating window, by its title bar or its bar, until the spot you're pointing at is on a screen. Then push it flush with the screen, within about 10 cm of its surface: scroll away with the mouse, or move the controller forward. The screen shows where the window will land, and letting go docks it there at its current size in pixels, shrunk to fit if the screen is smaller. A carried panel keeps its distance, so moving a floating window in front of a screen never docks it by accident.
 - Docking disables the output and removes the panel.
 
+## Getting at it: the float key and the title bar button
+
+Settled on 2026-09-30 (decisions 22 to 25).
+
+- **The float key.** The input relay owns it: the action `float_toggle`, bound to Meta+Shift+F unless the rules file says otherwise (a rules file with no `key_bindings` gets that default; one with its own list, even an empty one, doesn't). It can be rebound or removed in Frametop Input Settings, and mapped to a mouse button or a Frame controller button like any other action. The relay takes the combination before it reaches the desktop and sends `float pointer` to ft-floatd, which asks the script for the window under KWin's pointer (`workspace.cursorPos`, top of `workspace.stackingOrder`, popups and dialogs counting as their parent). With none there, the wallpaper or the taskbar, it's the active window. KWin's pointer is where the 3D mouse or a laser last was on a Frametop panel. A window that floats docks; any other floats. The KWin script no longer registers a shortcut of its own, so one press can't float a window and dock it again.
+- **Docking everything.** `dock_all` (no default binding) sends `dock all`, which docks every floating window where it came from.
+- **The title bar button.** Breeze can't take a button of its own, and a C++ fork of it would have to match SteamOS's exact KDecoration build (Plasma 6.3 replaces KDecoration2 with KDecoration3). So the Frametop desktop gets its own window decoration, written in QML for KWin's Aurorae engine, which loads it without compiling (`decoration/`, installed to `~/.local/share/kwin/decorations/kwin4_decoration_qml_frametop`, chosen in the session's `kwinrc` only, so Desktop Mode keeps Breeze). It's drawn to look like Breeze, with a float button left of Close. The button calls `requestToggleKeepBelow()`, the one window request a decoration can make that has no visible effect here, and the KWin script reads the change: keep-below set on a window on the screens floats it, cleared on a floating window docks it. The script keeps keep-below set on every floating window, however it was floated, so the button shows its dock icon there. A window alone on its own output loses nothing by being kept below (only the wallpaper is under it). If the window can't float (every spare is in use), the script clears the flag again. Keep Below Others in a window's menu does the same as the button.
+- **Apps that draw their own title bar** (Chromium and Electron apps, GTK apps) never show KWin's decoration, so they don't get the button. They use the key, or the window menu (Alt+F3).
+
 ## Launching an app floating
 
-- **In the desktop.** Use "Float in VR" in any window's menu, or press Meta+Shift+F for the active window.
+- **In the desktop.** Use "Float in VR" in any window's menu, its title bar button, or the float key.
+- **From the menu.** Right-click an app in the Application Launcher, or in the taskbar (where it starts another window of that app), and pick "Launch as Standalone" (decision 26). The launcher has no way to add an entry to every app's menu, but its menu shows each app's own desktop actions. So the Frametop desktop reads copies of the apps' desktop files with one more action added. They're written to `~/.local/share/frametop/apps/applications` from every desktop file in `XDG_DATA_DIRS`: by the session script before Plasma starts, and by ft-floatd whenever an app is installed, changed, or removed. The session puts `~/.local/share/frametop/apps` first in `XDG_DATA_DIRS`. Plasma's app cache is keyed by those directories, so Desktop Mode never sees the copies. Desktop files in `~/.local/share/applications` come before every data dir, so an app you've customized there keeps your copy and has no Launch as Standalone. The action runs `ft-float launch <desktop file name>`.
 - **From a command.** `ft-float run <command>` and `ft-float launch <app.desktop>` start an app and float its first window. ft-floatd records the process it started, and the script matches new windows by PID, including child processes. Some single-instance apps (Firefox, D-Bus-activated apps) open the window from a process that was already running. Those are matched by desktop file name within a few seconds, or by `XDG_ACTIVATION_TOKEN` where the app honors it.
-- **From the headset without the desktop open.** One new launcher entry, "Frametop Apps". It starts the Frametop session with each screen hidden on its own (the per-screen hide that already exists), and opens an app picker as a floating window. Picking an app launches it floating. The hide hotkey and visibility modes still apply to everything, and a screen comes back with one click. Everything runs in one session, so dragging between a standalone app and a desktop app works. If the desktop is already running, the entry just opens the picker.
-- **The picker.** Either KRunner, floated, or a small Kirigami app like the settings apps, with a grid of apps and their icons.
-- **Remembered placement.** Each app's last floating pose, size, and scale, keyed by desktop file name. Named layouts don't include floating windows.
+- **From the headset with the desktop off.** A profile's launcher entry starts the desktop in that profile, and a profile can hide every screen and hold only floating apps (`docs/profiles.md`). There's no separate Frametop Apps entry or picker.
+- **Remembered placement.** Each app's last floating pose, size, and scale, keyed by desktop file name. A profile's own placement wins when the profile opens the app.
 
 ## Drag and drop between panels
 
@@ -196,7 +213,7 @@ The ghost and tear-off, and the dock highlight with push-flush docking.
 
 ### Phase 3: launch floating
 
-`ft-float run` and `ft-float launch`, window matching, new windows of floating apps, the Frametop Apps launcher entry, the picker, remembered placement, and the notification when every spare is in use.
+`ft-float run` and `ft-float launch`, window matching, new windows of floating apps, Launch as Standalone, remembered placement, and the notification when every spare is in use.
 
 ### Phase 4: polish
 

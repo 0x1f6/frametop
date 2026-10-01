@@ -29,16 +29,21 @@ the release clicks; held still for half a second, it's a real press that your he
 ("gazekey left|right 1|0" to the helper; by default Meta+J and Meta+K, DEFAULT_KEY_BINDINGS),
 gaze_quickcal = the gaze service's one-dot check ("quickcal" to @ft_gazed), sens_up, sens_down,
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
-keyboard_toggle = open or close Frametop's keyboard, key = pass through as a key, none).
+keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the desktop window under the
+pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
+window back (both to ft-floatd, @frametop_float), key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
 rules file; any action but key and the gaze ones, GAZE_ACTIONS: gaze mode is a mouse feature,
 docs/gaze-controllers.md). So can key combinations on any keyboard ("key_bindings":
 {"29+56+34": action}, evdev codes joined by "+", modifiers first and left-hand codes for
 either side, here Ctrl+Alt+G): the combination does the action, and its last key isn't typed.
-A combination with Meta also sends the desktop an F24 press and Meta's release right away: so
-letting go of Meta doesn't open Plasma's launcher, and a gaze click isn't Meta+click (KWin's
-window move and resize). Another key while Meta is still held gives the desktop Meta back. The controllers aren't input devices here, only SteamVR sees
+A rules file without "key_bindings" gets DEFAULT_KEY_BINDINGS (Meta+J: gaze_left, Meta+K:
+gaze_right, Meta+Shift+F: float_toggle); one with its own, even an empty one, doesn't. The float
+actions work without pointer mode too. A combination with Meta also sends the desktop an F24 press
+and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and a gaze
+click isn't Meta+click (KWin's window move and resize). Another key while Meta is still held gives
+the desktop Meta back. The controllers aren't input devices here, only SteamVR sees
 them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
 It only takes the buttons the relay tells it to ("vrbind <button>..." to @ft_pointer_helper,
 sent on start, reload, and when the helper says "vrhello"), and only while no game runs,
@@ -182,12 +187,13 @@ VIRTUAL_PREFIX = "frametop virtual"
 RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right",
-           "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "key", "none")
+           "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "float_toggle",
+           "dock_all", "key", "none")
 # Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
-# Key combinations when the rules file has none: Meta+J and Meta+K click at the gaze (free on the
-# Frametop desktop, and apps don't use Meta).
-DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right"}
+# Key combinations a rules file without "key_bindings" gets: Meta+J and Meta+K click at the gaze
+# (free on the Frametop desktop, and apps don't use Meta), Meta+Shift+F floats a window.
+DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
 KEY_F24 = 194  # sent to the desktop with a Meta combination (see the top)
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
@@ -200,6 +206,9 @@ VR_BUTTONS = ("left/view", "left/dpad_up", "left/dpad_down", "left/dpad_left", "
 VR_DEVICE = "frame_controller"  # the id controller buttons have in watch events
 SCREENS = "\0ft_screens"
 GAZED = "\0ft_gazed"
+FLOAT = "\0frametop_float"  # ft-floatd, floating windows in the Frametop desktop
+# Actions for ft-floatd ("float_toggle", "dock_all"): they don't need pointer mode.
+FLOAT_ACTIONS = {"float_toggle": b"float pointer", "dock_all": b"dock all"}
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
 FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
 DEFAULT_BUTTONS = {BTN_LEFT: "left", BTN_RIGHT: "right", BTN_MIDDLE: "middle",
@@ -307,7 +316,8 @@ def read_rules(path=RULES_PATH):
     rules.setdefault("devices", {})
     rules.setdefault("buttons", {})
     rules.setdefault("controller_buttons", {})
-    rules.setdefault("key_bindings", dict(DEFAULT_KEY_BINDINGS))
+    if not isinstance(rules.get("key_bindings"), dict):
+        rules["key_bindings"] = dict(DEFAULT_KEY_BINDINGS)
     return rules
 
 
@@ -713,11 +723,19 @@ def main():
             vr_keyboard("show")
 
     def do_action(action, value, now, source="mouse"):
-        """A mapped mouse or controller button, or key combination (pointer mode only)."""
+        """A mapped mouse or controller button, or key combination (pointer mode only, but
+        for FLOAT_ACTIONS)."""
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
-        else:
+        elif action in FLOAT_ACTIONS:
+            if value == 1:
+                try:
+                    screens_sock.sendto(FLOAT_ACTIONS[action], FLOAT)
+                except OSError:
+                    pass  # the Frametop desktop isn't running
+                log(action)
+        elif state["pointer"]:
             state["pointer"].action(action, value, now, source)
 
     held_modifiers = set()  # on any keyboard, folded (MODIFIERS)
@@ -745,7 +763,7 @@ def main():
             meta_hidden.clear()
         if value == 0 and code in combos_down:
             action = combos_down.pop(code)
-            if state["pointer"]:
+            if state["pointer"] or action in FLOAT_ACTIONS:
                 do_action(action, 0, now, "keyboard")
             return True
         if value != 1 or not state["rules"]["key_bindings"]:
@@ -766,7 +784,7 @@ def main():
             for c in sorted(held_meta - meta_hidden):
                 to_screens(c, 0)
             meta_hidden.update(held_meta)
-        if state["pointer"]:
+        if state["pointer"] or action in FLOAT_ACTIONS:
             do_action(action, 1, now, "keyboard")
         log(f"key combination {combo}: {action}")
         return True
