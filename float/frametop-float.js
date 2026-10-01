@@ -2,7 +2,7 @@
 // loads it into the desktop's KWin over D-Bus (org.kde.kwin.Scripting) and talks to it:
 //   - events go to ft-floatd as JSON strings (org.frametop.Float.Event), for the windows it
 //     cares about: floating windows (the ones on a spare output, WL-<screens> and up), their
-//     popups and dialogs, new windows, and "Float in VR" requests;
+//     popups and dialogs, new windows, and requests to float or dock one;
 //   - commands come back through a long poll: the script calls NextCommand, ft-floatd
 //     answers when it has one (or after a while with nothing), and the script calls again.
 // KWin scripts can call D-Bus but can't serve it, hence the poll. Window ids are KWin's
@@ -104,8 +104,26 @@ registerUserActionsMenu(w => {
         triggered: () => requestFloat(w)
     };
 });
-registerShortcut("Frametop Float Window", "Frametop: Float Window in VR (or put it back)", "Meta+Shift+F",
-                 () => requestFloat(workspace.activeWindow));
+// The float key is the input relay's (float_toggle, Meta+Shift+F by default): it reaches us as
+// "request-pointer". No shortcut of KWin's own, so one press can't float a window and dock it again.
+
+// The window under KWin's pointer (where the 3D mouse or a laser last was on a panel): the top
+// one there, a popup or dialog standing for the window it belongs to. Null over the wallpaper
+// or the taskbar.
+function underPointer() {
+    const p = workspace.cursorPos;
+    const order = workspace.stackingOrder;
+    for (let i = order.length - 1; i >= 0; --i) {
+        const w = order[i];
+        if (w.deleted || w.minimized || w.hidden || !w.managed) continue;
+        const g = w.frameGeometry;
+        if (p.x < g.x || p.y < g.y || p.x >= g.x + g.width || p.y >= g.y + g.height) continue;
+        let top = w;
+        for (let n = 0; top.transientFor && n < 10; ++n) top = top.transientFor;
+        return top.normalWindow && !top.popupWindow ? top : null;
+    }
+    return null;
+}
 
 function run(c) {
     const w = c.id ? byId(c.id) : null;
@@ -140,8 +158,11 @@ function run(c) {
         case "info":
             if (w) report("window", w);
             break;
-        case "request-active":  // ft-float float|dock active: like the shortcut
+        case "request-active":  // ft-float float|dock active
             requestFloat(workspace.activeWindow);
+            break;
+        case "request-pointer":  // the float key: the window under the pointer, else the active one
+            requestFloat(underPointer() || workspace.activeWindow);
             break;
     }
 }

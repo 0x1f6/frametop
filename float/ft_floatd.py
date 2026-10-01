@@ -11,7 +11,9 @@ which window floats on which spare output and panel, and connects three parts:
   - kscreen-doctor, to turn spare outputs on and off and place them in KWin's layout.
 Commands and ft-screens' events arrive as datagrams on @frametop_float (ft-float is the
 command-line side). Replies go to the sender:
-  float [ID|active]   dock [ID|active]   close ID   list   quit          (ft-float)
+  float [ID|active|pointer]   dock [ID|active|all]   close ID   list   quit   (ft-float)
+  ("float pointer" is the float key: the window under the pointer, else the active one,
+  floated or docked; the input relay sends it for float_toggle, and "dock all" for dock_all)
   dock N | close N | resize N W H | scale N STEPS                      (ft-screens, N = its screen)
 
 Spare outputs are WL-<screens> .. WL-<screens + slots - 1>. A floating window's output is its
@@ -197,6 +199,14 @@ class Daemon:
             raise RuntimeError("KWin didn't load the script")
         bus.get_object("org.kde.KWin", f"/Scripting/Script{sid}").run(dbus_interface="org.kde.kwin.Script")
         log(f"script loaded ({sid})")
+        # Older scripts registered the float key with KWin; the input relay owns it now. Drop
+        # that shortcut, so System Settings doesn't list one that does nothing.
+        try:
+            accel = dbus.Interface(bus.get_object("org.kde.kglobalaccel", "/kglobalaccel"), "org.kde.KGlobalAccel")
+            if accel.unregister("kwin", "Frametop Float Window"):
+                log("dropped KWin's old float shortcut")
+        except dbus.DBusException:
+            pass
 
     # ------------------------------------------------------------ events from the script
 
@@ -519,6 +529,13 @@ class Daemon:
             return "ok"
         if cmd in ("float", "dock") and (not rest or rest[0] == "active"):
             self.command(cmd="request-active")
+            return "ok"
+        if cmd == "float" and rest == ["pointer"]:
+            self.command(cmd="request-pointer")
+            return "ok"
+        if cmd == "dock" and rest == ["all"]:
+            for f in list(self.floats.values()):
+                self.dock(f)
             return "ok"
         if cmd in ("dock", "close", "resize", "scale") and rest and rest[0].isdigit():
             f = self.by_panel(int(rest[0]))

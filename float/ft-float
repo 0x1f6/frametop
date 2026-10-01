@@ -2,7 +2,10 @@
 """ft-float: talk to ft-floatd (floating windows in the Frametop desktop).
 
   ft-float float [ID|active]   float a window (default: the active one; for it, a toggle)
+  ft-float float pointer       the float key: float the window under the pointer (else the
+                               active one), or put it back if it floats
   ft-float dock [ID|active]    put a floating window back on the desktop
+  ft-float dock all            put every floating window back
   ft-float close ID            close a window
   ft-float list                the spare outputs and what floats on them
 FT_FLOAT_SOCKET names ft-floatd's socket (default frametop_float).
