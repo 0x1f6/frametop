@@ -12,6 +12,7 @@ const SERVICE = "org.frametop.Float", PATH = "/Float", IFACE = "org.frametop.Flo
 let screens = 0;       // outputs WL-0 .. WL-<screens - 1> are screens; the rest are spares
 let polling = false;
 const watched = {};    // id -> true once its signals are connected
+let marking = false;   // the script itself is setting keep-below (see mark)
 
 function send(ev) {
     callDBus(SERVICE, PATH, IFACE, "Event", JSON.stringify(ev));
@@ -64,7 +65,8 @@ function watch(w) {
     watched[id] = true;
     const onSpare = () => isSpare(w.output);
     w.frameGeometryChanged.connect(() => { if (onSpare()) report("geometry", w); });
-    w.outputChanged.connect(() => report("output", w));
+    w.outputChanged.connect(() => { report("output", w); mark(w); });
+    w.keepBelowChanged.connect(() => keepBelowChanged(w));
     w.interactiveMoveResizeStarted.connect(() => {
         if (onSpare()) send({ev: "move-start", id: id, move: w.move, resize: w.resize, frame: rect(w.frameGeometry)});
     });
@@ -89,6 +91,33 @@ workspace.windowActivated.connect(w => {
     if (w && isSpare(w.output)) send({ev: "activated", id: String(w.internalId)});
 });
 workspace.windowList().forEach(watch);
+
+// Keep-below means "floating" in the Frametop desktop. The title bar's float button (Frametop's
+// window decoration, decoration/) is the Keep Below button, so setting the flag on a window on
+// the screens floats it, and clearing it on a floating one docks it. The script keeps the flag
+// set on every floating window, its dialogs included, and cleared everywhere else, however the
+// window got there. Kept below, a window alone on its own output only has the wallpaper under it.
+function marked(w) {
+    return w.managed && !w.deleted && !w.specialWindow && !w.popupWindow;
+}
+function topOf(w) {
+    let top = w;
+    for (let n = 0; top.transientFor && n < 10; ++n) top = top.transientFor;
+    return top;
+}
+function mark(w) {
+    if (screens === 0 || !marked(w)) return;
+    const want = isSpare(w.output);
+    if (w.keepBelow === want) return;
+    marking = true;
+    w.keepBelow = want;
+    marking = false;
+}
+function keepBelowChanged(w) {
+    if (marking || screens === 0 || !marked(w)) return;
+    const top = topOf(w);
+    if (w.keepBelow !== isSpare(top.output)) requestFloat(top);
+}
 
 function requestFloat(w) {
     if (!w || !w.normalWindow || w.popupWindow) return;
@@ -118,8 +147,7 @@ function underPointer() {
         if (w.deleted || w.minimized || w.hidden || !w.managed) continue;
         const g = w.frameGeometry;
         if (p.x < g.x || p.y < g.y || p.x >= g.x + g.width || p.y >= g.y + g.height) continue;
-        let top = w;
-        for (let n = 0; top.transientFor && n < 10; ++n) top = top.transientFor;
+        const top = topOf(w);
         return top.normalWindow && !top.popupWindow ? top : null;
     }
     return null;
@@ -130,7 +158,10 @@ function run(c) {
     switch (c.cmd) {
         case "config":
             screens = c.screens;
-            workspace.windowList().forEach(w => report("window", w));
+            workspace.windowList().forEach(w => { report("window", w); mark(w); });
+            break;
+        case "mark":  // after a float that didn't happen: keep-below back as it was
+            if (w) mark(w);
             break;
         case "place": {  // onto an output, at a frame rectangle (logical, global)
             if (!w) break;

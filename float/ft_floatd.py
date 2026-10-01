@@ -197,7 +197,10 @@ class Daemon:
         sid = int(kwin.loadScript(os.path.join(HERE, "frametop-float.js"), SCRIPT, signature="ss"))
         if sid < 0:
             raise RuntimeError("KWin didn't load the script")
-        bus.get_object("org.kde.KWin", f"/Scripting/Script{sid}").run(dbus_interface="org.kde.kwin.Script")
+        # Scripting.start runs every loaded script that isn't running. Not /Scripting/Script<id>'s
+        # run: a reloaded script gets the old one's id while the old one is still being deleted,
+        # so that path is still the old script's, and the new one would never run.
+        kwin.start()
         log(f"script loaded ({sid})")
         # Older scripts registered the float key with KWin; the input relay owns it now. Drop
         # that shortcut, so System Settings doesn't list one that does nothing.
@@ -355,6 +358,7 @@ class Daemon:
             return
         slot = self.free_slot()
         if slot is None:
+            self.command(cmd="mark", id=wid)  # the title bar button set keep-below for nothing
             self.notify(f"All {len(self.slots)} floating windows are in use. Put one back on the desktop "
                         "to float another.")
             return
