@@ -27,11 +27,14 @@ directions: look at each one.
           adjust the headset. A left click or Meta+J runs its guided check (dots, then looks
           down, up, left and right); a right click or Meta+K closes it, as does FIT_TIMEOUT.
 
-A dot captures itself: from CHECK_SETTLE after it shows (the eyes getting there), once the gaze
-has held within CHECK_SPREAD for CHECK_WINDOW (the probe's max spread and capture time). It's
-the gaze holding still that counts, not where the tracker puts it, so it works however far off
-the tracker is. A left click or Meta+J (the pointer helper's "calaccept") takes it now; a right
-click or Meta+K ("calquit") closes the panel. The pointer hides meanwhile ("calpanel 1",
+The quick check's dot captures itself: from CHECK_SETTLE after it shows (the eyes getting
+there), once the gaze has held within CHECK_SPREAD for CHECK_WINDOW (the probe's max spread and
+capture time). It's the gaze holding still that counts, not where the tracker puts it, so it
+works however far off the tracker is; a left click or Meta+J (the pointer helper's
+"calaccept") takes it now. The full calibration's and five's dots wait for that click: you
+click when you're looking at the dot (the user asked for that: a steady gaze isn't always on
+the dot), and the gaze held still up to then is taken (ACCEPT_SPREAD). They wait as long as
+it takes, up to CLICK_IDLE. A right click or Meta+K ("calquit") closes the panel. The pointer hides meanwhile ("calpanel 1",
 renewed every second; the helper shows it again by itself when that stops).
 
 What a capture teaches:
@@ -73,7 +76,7 @@ CHECK_SETTLE = 0.45
 CHECK_WINDOW = 0.6
 CHECK_SPREAD = 1.0     # degrees
 ACCEPT_SPREAD = 2.5    # degrees: a capture asked for (calaccept) takes this much
-DOT_TIMEOUT = 8.0      # seconds a dot of five or full waits; then it's skipped
+CLICK_IDLE = 120.0     # seconds a dot of five or full waits for its click; then the check closes
 QUICK_TIMEOUT = 6.0
 QUICK_COOLDOWN = 120.0
 DON_DELAY = 3.0        # seconds of eyes after AWAY_MIN without: the headset went on
@@ -391,9 +394,9 @@ class Checks:
         if c["kind"] == "full":
             self.to_panel(f"bg {ROUND_BG[rnd]}")
             self.to_panel(f"title Gaze calibration: {ROUND_NAMES[rnd]} round, {rnd + 1} of 3")
-            self.to_panel("text Look at the dot. Left click or Meta+J: now. Right click or Meta+K: stop")
+            self.to_panel("text Look at the dot and click (left click or Meta+J). Right click or Meta+K: stop")
         elif c["kind"] == "five":
-            self.to_panel(f"text Look at the dot ({c['i'] + 1} of {len(c['dots'])})")
+            self.to_panel(f"text Look at the dot and click ({c['i'] + 1} of {len(c['dots'])})")
         else:
             self.to_panel("text Look at the dot")
         self.to_panel(f"dot {yaw:.3f} {pitch:.3f} look")
@@ -437,10 +440,10 @@ class Checks:
         run.append((now, s, g[0], g[1]))
         window = [p for p in run if p[0] >= now - CHECK_WINDOW]
         held = now - run[0][0]
-        # The ring fills in quarters: each step is a new picture for the panel to upload, so
-        # few of them keep it solid.
+        # The quick check's ring fills in quarters: each step is a new picture for the panel, so
+        # few of them keep it solid. The others wait for the click (see the top): no ring.
         progress = math.floor(min(1.0, held / CHECK_WINDOW) * 4) / 4
-        if progress != self.last_progress:
+        if c["kind"] == "quick" and progress != self.last_progress:
             yaw, pitch, _ = c["dots"][c["i"]]
             self.to_panel(f"dot {yaw:.3f} {pitch:.3f} capture {progress:.2f}")
             self.last_progress = progress
@@ -449,7 +452,7 @@ class Checks:
             if sd <= ACCEPT_SPREAD:
                 self.capture(window)
             return
-        if held >= CHECK_WINDOW and len(window) >= 20:
+        if c["kind"] == "quick" and held >= CHECK_WINDOW and len(window) >= 20:
             sd, _ = spread([(p[2], p[3]) for p in window])
             if sd <= CHECK_SPREAD:
                 self.capture(window)
@@ -687,9 +690,8 @@ class Checks:
             return
         if c["kind"] == "quick" and now - c["started"] > QUICK_TIMEOUT:
             self.close("ignored")
-        elif c["kind"] != "quick" and now - c["shown"] > DOT_TIMEOUT:
-            log(f"{c['kind']} check dot {c['i'] + 1}: skipped (the gaze didn't hold still)")
-            self.skip()
+        elif c["kind"] != "quick" and now - c["shown"] > CLICK_IDLE:
+            self.close(f"no click on dot {c['i'] + 1} for {CLICK_IDLE:.0f} s")
 
     def periodic(self):
         svc = self.svc

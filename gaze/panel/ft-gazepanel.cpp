@@ -28,6 +28,13 @@
 //   hints <line>|<line>|...      fit: lines under the cards (empty to clear)
 //   ping
 //
+// Each picture goes into the next of three shared buffers (linear DMA-BUFs SteamVR imported
+// once, the size of the biggest panel; the texture bounds show the part in use), and the panel
+// switches to it, as screens/keyboard.cpp does. SetOverlayRaw, which uploads a new texture each
+// time, flickered on every change of the full calibration's 1024x768 picture, and in a live
+// test the headset kept showing an old picture after the panel had drawn new ones (2026-10-01).
+// It's only the fallback. A "show" makes the panel visible once its first picture is in.
+//
 // Options: --watch-stdin (quit when stdin closes: the service runs it), --socket NAME,
 // --distance METRES. Runs in the dev container (gaze/build.sh builds it into gaze/build).
 #include <openvr.h>
@@ -35,6 +42,9 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+#include <drm_fourcc.h>
+#include <fcntl.h>
+#include <gbm.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -66,6 +76,7 @@ std::atomic<bool> g_stop{false};
 stbtt_fontinfo g_font;
 std::vector<unsigned char> g_fontData;
 bool g_fontOk = false;
+constexpr int kMaxW = kFullW, kMaxH = kFullH;  // the buffers' size: the biggest panel
 struct Glyph {
     std::vector<unsigned char> bitmap;
     int w = 0, h = 0, xoff = 0, yoff = 0, advance = 0;
@@ -282,6 +293,96 @@ void Draw(Panel &p) {
 }
 
 
+// ---------------------------------------------------------------- the buffers (see the top)
+
+struct Buffer {
+    gbm_bo *bo = nullptr;
+    int fd = -1;
+    vr::SharedTextureHandle_t handle = 0;
+};
+
+struct Buffers {
+    int drm = -1;
+    gbm_device *gbm = nullptr;
+    Buffer b[3];
+    int next = 0;
+    bool ok = false;
+
+    bool Make() {
+        drm = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+        if (drm >= 0) gbm = gbm_create_device(drm);
+        for (Buffer &x : b) {
+            // ABGR8888 is R, G, B, A in memory, like Panel::px.
+            if (gbm) x.bo = gbm_bo_create(gbm, kMaxW, kMaxH, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+            if (!x.bo || (x.fd = gbm_bo_get_fd(x.bo)) < 0) break;
+            vr::DmabufAttributes_t a{};
+            a.unWidth = kMaxW, a.unHeight = kMaxH;
+            a.unDepth = a.unMipLevels = a.unArrayLayers = a.unSampleCount = 1;
+            a.unFormat = DRM_FORMAT_ABGR8888;
+            a.ulModifier = DRM_FORMAT_MOD_LINEAR;
+            a.unPlaneCount = 1;
+            a.plane[0].unOffset = gbm_bo_get_offset(x.bo, 0);
+            a.plane[0].unStride = gbm_bo_get_stride(x.bo);
+            a.plane[0].nFd = x.fd;
+            if (!vr::VRIPCResourceManager()->ImportDmabuf(vr::VRApplication_Overlay, &a, &x.handle)) x.handle = 0;
+            if (!x.handle) break;
+        }
+        ok = b[2].handle != 0;
+        if (!ok) {
+            std::fprintf(stderr, "ft-gazepanel: no shared buffers; falling back to SetOverlayRaw (it flickers)\n");
+            Drop();
+        }
+        return ok;
+    }
+
+    void Drop() {
+        for (Buffer &x : b) {
+            if (x.handle) vr::VRIPCResourceManager()->UnrefResource(x.handle);
+            if (x.fd >= 0) close(x.fd);
+            if (x.bo) gbm_bo_destroy(x.bo);
+            x = Buffer{};
+        }
+        if (gbm) gbm_device_destroy(gbm);
+        if (drm >= 0) close(drm);
+        gbm = nullptr, drm = -1, ok = false;
+    }
+
+    // p's picture to the overlay: into the next buffer, premultiplied (the overlay's flag says
+    // so), then the overlay switches to it.
+    void Present(vr::IVROverlay *ov, vr::VROverlayHandle_t h, const Panel &p) {
+        vr::EVROverlayError e;
+        if (!ok) {
+            e = ov->SetOverlayRaw(h, const_cast<uint8_t *>(p.px.data()), uint32_t(p.w), uint32_t(p.h), 4);
+        } else {
+            Buffer &x = b[next];
+            next = (next + 1) % 3;
+            uint32_t stride = 0;
+            void *mapping = nullptr;
+            auto *dst = static_cast<uint8_t *>(gbm_bo_map(x.bo, 0, 0, p.w, p.h, GBM_BO_TRANSFER_WRITE, &stride, &mapping));
+            if (!dst) {
+                std::fprintf(stderr, "ft-gazepanel: can't map a buffer\n");
+                return;
+            }
+            for (int y = 0; y < p.h; ++y) {
+                const uint8_t *src = &p.px[size_t(y) * p.w * 4];
+                uint8_t *row = dst + size_t(y) * stride;
+                for (int i = 0; i < p.w * 4; i += 4) {
+                    const unsigned a = src[i + 3];
+                    row[i] = uint8_t(src[i] * a / 255), row[i + 1] = uint8_t(src[i + 1] * a / 255);
+                    row[i + 2] = uint8_t(src[i + 2] * a / 255), row[i + 3] = uint8_t(a);
+                }
+            }
+            gbm_bo_unmap(x.bo, mapping);
+            const vr::VRTextureBounds_t bounds{0, 0, float(p.w) / kMaxW, float(p.h) / kMaxH};
+            ov->SetOverlayTextureBounds(h, &bounds);
+            vr::Texture_t tex = {&x.handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+            e = ov->SetOverlayTexture(h, &tex);
+        }
+        if (e != vr::VROverlayError_None)
+            std::fprintf(stderr, "ft-gazepanel: the picture didn't go to SteamVR: %s\n", ov->GetOverlayErrorNameFromEnum(e));
+    }
+};
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -335,9 +436,11 @@ int main(int argc, char **argv) {
     }
     ov->SetOverlaySortOrder(h, 250);  // in front of Frametop's screens and the pointer's dot
     LoadFont();
+    Buffers buffers;
+    if (buffers.Make()) ov->SetOverlayFlag(h, vr::VROverlayFlags_IsPremultiplied, true);
 
     Panel p;
-    bool visible = false, dirty = false;
+    bool visible = false, dirty = false, shown = false;  // shown: SteamVR shows it (after its first picture)
     auto place = [&] {
         const double half = std::tan(p.wDeg * M_PI / 360);
         vr::HmdMatrix34_t m{};
@@ -368,11 +471,10 @@ int main(int argc, char **argv) {
                 p.title.clear(), p.text.clear(), p.dotOn = false, p.state = "off";
                 p.eyes[0] = p.eyes[1] = EyeCard{}, p.hints.clear();
                 place();
-                ov->ShowOverlay(h);
-                visible = dirty = true;
+                visible = dirty = true;  // shown with its first picture
             } else if (!std::strcmp(buf, "hide")) {
                 ov->HideOverlay(h);
-                visible = false;
+                visible = shown = false;
             } else if (std::sscanf(buf, "bg %lf", &a) == 1) {
                 p.bg = std::clamp(a, 0.0, 1.0), dirty = true;
             } else if (std::sscanf(buf, "dot %lf %lf %15s %lf", &a, &b, state, &c) >= 3) {
@@ -411,12 +513,14 @@ int main(int argc, char **argv) {
             }
         if (visible && dirty) {
             Draw(p);
-            ov->SetOverlayRaw(h, p.px.data(), uint32_t(p.w), uint32_t(p.h), 4);
+            buffers.Present(ov, h, p);
+            if (!shown) ov->ShowOverlay(h), shown = true;
             dirty = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(visible ? 10 : 50));
     }
     ov->DestroyOverlay(h);
+    buffers.Drop();
     vr::VR_Shutdown();
     return 0;
 }
