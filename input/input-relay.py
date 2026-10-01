@@ -21,14 +21,15 @@ Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
 pointer_toggle, follow_toggle = head follow on or off, gaze_toggle = gaze mode on or off
 (the pointer goes where you look; see pointer/helper/ft-pointer.cpp), gaze_precision = while
-held, the pointer stops where you look and the button's device (the mouse, or that
-controller's aim) steers it, and the release clicks there, gaze_drag = the same, but pressed
-at once, so it drags ("precision|gazedrag mouse|left|right|keyboard 1|0" to the helper), sens_up, sens_down,
+held, the pointer stops where you look and the mouse steers it, and the release clicks there,
+gaze_drag = the same, but pressed at once, so it drags ("precision|gazedrag mouse|keyboard 1|0"
+to the helper), sens_up, sens_down,
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
 keyboard_toggle = open or close Frametop's keyboard, key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
-rules file; any action but key). So can key combinations on any keyboard ("key_bindings":
+rules file; any action but key and the gaze ones, GAZE_ACTIONS: gaze mode is a mouse feature,
+docs/gaze-controllers.md). So can key combinations on any keyboard ("key_bindings":
 {"29+56+34": action}, evdev codes joined by "+", modifiers first and left-hand codes for
 either side, here Ctrl+Alt+G): the combination does the action, and its last key isn't typed. The controllers aren't input devices here, only SteamVR sees
 them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
@@ -175,6 +176,8 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "sens_up", "sens_down",
            "layout_reset", "screens_toggle", "keyboard_toggle", "key", "none")
+# Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
+GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag")
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 VR_KEYBOARD_MODES = ("always", "no_keyboard", "button", "never")  # when Frametop's keyboard opens
@@ -430,10 +433,13 @@ class Pointer:
 
     def action(self, name, value, now, source="mouse"):
         """A mapped button: value 1 press, 0 release, 2 autorepeat (ignored). source: what
-        pressed it (mouse, left, right for a controller, keyboard), for the gaze actions."""
+        pressed it (mouse, left, right for a controller, keyboard), for the gaze actions,
+        which take the mouse or the keyboard only."""
         if value == 2:
             return
         if name in ("gaze_precision", "gaze_drag"):
+            if source not in ("mouse", "keyboard"):
+                return  # gaze mode is a mouse feature (GAZE_ACTIONS)
             if value == 1:
                 self.wake(now)
             self.flush()
@@ -641,7 +647,8 @@ def main():
         else:
             state["vr_capture_until"] = 0.0
             buttons = " ".join(b for b, a in state["rules"]["controller_buttons"].items()
-                               if b in VR_BUTTONS and a in ACTIONS and a not in ("key", "none")) or "-"
+                               if b in VR_BUTTONS and a in ACTIONS and a not in ("key", "none")
+                               and a not in GAZE_ACTIONS) or "-"
             if state["rules"].get("controller_in_games"):
                 buttons = "+games " + buttons
         try:
@@ -658,7 +665,7 @@ def main():
                 reply(addr, {"t": "event", "id": VR_DEVICE, "path": "", "name": "Steam Frame controllers",
                              "type": "vr", "code": button, "value": value})
         action = state["rules"]["controller_buttons"].get(button)
-        if state["pointer"] and action in ACTIONS and action not in ("key", "none"):
+        if state["pointer"] and action in ACTIONS and action not in ("key", "none") and action not in GAZE_ACTIONS:
             do_action(action, value, now, button.split("/")[0])
 
     def vr_keyboard_mode():

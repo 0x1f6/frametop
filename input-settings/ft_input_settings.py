@@ -6,9 +6,9 @@ to the input relay over its control socket (@frametop_relay):
   - Devices: every USB/Bluetooth mouse and keyboard, a live activity light to
     identify them, and a role for each (3D pointer, pass through, ignore).
   - Buttons: press a button or key on a pointer device, then pick an action.
-  - Controllers: the same for the Frame controllers' buttons. They're read by the pointer
-    helper through SteamVR input (@ft_pointer_helper: vrstatus, vrglobal), and a mapped
-    button is taken from games.
+  - Controllers: the same for the Frame controllers' buttons, minus the gaze actions (gaze
+    mode is a mouse feature). They're read by the pointer helper through SteamVR input
+    (@ft_pointer_helper: vrstatus, vrglobal), and a mapped button is taken from games.
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
@@ -87,16 +87,14 @@ CONTROLLER_BUTTONS = {
     "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
     "right/thumbstick": "Right stick click",
 }
-CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none")]
+# Not the gaze actions: gaze mode is a mouse feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
+CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none", "gaze_toggle", "gaze_precision", "gaze_drag")]
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
     ("POINTER_GAZE_NUDGE_MAX", "Largest nudge to learn", 8, 1, 30, 0.5, "°"),
     ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
-    ("POINTER_PRECISION_GAIN", "Precision steering", 0.5, 0.1, 2.0, 0.05, "×"),
-    ("POINTER_PRECISION_DEADZONE", "Precision dead zone", 0.3, 0.0, 3.0, 0.1, "°"),
-    ("POINTER_GAZE_DRAG_GAIN", "Drag steering", 1.0, 0.1, 2.0, 0.05, "×"),
 ]
 # In gaze mode, what the mouse's left button does (POINTER_GAZE_MOUSE).
 GAZE_MOUSE = {"precision": "Gaze precision: hold to steer with the mouse, release to click",
@@ -808,6 +806,17 @@ class Backend(QObject):
             self.reload_timer.start()
             self.pointerChanged.emit()
             self.message.emit(f"Mouse in gaze mode: {GAZE_MOUSE[mode].lower()}", False)
+
+    @Property(bool, notify=pointerChanged)
+    def gazeDotAlways(self):
+        return read_conf().get("POINTER_GAZE_DOT", "always") != "moving"
+
+    @Slot(bool)
+    def setGazeDotAlways(self, on):
+        write_conf_value("POINTER_GAZE_DOT", "always" if on else "moving")
+        self.reload_timer.start()
+        self.pointerChanged.emit()
+        self.message.emit("Gaze dot: " + ("always shown" if on else "shown only while the mouse moves it"), False)
 
     @Property(str, notify=pointerChanged)
     def pointerRole(self):
