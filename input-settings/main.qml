@@ -192,7 +192,7 @@ Kirigami.ApplicationWindow {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 text: "Move or press a device to see which row it is. 3D pointer: grabbed, drives the SteamVR pointer. "
-                      + "Pass through: left alone (a Meta tap toggles the dashboard if META_DASHBOARD=1). Ignore: left alone."
+                      + "Pass through: left alone, but its key combinations (Keyboard page) work. Ignore: left alone."
             }
         }
     }
@@ -545,7 +545,11 @@ Kirigami.ApplicationWindow {
                     delegate: RowLayout {
                         required property var modelData
                         Kirigami.FormData.label: modelData.label + ":"
-                        Controls.Label { text: modelData.actionLabel }
+                        Controls.Label {
+                            text: modelData.actionLabel
+                            elide: Text.ElideRight
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+                        }
                         Controls.ToolButton {
                             icon.name: "edit-delete"
                             display: Controls.AbstractButton.IconOnly
@@ -568,16 +572,33 @@ Kirigami.ApplicationWindow {
                     }
                     Controls.Button {
                         text: backend.capturingShortcut ? "Press the keys… (Cancel)" : "Set keys…"
+                        enabled: backend.capturingShortcut || shortcutAction.currentValue !== "command:"
+                                 || shortcutCommand.text.trim() !== ""
                         onClicked: backend.capturingShortcut ? backend.cancelShortcutCapture()
-                                                             : backend.startShortcutCapture(shortcutAction.currentValue)
+                                                             : backend.startShortcutCapture(
+                                                                   shortcutAction.currentValue === "command:"
+                                                                   ? "command:" + shortcutCommand.text.trim()
+                                                                   : shortcutAction.currentValue)
                     }
+                }
+                Controls.TextField {
+                    id: shortcutCommand
+                    Kirigami.FormData.label: "Command:"
+                    visible: shortcutAction.currentValue === "command:"
+                    placeholderText: "e.g. ft-layout use Work"
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 24
                 }
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 30
                     wrapMode: Text.WordWrap
-                    text: "Hold the modifiers (Ctrl, Alt, Shift, Meta), then press the key, on any keyboard. The "
-                          + "combination's last key isn't typed; the modifiers still reach the app. Meta+Shift+F floats "
-                          + "the desktop window under the pointer in VR, or puts it back, until you remove or change it."
+                    text: "Hold the modifiers (Ctrl, Alt, Shift, Meta), then press the key, on any keyboard. Or tap "
+                          + "one modifier on its own. The combination's last key isn't typed; the modifiers still reach "
+                          + "the app. While you're in Steam or a game, they see the keys too. Until you remove or change "
+                          + "them, a Meta tap opens the Steam menu (or closes the dashboard) instead of the desktop's "
+                          + "launcher, and Meta+Shift+F floats the desktop window under the pointer in VR, or puts it "
+                          + "back. A command runs with sh as the input relay's service, outside the desktop's session, "
+                          + "with Frametop's ft-layout, ft-float and ft-steam on its path; its output goes to the "
+                          + "relay's log (journalctl --user -u frametop-input-relay)."
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }

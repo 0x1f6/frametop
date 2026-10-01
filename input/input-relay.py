@@ -14,8 +14,7 @@ keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
 (written by the Frametop Input Settings app):
   pointer      grabbed; drives the universal 3D mouse (default for devices with a mouse node)
   passthrough  keys go to the desktop; grabbed only while typing goes there, otherwise only observed,
-               e.g. for the Meta dashboard shortcut (default for keyboards; the shortcut is off
-               unless META_DASHBOARD=1 is in ~/.config/frametop.conf)
+               for the key combinations below (default for keyboards)
   ignore       not grabbed, only observed for identification in the settings app
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
@@ -32,19 +31,26 @@ layout_reset = put the desktop screens back in their saved layout, screens_toggl
 keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the desktop window under the
 pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
 window back (both to ft-floatd, @frametop_float), profile:NAME = switch to that profile (ft-layout
-use NAME: its screens and apps; docs/profiles.md), key = pass through as a key, none).
+use NAME: its screens and apps; docs/profiles.md), steam_menu = open the SteamVR dashboard on
+Steam's menu, or close the dashboard (steam/ft-steam menu, through Steam's UI), command:CMD = run
+CMD with sh -c (on the host, as this service: its environment, output to its log, and
+COMMAND_PATH, so ft-layout, ft-float and ft-steam need no path), key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
 rules file; any action but key and the gaze ones, GAZE_ACTIONS: gaze mode is a mouse feature,
 docs/gaze-controllers.md). So can key combinations on any keyboard ("key_bindings":
 {"29+56+34": action}, evdev codes joined by "+", modifiers first and left-hand codes for
 either side, here Ctrl+Alt+G): the combination does the action, and its last key isn't typed.
-A rules file without "key_bindings" gets DEFAULT_KEY_BINDINGS (Meta+J: gaze_left, Meta+K:
-gaze_right, Meta+Shift+F: float_toggle); one with its own, even an empty one, doesn't. The float
-actions work without pointer mode too. A combination with Meta also sends the desktop an F24 press
-and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and a gaze
-click isn't Meta+click (KWin's window move and resize). Another key while Meta is still held gives
-the desktop Meta back. The controllers aren't input devices here, only SteamVR sees
+A modifier on its own ("125": Meta) is a tap: pressed and released with no other key, mouse
+button, or scroll in between; the desktop gets an F24 press before its release, so Plasma's
+launcher doesn't open on a Meta tap that's bound. A rules file without "key_bindings" gets
+DEFAULT_KEY_BINDINGS (Meta tap: steam_menu, Meta+J: gaze_left, Meta+K: gaze_right, Meta+Shift+F:
+float_toggle); one with its own, even an empty one, doesn't. The float, profile, Steam menu and
+command actions work without pointer mode too. A combination with Meta also sends the desktop an
+F24 press and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and
+a gaze click isn't Meta+click (KWin's window move and resize). Another key while Meta is still
+held gives the desktop Meta back. While typing goes to Steam, keyboards aren't grabbed, so Steam
+or the game sees a combination's keys too. The controllers aren't input devices here, only SteamVR sees
 them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
 It only takes the buttons the relay tells it to ("vrbind <button>..." to @ft_pointer_helper,
 sent on start, reload, and when the helper says "vrhello"), and only while no game runs,
@@ -130,6 +136,7 @@ SYN_REPORT = 0
 BTN_MISC, KEY_MAX = 0x100, 0x2FF
 KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
+SCROLLS = {0x06, REL_WHEEL, 0x0B, 0x0C}  # REL_HWHEEL, REL_WHEEL and their _HI_RES
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
 KEY_VOLUMEDOWN, KEY_VOLUMEUP = 114, 115
@@ -189,12 +196,14 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right",
            "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "float_toggle",
-           "dock_all", "key", "none")
+           "dock_all", "steam_menu", "key", "none")
 # Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
-# Key combinations a rules file without "key_bindings" gets: Meta+J and Meta+K click at the gaze
-# (free on the Frametop desktop, and apps don't use Meta), Meta+Shift+F floats a window.
-DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
+# Key combinations a rules file without "key_bindings" gets: a Meta tap opens Steam's menu, Meta+J
+# and Meta+K click at the gaze (free on the Frametop desktop, and apps don't use Meta),
+# Meta+Shift+F floats a window.
+DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
+                        "42+125+33": "float_toggle"}
 KEY_F24 = 194  # sent to the desktop with a Meta combination (see the top)
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
@@ -211,16 +220,23 @@ FLOAT = "\0frametop_float"  # ft-floatd, floating windows in the Frametop deskto
 # Actions for ft-floatd ("float_toggle", "dock_all"): they don't need pointer mode.
 FLOAT_ACTIONS = {"float_toggle": b"float pointer", "dock_all": b"dock all"}
 PROFILE = "profile:"  # "profile:NAME": switch to that profile (doesn't need pointer mode either)
+COMMAND = "command:"  # "command:CMD": run CMD (nor does this)
 
 
 def known_action(a):
-    return a in ACTIONS or (isinstance(a, str) and a.startswith(PROFILE) and len(a) > len(PROFILE))
+    return a in ACTIONS or (isinstance(a, str) and any(a.startswith(p) and a[len(p):].strip()
+                                                       for p in (PROFILE, COMMAND)))
 
 
 def needs_pointer(a):
-    return a not in FLOAT_ACTIONS and not a.startswith(PROFILE)
+    return a not in FLOAT_ACTIONS and a != "steam_menu" and not a.startswith((PROFILE, COMMAND))
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
-FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FT_LAYOUT = os.path.join(REPO, "layout", "ft-layout")
+FT_STEAM = os.path.join(REPO, "steam", "ft-steam")
+# Commands ("command:CMD") find Frametop's own tools (ft-layout, ft-float, ft-steam) on their PATH.
+COMMAND_PATH = ":".join([os.path.join(REPO, d) for d in ("layout", "float", "steam")]
+                        + [os.environ.get("PATH", "/usr/local/bin:/usr/bin")])
 DEFAULT_BUTTONS = {BTN_LEFT: "left", BTN_RIGHT: "right", BTN_MIDDLE: "middle",
                    BTN_SIDE: "back", BTN_EXTRA: "back"}
 
@@ -672,13 +688,12 @@ def main():
     # desktop_until: typing goes to the Frametop desktop until then (ft-screens says so
     # every second); typing_applied: the grabs match that as of the last apply_roles().
     # vr_capture_until: every controller button is taken until then (the settings app capturing one).
-    state = {"pointer": None, "rules": {}, "meta_dashboard": False, "share_keys": False,
+    state = {"pointer": None, "rules": {}, "share_keys": False,
              "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0}
 
     def load_config():
         conf = read_config()
         state["rules"] = read_rules()
-        state["meta_dashboard"] = conf.get("META_DASHBOARD", "0") == "1"
         state["share_keys"] = conf.get("SHARE_KEYS", "0") == "1"
         if conf.get("POINTER", "0") == "1":
             p = state["pointer"] or Pointer(0.03, 30)
@@ -692,7 +707,7 @@ def main():
             log("pointer mode off: pointer devices feed the virtual mouse and keyboard")
 
     load_config()
-    meta_down = False  # Meta pressed with no other key yet: a tap toggles the dashboard
+    tap = None  # the modifier (folded, MODIFIERS) pressed alone, with nothing since: its release is a tap
     screens_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
     last_typing = 0.0  # the helper was last told of a key then (see "typing" at the top)
 
@@ -748,7 +763,7 @@ def main():
 
     def do_action(action, value, now, source="mouse"):
         """A mapped mouse or controller button, or key combination (pointer mode only, but
-        for FLOAT_ACTIONS and profiles)."""
+        for the actions needs_pointer() says don't)."""
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
@@ -757,6 +772,17 @@ def main():
                 # Runs a few seconds and borrows the pointer, like layout_reset.
                 subprocess.Popen([FT_LAYOUT, "use", action[len(PROFILE):]], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                log(action)
+        elif action == "steam_menu":
+            if value == 1:
+                # Talks to Steam's UI for a moment; its errors go to this service's log.
+                subprocess.Popen([FT_STEAM, "menu"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 start_new_session=True)
+                log(action)
+        elif action.startswith(COMMAND):
+            if value == 1:
+                subprocess.Popen(["sh", "-c", action[len(COMMAND):]], stdin=subprocess.DEVNULL,
+                                 env=dict(os.environ, PATH=COMMAND_PATH), start_new_session=True)
                 log(action)
         elif action in FLOAT_ACTIONS:
             if value == 1:
@@ -776,14 +802,20 @@ def main():
     def key_binding(code, value, now):
         """A key from a keyboard: does it complete a key combination ("key_bindings")? True if
         it was taken for one (then it isn't typed)."""
-        nonlocal meta_down
+        nonlocal tap
         if code in MODIFIERS:
-            (held_modifiers.add if value else held_modifiers.discard)(MODIFIERS[code])
+            mod = MODIFIERS[code]
+            if value == 1:
+                tap = mod if not held_modifiers and not combos_down else None
+            (held_modifiers.add if value else held_modifiers.discard)(mod)
             if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
                 (held_meta.add if value else held_meta.discard)(code)
                 if value == 0 and code in meta_hidden:
                     meta_hidden.discard(code)
                     return True  # the desktop already had it come up (below)
+            if value == 0 and tap == mod:
+                tap = None
+                modifier_tap(mod, now)
             return False
         if value == 1 and code not in combos_down and meta_hidden:
             # Another key while Meta is still held after a combination: the desktop gets Meta
@@ -805,10 +837,9 @@ def main():
         combos_down[code] = action
         if held_meta - meta_hidden:
             # The desktop saw Meta go down. Another key in between keeps its release from
-            # opening Plasma's launcher (and Meta from toggling the dashboard here), and Meta
-            # comes up there now: KWin takes Meta with a mouse button for moving or resizing
-            # windows, which would swallow a gaze click. Its real release is dropped (above).
-            meta_down = False
+            # opening Plasma's launcher, and Meta comes up there now: KWin takes Meta with a
+            # mouse button for moving or resizing windows, which would swallow a gaze click.
+            # Its real release is dropped (above).
             to_screens(KEY_F24, 1)
             to_screens(KEY_F24, 0)
             for c in sorted(held_meta - meta_hidden):
@@ -818,6 +849,20 @@ def main():
             do_action(action, 1, now, "keyboard")
         log(f"key combination {combo}: {action}")
         return True
+
+    def modifier_tap(mod, now):
+        """A modifier pressed and released alone: its binding, if it has one ("125": Meta tap)."""
+        action = state["rules"]["key_bindings"].get(str(mod))
+        if not known_action(action) or action in ("key", "none"):
+            return
+        # The desktop gets a key in between before the release goes there, so the tap isn't one
+        # there too: a Meta tap would open Plasma's launcher.
+        to_screens(KEY_F24, 1)
+        to_screens(KEY_F24, 0)
+        if state["pointer"] or not needs_pointer(action):
+            do_action(action, 1, now, "keyboard")
+            do_action(action, 0, now, "keyboard")
+        log(f"key combination {mod}: {action}")
 
 
     screens_down = set()  # keys the desktop was told went down and not yet up (see reconcile_desktop_keys)
@@ -1136,17 +1181,17 @@ def main():
                 if etype in (EV_KEY, EV_REL):
                     broadcast(node, etype, VOLUME_ORIGINAL.get(code, code) if node.remapped else code,
                               value, now)
+                if (etype == EV_KEY and value == 1 and code not in MODIFIERS) or (etype == EV_REL and code in SCROLLS):
+                    tap = None  # a key, button or scroll in between: a modifier's release isn't a tap
                 if etype == EV_KEY and ((node.remapped and code in VOLUME_ORIGINAL)
                                         or (node.grabbed and code in VOLUME_STANDIN)):
                     volume.key(fd, code, value, now)
-                    if value == 1:
-                        meta_down = False  # Meta used as a modifier, not a tap
                     continue
                 if node.role == "volume":
                     continue
                 if node.role != "pointer":
-                    # Observed only, unless typing goes to the desktop. With META_DASHBOARD=1,
-                    # a Meta tap on any keyboard toggles the dashboard.
+                    # Observed only, unless typing goes to the desktop. Key combinations work on
+                    # any pass-through keyboard.
                     if node.role == "passthrough" and etype == EV_KEY and code < BTN_MISC and key_binding(code, value, now):
                         continue
                     if node.role == "passthrough" and etype == EV_KEY:
@@ -1163,16 +1208,6 @@ def main():
                                 node.held.add(code)
                             else:
                                 node.held.discard(code)
-                    if (pointer and state["meta_dashboard"] and node.role == "passthrough"
-                            and etype == EV_KEY):
-                        if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
-                            if value == 1:
-                                meta_down = True
-                            elif value == 0 and meta_down:
-                                meta_down = False
-                                pointer.dashboard()
-                        elif value == 1:
-                            meta_down = False  # Meta used as a modifier, not a tap
                     continue
                 if etype == EV_KEY:
                     action = buttons.get(str(code), DEFAULT_BUTTONS.get(code, "key"))

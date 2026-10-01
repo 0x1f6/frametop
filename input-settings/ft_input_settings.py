@@ -9,8 +9,9 @@ to the input relay over its control socket (@frametop_relay):
   - Controllers: the same for the Frame controllers' buttons, minus the gaze actions (gaze
     mode is a mouse feature). They're read by the pointer helper through SteamVR input
     (@ft_pointer_helper: vrstatus, vrglobal), and a mapped button is taken from games.
-  - Keyboard: when Frametop's keyboard opens, and key combinations for any action (Meta+Shift+F
-    floats a window unless the rules have their own list).
+  - Keyboard: when Frametop's keyboard opens, and key combinations for any action, a command
+    of your own too ("command:CMD"), or a modifier tapped alone (a Meta tap opens Steam's menu
+    and Meta+Shift+F floats a window, unless the rules have their own list).
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
@@ -60,6 +61,7 @@ DEFAULT_BUTTONS = {0x110: "left", 0x111: "right", 0x112: "middle", 0x113: "back"
 ACTION_LABELS = {
     "left": "Left click", "right": "Right click", "middle": "Middle click", "back": "Back",
     "scroll_up": "Scroll up", "scroll_down": "Scroll down", "dashboard": "Toggle SteamVR dashboard",
+    "steam_menu": "Open Steam menu / close dashboard",
     "recenter": "Recenter pointer", "pointer_toggle": "Pointer on/off",
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
     "gaze_precision": "Gaze precision: hold to steer, release to click",
@@ -102,6 +104,8 @@ KEYBOARD_ONLY = ("gaze_left", "gaze_right")
 # Profiles (docs/profiles.md): "profile:NAME" opens one (the relay runs ft-layout use NAME).
 LAYOUT_PATH = os.path.expanduser("~/.config/frametop-layout.json")
 PROFILE = "profile:"
+# "command:CMD": the relay runs CMD with sh -c (key combinations only, here).
+COMMAND = "command:"
 
 
 def profile_actions():
@@ -113,11 +117,17 @@ def profile_actions():
 def action_label(a):
     if a.startswith(PROFILE):
         return f"Open profile {a[len(PROFILE):]}"
+    if a.startswith(COMMAND):
+        return f"Run: {a[len(COMMAND):]}"
     return ACTION_LABELS.get(a, a)
 
 
 def is_profile(a):
     return a.startswith(PROFILE) and len(a) > len(PROFILE)
+
+
+def is_command(a):
+    return a.startswith(COMMAND) and bool(a[len(COMMAND):].strip())
 
 
 def mappable(a):
@@ -126,8 +136,8 @@ def mappable(a):
 
 
 def shortcut_mappable(a):
-    """An action a key combination can have: the gaze ones too."""
-    return a in SHORTCUT_ACTIONS or is_profile(a)
+    """An action a key combination can have: the gaze ones and commands too."""
+    return a in SHORTCUT_ACTIONS or is_profile(a) or is_command(a)
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
@@ -141,9 +151,10 @@ GAZE_MOUSE = {"precision": "Gaze precision: hold to steer with the mouse, releas
 # Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
-# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): Meta+J and
-# Meta+K click at the gaze, Meta+Shift+F floats a window.
-DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
+# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): a Meta tap
+# opens Steam's menu, Meta+J and Meta+K click at the gaze, Meta+Shift+F floats a window.
+DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
+                        "42+125+33": "float_toggle"}
 
 
 def key_bindings(rules):
@@ -295,6 +306,7 @@ class Backend(QObject):
         self._capture_vr = False
         self._capture_combo = ""  # the action a key combination is being captured for
         self._combo_mods = set()
+        self._combo_tap = None  # a modifier pressed alone, nothing since: released, it's a tap
         self._vr = {}  # the helper's vrstatus, {} when it doesn't answer
         self._vr_at = 0.0
         self._gaze = {}  # ft-gazed's status, {} when it isn't running
@@ -408,13 +420,16 @@ class Backend(QObject):
                 self.activity.emit(msg["id"])
                 code, value = int(msg["code"]), msg["value"]
                 if code in MODIFIER_CODES:
-                    (self._combo_mods.add if value else self._combo_mods.discard)(MODIFIER_CODES[code])
+                    mod = MODIFIER_CODES[code]
+                    if value == 1:
+                        self._combo_tap = None if self._combo_mods else mod
+                    (self._combo_mods.add if value else self._combo_mods.discard)(mod)
+                    if value == 0 and self._combo_tap == mod:
+                        self._end_shortcut_capture(str(mod))  # the relay's modifier tap
                 elif value == 1 and code < BTN_MISC:
-                    self._save_shortcut("+".join(str(c) for c in sorted(self._combo_mods) + [code]),
-                                        self._capture_combo)
-                    self._capture_combo = ""
-                    self._combo_mods = set()
-                    self.shortcutCaptureChanged.emit()
+                    self._end_shortcut_capture("+".join(str(c) for c in sorted(self._combo_mods) + [code]))
+                elif value == 1:
+                    self._combo_tap = None  # a mouse button: no tap
             elif t == "event":
                 self.activity.emit(msg["id"])
                 if (self._capture_id and msg["id"] == self._capture_id and msg["type"] == "key"
@@ -890,6 +905,8 @@ class Backend(QObject):
     # --- key combinations ("key_bindings") ---
     def comboName(self, combo):
         parts = [int(c) for c in combo.split("+") if c.isdigit()]
+        if len(parts) == 1 and parts[0] in MODIFIER_NAMES:
+            return MODIFIER_NAMES[parts[0]] + " tap"
         return "+".join(MODIFIER_NAMES.get(c) or self.codeName(c).removeprefix("KEY_").title() for c in parts)
 
     @Property("QVariantList", notify=mappingsChanged)
@@ -900,7 +917,8 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def shortcutActions(self):
-        return [{"value": a, "text": action_label(a)} for a in SHORTCUT_ACTIONS + profile_actions()]
+        return [{"value": a, "text": action_label(a)} for a in SHORTCUT_ACTIONS + profile_actions()] + \
+            [{"value": COMMAND, "text": "Run a command…"}]
 
     @Property(bool, notify=shortcutCaptureChanged)
     def capturingShortcut(self):
@@ -911,12 +929,20 @@ class Backend(QObject):
         if shortcut_mappable(action):
             self._capture_combo = action
             self._combo_mods = set()
+            self._combo_tap = None
             self._send("watch 60")
             self.shortcutCaptureChanged.emit()
 
     @Slot()
     def cancelShortcutCapture(self):
         self._capture_combo = ""
+        self.shortcutCaptureChanged.emit()
+
+    def _end_shortcut_capture(self, combo):
+        self._save_shortcut(combo, self._capture_combo)
+        self._capture_combo = ""
+        self._combo_mods = set()
+        self._combo_tap = None
         self.shortcutCaptureChanged.emit()
 
     def _save_shortcut(self, combo, action):
