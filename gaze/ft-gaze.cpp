@@ -461,7 +461,10 @@ int main(int argc, char **argv) {
     vr::VRActionSetHandle_t set = vr::k_ulInvalidActionSetHandle;
     input->GetActionHandle("/actions/gaze/in/gaze", &gaze);
     input->GetActionSetHandle("/actions/gaze", &set);
-    std::fprintf(stderr, "ft-gaze: action manifest %s: error %d\n", manifest.c_str(), int(me));
+    if (me == vr::VRInputError_None)
+        std::fprintf(stderr, "ft-gaze: action manifest %s: ok\n", manifest.c_str());
+    else
+        std::fprintf(stderr, "ft-gaze: action manifest %s: error %d\n", manifest.c_str(), int(me));
 
     EyeFile eyes;
     const bool haveMmap = eyes.Open();

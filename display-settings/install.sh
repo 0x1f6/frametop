@@ -17,10 +17,12 @@ case ${1:-install} in
     on_frame "chmod +x display-settings/ft-display-settings layout/ft-layout layout/ft_layout.py
 mkdir -p ~/.config/frametop
 kwriteconfig6 --file ~/$shortcuts --group services --group ft-layout-reset.desktop --key _launch 'Meta+Shift+R'
-kwriteconfig6 --file ~/$shortcuts --group services --group ft-screens-toggle.desktop --key _launch 'Meta+Shift+H'"
+kwriteconfig6 --file ~/$shortcuts --group services --group ft-screens-toggle.desktop --key _launch 'Meta+Shift+H'
+layout/ft-layout launchers  # each profile's entry (Frametop: NAME), if there are profiles"
     echo "installed: Frametop Display Settings, Reset Screen Layout (Meta+Shift+R), Hide/Show Screens (Meta+Shift+H)" ;;
   uninstall)
     on_frame "rm -f ~/$apps/ft-display-settings.desktop ~/$apps/ft-layout-reset.desktop ~/$apps/ft-screens-toggle.desktop
+rm -f ~/$apps/frametop-profile-*.desktop  # the profiles' entries (the profiles stay in ~/.config/frametop-layout.json)
 [ -f ~/$shortcuts ] && for f in ft-layout-reset ft-screens-toggle; do kwriteconfig6 --file ~/$shortcuts --group services --group \$f.desktop --key _launch --delete; done
 echo removed" ;;
   *) echo "usage: $0 [install|uninstall]" >&2; exit 2 ;;

@@ -22,7 +22,7 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 3. Run:
 
    ```
-   curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash
+   curl -fsSL https://deejanuz.github.io/frametop/get.sh | bash
    ```
 
    It asks which version you want: stable (the `main` branch, tested releases) or experimental (the `experimental` branch, the newest features, less tested). Then it clones the repo into `~/frametop` and runs `install.sh`. To choose without the question, add `-s -- --stable` or `-s -- --experimental` after `bash`. By hand, the same is `git clone https://github.com/DeeJanuz/frametop.git ~/frametop`, then `cd ~/frametop` and `./install.sh` (add `--branch experimental` to the clone for experimental).
@@ -145,7 +145,7 @@ This writes `frametop-report-<date>.txt` with version numbers, service states, s
 Run the same command again. It updates `~/frametop` to the latest of the version you have (or switches, if you pick the other one) and installs it:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash
+curl -fsSL https://deejanuz.github.io/frametop/get.sh | bash
 ```
 
 Or by hand: `cd ~/frametop && git pull && ./install.sh`.
@@ -167,6 +167,8 @@ gaze/run.sh uninstall                  # if you installed the gaze service
 gaze/tracker/install.sh uninstall      # if you installed our own eye tracker's frame grabber
 gaze/probe/install.sh uninstall        # if you installed the gaze probe
 ```
+
+Your settings stay: `~/.config/frametop.conf`, `frametop-input.json` (button maps and key combinations), `frametop-layout.json` (the layout and profiles), `frametop-float.json`, and `frametop-remote/` in `~/.config`, and the gaze calibration in `~/.local/state/frametop/gaze`. So does the desktop's own Plasma setup, in `~/.config/frametop`. Delete them too for a clean slate.
 
 ## How it works
 

@@ -40,7 +40,12 @@ $running && echo 'started' || { echo 'failed:'; tail -20 $log; exit 1; }" ;;
 sed 's|@SESSION@|$session/frametop-session.sh|' $session/deckard-nested-desktop.desktop > ~/$override
 [ -f ~/.config/frametop.conf ] || cp $session/frametop.conf.example ~/.config/frametop.conf
 echo \"installed ~/$override\"; grep ^Exec= ~/$override; echo; cat ~/.config/frametop.conf" ;;
-  uninstall) "$frame" --host "rm -f ~/$override && echo 'removed; the launcher uses the stock desktop again'" ;;
+  uninstall)
+    # Also what the session puts in place at each start: Launch as Standalone's app copies and
+    # the title bar decoration (float/ft_apps.py, decoration/).
+    "$frame" --host "rm -f ~/$override
+rm -rf ~/.local/share/frametop/apps ~/.local/share/kwin/decorations/kwin4_decoration_qml_frametop
+rmdir ~/.local/share/frametop 2>/dev/null; echo 'removed; the launcher uses the stock desktop again'" ;;
   screens)
     [[ ${2:-} =~ ^[1-9]$ ]] || { echo "usage: $0 screens N   (1-9)" >&2; exit 2; }
     "$frame" --host "set -e; f=~/.config/frametop.conf

@@ -2,7 +2,7 @@
 # Frametop's one-line installer. In a terminal on the Steam Frame (Konsole in the desktop, or
 # over SSH):
 #
-#   curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash
+#   curl -fsSL https://deejanuz.github.io/frametop/get.sh | bash
 #
 # It asks which version to install, clones the repo into ~/frametop (or updates the clone
 # that's there), and runs its install.sh. Run it again to update, or to switch versions.
@@ -18,7 +18,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: get.sh [--stable | --experimental] [--dir DIR] [--clone-only] [--yes] [--no-bluetooth]
-piped: curl -fsSL https://raw.githubusercontent.com/DeeJanuz/frametop/main/get.sh | bash -s -- [options]
+piped: curl -fsSL https://deejanuz.github.io/frametop/get.sh | bash -s -- [options]
 EOF
 }
 

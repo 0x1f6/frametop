@@ -58,6 +58,7 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout default NAME|none        the profile the desktop starts with
   ft-layout layouts                  list the named layouts (* = the one in use)
   ft-layout rename OLD NEW | delete NAME
+  ft-layout launchers                write each profile's launcher entry again (and drop stale ones)
   ft-layout plan                     print the arrangement as JSON (no VR needed)
   ft-layout scale                    per-screen scale, positions (as the screens are around
                                      you), and primary to KWin
@@ -1059,6 +1060,8 @@ def main(argv):
                 delete_named(layout, argv[2])
             save_layout(layout)
             write_launchers(layout)
+        elif cmd == "launchers":
+            write_launchers(load_layout())
         elif cmd == "default" and len(argv) == 3:
             layout = load_layout()
             if argv[2] == "none":
