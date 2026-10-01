@@ -44,9 +44,11 @@ click, it sends "lesson <raw yaw> <raw pitch> <true yaw> <true pitch>": where th
 was when the mouse took over, and where the pointer was when you clicked (you were looking
 there). The gap is the tracker's error there. The raw gaze is the one sent, so it also says
 when that look was (the history of what was sent), and so what each eye read then:
-  - SteamVR: each eye learns its own error, unless the gaze was more than LESSON_MAX degrees
+  - SteamVR: each eye learns its own error, unless the gaze was more than
+    POINTER_GAZE_NUDGE_MAX degrees (frametop.conf, 55 by default: the helper's limit too)
     past the correction (then it wasn't a nudge onto what you looked at);
-  - our tracker: the look goes to it as a click ("click T YAW PITCH" on @ft_eyes), as the
+  - our tracker: unless it was more than POINTER_GAZE_NUDGE_MAX off, the look goes to it as
+    a click ("click T YAW PITCH" on @ft_eyes), as the
     probe's clicks do, and it learns how far the headset has moved on your face. That's
     what it gets wrong, and after the headset was off, the first click resets it;
   - either way, how far off each eye was (before the lesson taught it anything) goes to the
@@ -61,16 +63,27 @@ GAZE_TRACKER=own or the gaze probe asks for it ("eyes SECONDS", a lease the prob
 reads the eye-camera frames the root service frametop-eyegrab copies (gaze/tracker/install.sh),
 which copies them only while ft-eyes runs.
 
+Checks and calibration (gaze/gazecheck.py): a one-dot quick check when the headset goes on or
+our tracker asks for a click, and the full calibration when gaze mode comes on without one,
+both in a panel fixed to the headset (gaze/panel/ft-gazepanel, which this service runs too).
+
 Nothing here writes to SteamVR, its eye tracker, or its files: ft-gaze reads the eye
 tracker's shared memory read-only.
 
 Control socket: abstract unix datagram "@ft_gazed":
   lesson <rhy> <rhp> <thy> <thp>   from the pointer helper (see above)
+  recheck <deg>                    from the pointer helper: a click's correction was past
+                                   POINTER_GAZE_NUDGE_MAX, so the quick check (gazecheck.py)
   status                           reply: one JSON object
   forget                           drop what the lessons taught (the calibration stays)
   reload                           read calibration.json and the settings again
   eyes <seconds>                   keep our own tracker running that much longer (at most 120),
                                    whatever GAZE_TRACKER says: the probe's lease. Reply: "ok"
+  quickcal                         the one-dot check now (the calibration if there's none)
+  calibrate                        the full calibration in the panel
+  fitcheck                         the headset fit check in the panel
+  calaccept | calquit              from the pointer helper while the panel is up: take this dot
+                                   now (a left click, Meta+J) | close it (a right click, Meta+K)
 
 Options: --source action|mmap1|mmap2 (the older one-source path with that source, whatever
 the settings say; set 2 was a little quieter in the probe, but loses the pointer whenever
@@ -96,6 +109,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gazecal import (DEFAULT_MODEL, EYE_FOUND, EYE_LOST, MODELS, STATE, Correction, EyeFallback,  # noqa: E402
                      EyeWeights, Fixation, LiveCorrection, SteamEyeLog)
+from gazecheck import Checks  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / "gaze" / "build" / "ft-gaze"
@@ -113,8 +127,7 @@ SOURCES = ("action", "mmap1", "mmap2", "left", "right")  # the ones with a calib
 SIDES = ("left", "right")  # ft-gaze's order, and the sources for each eye alone
 TRACKERS = ("steam", "own")
 BIASES = ("auto", "left", "right")
-LESSON_MAX = 8.0  # degrees past the correction
-OWN_LESSON_MAX = 25.0  # our tracker: after the headset was off, its first clicks can be 10-17 off
+NUDGE_MAX = 55.0  # degrees: POINTER_GAZE_NUDGE_MAX's default, the largest lesson taken
 HISTORY = 12.0    # seconds of the gaze sent, to find a lesson's look (the helper sends it up to 10 s later)
 LOOK = 0.3        # seconds of samples before that moment make the look (the probe's fixation)
 RETRY = 3.0       # seconds before starting ft-gaze again
@@ -141,7 +154,7 @@ def log(msg):
 
 
 def read_settings():
-    """(tracker, eye bias) from frametop.conf, defaults for anything missing or unknown."""
+    """(tracker, eye bias, nudge max) from frametop.conf, defaults for anything missing or unknown."""
     conf = {}
     try:
         for line in CONF.read_text().splitlines():
@@ -153,7 +166,11 @@ def read_settings():
         pass
     tracker = conf.get("GAZE_TRACKER", "steam")
     bias = conf.get("GAZE_EYE", "auto")
-    return tracker if tracker in TRACKERS else "steam", bias if bias in BIASES else "auto"
+    try:
+        nudge = min(max(float(conf.get("POINTER_GAZE_NUDGE_MAX", NUDGE_MAX)), 1.0), 110.0)  # the helper's range
+    except ValueError:
+        nudge = NUDGE_MAX
+    return tracker if tracker in TRACKERS else "steam", bias if bias in BIASES else "auto", nudge
 
 
 def mtime(path):
@@ -168,7 +185,7 @@ class Service:
         self.override, self.verbose, self.to = source, verbose, to
         self.source = source or "mmap1"  # the older path's source
         STATE.mkdir(parents=True, exist_ok=True)
-        self.tracker, self.bias = read_settings()
+        self.tracker, self.bias, self.nudge_max = read_settings()
         self.conf_mtime = mtime(CONF)
         self.models = {name: Correction() for name in SOURCES}
         self.mode = DEFAULT_MODEL
@@ -209,6 +226,7 @@ class Service:
         self.sel = selectors.DefaultSelector()
         self.sel.register(self.sock, selectors.EVENT_READ, "control")
         self.sel.register(self.eyes_sock, selectors.EVENT_READ, "own")
+        self.checks = Checks(self, self.sel)
         self.proc = None
         self.buf = b""
         self.restart_at = 0.0
@@ -228,7 +246,7 @@ class Service:
 
     def load_settings(self):
         self.conf_mtime = mtime(CONF)
-        tracker, bias = read_settings()
+        tracker, bias, self.nudge_max = read_settings()
         if (tracker, bias) != (self.tracker, self.bias):
             log(f"tracker {tracker}, eye bias {bias}" + (f" (--source {self.override} wins)" if self.override else ""))
             self.tracker, self.bias = tracker, bias
@@ -273,6 +291,13 @@ class Service:
         tmp.replace(LESSONS)
         self.dirty = False
 
+    def forget_lessons(self):
+        """Drop what the lessons taught (the calibration stays)."""
+        self.lives = {name: PointerLessons() for name in SOURCES}
+        self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
+        self.refit()
+        self.save_lessons()
+
     def refit(self):
         for name, live in self.lives.items():
             live.wear_time = self.steam.worn()
@@ -304,8 +329,8 @@ class Service:
             cy, cp = self.correction(self.source, rhy, rhp)
             left = math.hypot(dy - cy, dp - cp)
             rec.update(source=self.source, model=self.mode, correction=[cy, cp], lesson_deg=left)
-            if left > LESSON_MAX:
-                rec["refused"] = f"more than {LESSON_MAX} deg past the correction"
+            if left > self.nudge_max:
+                rec["refused"] = f"more than {self.nudge_max:g} deg past the correction"
             else:
                 self.lives[self.source].add({"time": rec["time"], "hy": rhy, "hp": rhp, "dy": dy, "dp": dp,
                                              "wy": 1.0, "wp": 1.0, "how": "pointer"}, self.models[self.source], self.mode)
@@ -316,11 +341,10 @@ class Service:
         weights = self.weights[self.tracker if kind == "own" else "steam"]
         rec.update(tracker=self.tracker if kind == "own" else "steam", bias=self.bias, lesson_deg=left, look_t=t,
                    eyes=eyes, weights=[round(w, 3) for w in weights.weights()])
-        limit = OWN_LESSON_MAX if kind == "own" else LESSON_MAX
         if t is None:
             rec["refused"] = "that gaze isn't in the last few seconds sent"
-        elif left > limit:
-            rec["refused"] = f"more than {limit} deg off"
+        elif left > self.nudge_max:
+            rec["refused"] = f"more than {self.nudge_max:g} deg off"
         if "refused" in rec:
             return self.taken(rec)
         if kind == "own":
@@ -505,6 +529,7 @@ class Service:
         return low
 
     def on_sample(self, s):
+        self.checks.on_sample(s)
         kind = self.kind
         if kind != self.last_kind:
             log({"own": "our own tracker", "eyes": "SteamVR's eyes, each calibrated",
@@ -636,6 +661,7 @@ class Service:
             if words[:1] == ["lesson"] and len(words) == 5:
                 try:
                     rec = self.lesson(*map(float, words[1:]))
+                    self.checks.after_lesson(rec)
                     reply = "refused" if "refused" in rec else f"ok {rec['lesson_deg']:.2f}"
                     log(f"lesson {rec['lesson_deg']:.2f} deg at {rec['raw'][0]:+.1f},{rec['raw'][1]:+.1f}"
                         + (f", eyes off {', '.join('-' if m is None else f'{m:.2f}' for m in rec['miss'])}"
@@ -646,11 +672,10 @@ class Service:
             elif words[:1] == ["status"]:
                 reply = json.dumps(self.status())
             elif words[:1] == ["forget"]:
-                self.lives = {name: PointerLessons() for name in SOURCES}
-                self.weights = {t: EyeWeights(self.bias) for t in TRACKERS}
-                self.refit()
-                self.save_lessons()
+                self.forget_lessons()
                 reply = "ok"
+            elif words[:1] and words[0] in ("quickcal", "calibrate", "fitcheck", "calaccept", "calquit", "recheck"):
+                reply = self.checks.command(words)
             elif words[:1] == ["eyes"] and len(words) == 2:
                 try:
                     secs = min(max(float(words[1]), 0.0), EYES_LEASE_MAX)
@@ -713,7 +738,7 @@ class Service:
                    if self.last_sample else None, "headset_on": self.steam.wearing(),
                    "headset_on_since": self.steam.worn(), "last": [round(v, 2) for v in self.last] if self.last else None,
                    "eyes_lost": self.lost, "fallback_ready": [self.fallback.ready(0), self.fallback.ready(1)],
-                   **self.counts})
+                   "checks": self.checks.status(), **self.counts})
         return st
 
     def periodic(self):
@@ -737,6 +762,7 @@ class Service:
                 self.eyes_sock.sendto(b"status", EYES_SOCKET)
             except OSError:
                 pass  # not up yet: status() says so once the last answer is old
+        self.checks.periodic()
         if self.dirty:
             self.save_lessons()
 
@@ -747,9 +773,13 @@ class Service:
             now = time.monotonic()
             if not self.proc and now >= self.restart_at:
                 self.start_helper()
-            for key, _ in self.sel.select(timeout=0.5):
+            for key, _ in self.sel.select(timeout=0.05 if self.checks.active else 0.5):
                 if key.data == "control":
                     self.on_control()
+                elif key.data == "checks":
+                    self.checks.on_readable()
+                elif key.data == "panel" and self.checks.panel_proc:
+                    self.checks.read_panel()
                 elif key.data == "own":
                     self.on_own()
                 elif key.data == "eyes" and self.eyes_proc:
@@ -758,12 +788,14 @@ class Service:
                     self.read_stdout()
                 elif key.data == "stderr" and self.proc:
                     self.read_stderr()
+            self.checks.tick()
             if now >= next_periodic:
                 self.periodic()
                 next_periodic = now + 1.0
             if self.verbose and now >= next_verbose:
                 log(json.dumps(self.status()))
                 next_verbose = now + 5
+        self.checks.stop()
         self.stop_helper()
         self.stop_eyes()
         if self.dirty:

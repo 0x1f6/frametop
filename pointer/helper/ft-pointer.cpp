@@ -160,9 +160,14 @@
 // you were looking at: from the raw gaze when the mouse took over to where you clicked is
 // the tracker's error there. The helper sends it to ft-gazed as a lesson ("lesson <raw yaw>
 // <raw pitch> <true yaw> <true pitch>", the true direction relative to the head as it was
-// when the mouse took over) if the mouse moved between 0.2 deg and POINTER_GAZE_NUDGE_MAX
-// (8 deg) and the click came within 10 s; more is using the mouse, not a nudge. A held
-// press dragged onto the target is the same: from the raw gaze at the press to the release. With no
+// when the mouse took over) if the mouse moved at least 0.2 deg, the click came within 10 s,
+// and the correction (raw gaze to click) is within POINTER_GAZE_NUDGE_MAX (55 deg, half what
+// the headset shows across: the Frame's eyes see 109 deg each). Past that, the tracker is far
+// off (or you went somewhere else with the mouse): it isn't learned, and ft-gazed is asked
+// for its quick check instead ("recheck <deg>"; it waits out its cooldown). Our tracker's
+// clicks since its calibration put a one-dot check within 15 deg for the next 2 minutes and
+// 25 for the next 10, so the check gets back under it (2026-10-01). A held press dragged onto
+// the target is the same: from the raw gaze at the press to the release. With no
 // fresh gaze (a blink, the service stopped, the headset off), the pointer stays put.
 //
 // Gaze precision (the relay's gaze_precision and gaze_drag actions, bound to a mouse button or
@@ -174,7 +179,40 @@
 // title bars, grab bars, and selections. Without gaze mode both still work from wherever the
 // pointer is.
 //   In gaze mode the mouse's left button is a gaze precision button (POINTER_GAZE_MOUSE =
-// precision, the default), or clicks at once where the pointer is (direct).
+// precision, the default), or clicks at once where the pointer is (direct). With precision the
+// mouse's buttons work like the keyboard clicks: the right button's press is held back the same
+// way, and the right click comes on the release, where the pointer is by then (gaze_right).
+// Pressing the right button while the left one's press is held back presses the left button
+// where the pointer is now, and the mouse drags (gaze_left then gaze_right): the drag lasts
+// while either button is held. So once you've moved the pointer, the left button alone only
+// clicks; to drag from there, press the right one. Pressing the right one again (a double right
+// click, with the left still held) tilts, as a right press does during any drag (see Tilt).
+// Held still for POINTER_GAZE_HOLD, either press is a real one.
+//   POINTER_GAZE_MOUSE_MOVE: held (the default) or free. Held: while the gaze has the pointer,
+// moving the mouse does nothing; it moves the pointer only during a press (as a correction,
+// like a keyboard click's head). So a bumped or drifting mouse can't pull the pointer off what
+// you're looking at, and every mouse move is a correction worth learning. With the gaze stale
+// for a second (the tracker stopped, eyes closed), in a game, or the headset off, the mouse
+// moves the pointer as usual. Free: the mouse takes the pointer whenever it moves.
+//   Keyboard clicks (the relay's gaze_left and gaze_right, Meta+J and Meta+K by default;
+// "gazekey left|right 1|0" here) work like gaze mode's mouse press, steered by the head: the
+// press stops the pointer where you look, and while the keys are held the pointer stays put in
+// your view, so turning your head carries it onto what you meant (past
+// POINTER_HEAD_DEADZONE, 0.5 deg, so a still head doesn't wobble it). The release clicks there
+// (left, or right for gaze_right), and a correction is a lesson for the gaze tracker, as with
+// the mouse. Held still for POINTER_GAZE_HOLD instead, it's a real press, and the head drags.
+// A quick tap (let go within POINTER_KEY_TAP, 0.25 s) clicks where the dot was at the press,
+// whatever the head did meanwhile, and tells the gaze tracker it was right there (a lesson
+// with no correction). Pressing gaze_right while gaze_left aims (Meta+K with Meta+J held)
+// presses the left button where the dot is now, so you can correct first and then drag; the
+// drag lasts while either key is held. gaze_right pressed during a gaze_left drag (held still
+// into one, or again after starting one with it: a double Meta+K) tilts while it's held (see
+// Tilt): turning the head turns the panel, and the mouse can too; let go of it and the head
+// drags again from there. Without gaze mode they work from wherever the pointer is.
+//   The gaze calibration panel (gaze/panel/ft-gazepanel, run by the gaze service): while
+// ft-gazed says it's up ("calpanel 1", renewed every second; it lapses 3 s after the last),
+// the dot hides and a press answers the panel instead of clicking: a left click or gaze_left
+// sends "calaccept" to @ft_gazed (take this dot now), a right click or gaze_right "calquit".
 //   POINTER_ROLE (right, left, or stylus): the hand role our device takes while connected. A
 // Frame controller in your hand counts as used through its touch sensors and takes its hand's
 // role back, and then no click lands (see "no hand role" in the main loop): with a controller
@@ -252,12 +290,13 @@
 // panel, and a laser that starts behind them can't hit them. POINTER_FOLLOW (0) and
 // POINTER_LEASH_DEG (10), POINTER_LEASH_DELAY (0.2 s), POINTER_LEASH_RETURN (0.2 s),
 // POINTER_FOLLOW_REACH (70 deg): head follow, above. POINTER_GAZE (0), POINTER_GAZE_RETAKE
-// (5 deg), POINTER_GAZE_NUDGE_MAX (8 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_DOT
+// (5 deg), POINTER_GAZE_NUDGE_MAX (55 deg), POINTER_GAZE_HOLD (0.5 s), POINTER_GAZE_DOT
 // (always), POINTER_GAZE_SHOW (1 s): gaze mode, above. POINTER_CONTROLLER_PICKUP (1, 0.5 to 5): how hard a controller must
 // move to take the laser back, above. POINTER_IGNORE (empty): ignored panels, above.
 // POINTER_HANDS (0), POINTER_PINCH_GAIN (0.5), POINTER_PINCH_DEADZONE (1.5 deg),
 // POINTER_GRIP_GAIN (1), POINTER_GRIP_BELOW (0.35 m), POINTER_PINCH_TYPING (1 s): hands, above.
-// POINTER_GAZE_MOUSE (precision), POINTER_ROLE (right): gaze precision, above.
+// POINTER_GAZE_MOUSE (precision), POINTER_HEAD_DEADZONE (0.5 deg), POINTER_KEY_TAP (0.25 s),
+// POINTER_ROLE (right): gaze precision and keyboard clicks, above.
 #include <openvr.h>
 
 #include "vrbuttons.h"
@@ -520,6 +559,7 @@ private:
             if (rest.find("Thumbnail") != std::string::npos || rest.find("Subview") != std::string::npos) continue;
             if (key.rfind("system.pointer", 0) == 0 || key.rfind("system.cursor", 0) == 0 ||
                 key.rfind("frametop.pointer", 0) == 0 || key.rfind("frametop.guide", 0) == 0 ||
+                key == "frametop.gazepanel" ||  // the gaze calibration panel, fixed to the headset
                 key == "frametop.catcher" ||  // ft-screens' release catcher: only on a laser mid-drag
                 key == "system.HeadsetView" || key == "system.toast")
                 continue;
@@ -664,14 +704,16 @@ int main() {
     bool follow = false, followConf = false, followReset = true;
     // Gaze mode (see the top); gazeConf is POINTER_GAZE as last read, like followConf.
     bool gazeOn = false, gazeConf = false;
-    double gazeRetake = 5, gazeNudgeMax = 8, gazeHold = 0.5, gazeShow = 1;
+    double gazeRetake = 5, gazeNudgeMax = 55, gazeHold = 0.5, gazeShow = 1;
     bool gazeDotAlways = true;  // POINTER_GAZE_DOT (see the top)
+    double headDeadzone = 0.5, keyTap = 0.25;  // POINTER_HEAD_DEADZONE, POINTER_KEY_TAP (keyboard clicks, see the top)
     // Hands (see the top): POINTER_HANDS, POINTER_PINCH_GAIN, POINTER_PINCH_DEADZONE, POINTER_GRIP_GAIN.
     bool handsOn = false;
     double pinchGain = 0.5, pinchDeadzone = 1.5, gripGain = 1.0, handBelow = 0.35, typingHold = 1.0;
     // Gaze precision (see the top): POINTER_GAZE_MOUSE (precision: the mouse's left button
     // holds back its press in gaze mode; direct: it clicks at once), POINTER_ROLE.
     bool gazeMousePrecision = true;
+    bool gazeMouseHeld = true;  // POINTER_GAZE_MOUSE_MOVE (see the top)
     std::string role = "right";
     double pickupScale = 1;  // POINTER_CONTROLLER_PICKUP: scales the controller-moved limits
     std::vector<std::string> ignore;  // POINTER_IGNORE (see ParseIgnore)
@@ -692,9 +734,11 @@ int main() {
         const bool wantFollow = ConfDouble(conf, "POINTER_FOLLOW", 0) != 0;
         if (wantFollow != followConf) follow = followConf = wantFollow, followReset = true;
         gazeRetake = std::clamp(ConfDouble(conf, "POINTER_GAZE_RETAKE", 5), 1.0, 45.0);
-        gazeNudgeMax = std::clamp(ConfDouble(conf, "POINTER_GAZE_NUDGE_MAX", 8), 1.0, 30.0);
+        gazeNudgeMax = std::clamp(ConfDouble(conf, "POINTER_GAZE_NUDGE_MAX", 55), 1.0, 110.0);
         gazeHold = std::clamp(ConfDouble(conf, "POINTER_GAZE_HOLD", 0.5), 0.1, 5.0);
         gazeShow = std::clamp(ConfDouble(conf, "POINTER_GAZE_SHOW", 1), 0.0, 30.0);
+        headDeadzone = std::clamp(ConfDouble(conf, "POINTER_HEAD_DEADZONE", 0.5), 0.0, 5.0);
+        keyTap = std::clamp(ConfDouble(conf, "POINTER_KEY_TAP", 0.25), 0.0, 1.0);
         const auto gd = conf.find("POINTER_GAZE_DOT");
         gazeDotAlways = gd == conf.end() || gd->second != "moving";
         const bool wantGaze = ConfDouble(conf, "POINTER_GAZE", 0) != 0;
@@ -707,6 +751,8 @@ int main() {
         typingHold = std::clamp(ConfDouble(conf, "POINTER_PINCH_TYPING", 1.0), 0.0, 5.0);
         const auto gm = conf.find("POINTER_GAZE_MOUSE");
         gazeMousePrecision = gm == conf.end() || gm->second != "direct";
+        const auto mm = conf.find("POINTER_GAZE_MOUSE_MOVE");
+        gazeMouseHeld = mm == conf.end() || mm->second != "free";
         const auto ro = conf.find("POINTER_ROLE");
         role = ro != conf.end() && (ro->second == "left" || ro->second == "stylus") ? ro->second : "right";
         pickupScale = std::clamp(ConfDouble(conf, "POINTER_CONTROLLER_PICKUP", 1), 0.5, 5.0);
@@ -787,6 +833,15 @@ int main() {
     Clock::time_point movingSince[vr::k_unMaxTrackedDeviceCount] = {};
     // Tilt mode (see top of file).
     bool leftHeld = false, tilting = false, tiltStart = false, swallowedRight = false;
+    // The mouse's buttons in gaze mode (see the top): leftDown, rightDown as the relay last said;
+    // aimRight, the held-back press is the right button's; chordDrag, a drag the right button
+    // began during the left's held-back press (the first release drops it, the other's is nothing).
+    bool leftDown = false, rightDown = false, aimRight = false, chordDrag = false;
+    bool ignoreLeftUp = false;
+    // The keyboard clicks' keys as the relay last said, and a tilt gaze_right holds during a
+    // keyboard drag (see the top): the head turns the panel, from where it was (keyTiltYaw, keyTiltPitch).
+    bool keyLeftDown = false, keyRightDown = false, keyTilting = false;
+    double keyTiltYaw = 0, keyTiltPitch = 0;
     double tiltYaw = 0, tiltPitch = 0;
     double dragDistance = 0, lastDistance = 1.5;  // drag lock: distance from the anchor at the press
     bool onVrSettings = false;       // the cursor is on the SteamVR Settings page (kept while dragging)
@@ -844,13 +899,17 @@ int main() {
     // hand: seen from the eye then, in the room), and the pointer then.
     HandGestures handFile;
     PoseHistory poses;
-    enum class Src { None, Hand, Mouse };
+    enum class Src { None, Hand, Mouse, Head };
     struct Hold {
         Src src = Src::None;
         int side = -1;          // a hand's side (0 left, 1 right)
         bool grip = false;      // pressed at once and dragging (a grip, gaze drag), not a click on release
         bool engaged = false;   // past the dead zone
         bool pressed = false;   // a real press went out (a grip or gaze drag, or a pinch without gaze mode)
+        bool promote = false;   // held still for POINTER_GAZE_HOLD, it becomes a real press (keyboard clicks)
+        bool right = false;     // the right button (gaze_right)
+        bool keyDrag = false;   // gaze_right pressed while gaze_left aimed: a left press, either key ends it
+        double pressYaw = 0, pressPitch = 0;  // the pointer at the press (a quick tap clicks there)
         Vec3 origin;
         double refYaw = 0, refPitch = 0, startYaw = 0, startPitch = 0, lastYaw = 0, lastPitch = 0;
     } hold;
@@ -860,6 +919,11 @@ int main() {
         bool drag, down;
     };
     std::vector<DevicePress> devicePresses;
+    // "gazekey left|right 1|0" from the relay (keyboard clicks), done in the frame.
+    struct KeyPress {
+        bool right, down;
+    };
+    std::vector<KeyPress> keyPresses;
     uint32_t seenBegins[2][2] = {}, seenEnds[2][2] = {};  // [pinch, grip][side], as last read
     bool handBaseline = false;
     int handOpens = 0;
@@ -870,23 +934,36 @@ int main() {
     bool inGame = false, gazeAwake = false;
     Clock::time_point inGameAt{}, gazeAwakeAt{};
     Clock::time_point lastMove{}, lastHeld{}, pulseAt{};
-    // The left button, as sent to the driver.
+    // The left button, as sent to the driver; pressRight: the next press is the right button
+    // instead (gaze_right), heldButton: the one pressed.
+    bool pressRight = false;
+    std::string heldButton = "trigger";
+    bool confirmLesson = false;  // a keyboard click's quick tap: a lesson with no correction (see the top)
+    // The gaze calibration panel is up until then ("calpanel 1"; see the top); calOpened: it just
+    // came up, so a press in progress ends without a click.
+    Clock::time_point calPanelUntil{};
+    bool calOpened = false;
     auto pressLeft = [&] {
         // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
         // its own screens, but only we know when one lands on another panel.
         SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
-        // A click after nudging the gaze-placed pointer: the nudge is a lesson (see the top).
+        // A click after nudging the gaze-placed pointer: the nudge is a lesson, or past
+        // POINTER_GAZE_NUDGE_MAX, a quick check (see the top).
         if (gazeOn && nudging && !gazeOwns && havePoint && Clock::now() - nudgeAt < std::chrono::seconds(10) &&
-            nudgeMoved >= 0.2 && nudgeMoved <= gazeNudgeMax) {
+            (confirmLesson || nudgeMoved >= 0.2)) {
             const Vec3 d = RotateInverse(nudgeHead, Normalize(lastPoint - Position(nudgeHead)));
+            const double ty = std::atan2(-d.x, -d.z) * 180 / M_PI, tp = std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI;
+            const double off = std::hypot(std::remainder(ty - nudgeRawHy, 360.0), tp - nudgeRawHp);
             char msg[160];
-            std::snprintf(msg, sizeof msg, "lesson %.3f %.3f %.3f %.3f", nudgeRawHy, nudgeRawHp,
-                          std::atan2(-d.x, -d.z) * 180 / M_PI, std::asin(std::clamp(d.y, -1.0, 1.0)) * 180 / M_PI);
+            if (off <= gazeNudgeMax)
+                std::snprintf(msg, sizeof msg, "lesson %.3f %.3f %.3f %.3f", nudgeRawHy, nudgeRawHp, ty, tp);
+            else
+                std::snprintf(msg, sizeof msg, "recheck %.0f", off);
             SendTo(out, "ft_gazed", msg);
-            if (debug) std::printf("gaze %s (nudged %.2f deg)\n", msg, nudgeMoved);
+            if (debug) std::printf("gaze %s (nudged %.2f deg, off %.2f)\n", msg, nudgeMoved, off);
             if (debug) std::fflush(stdout);
         }
-        nudging = false;
+        nudging = confirmLesson = false;
         leftHeld = true;
         dragDistance = lastDistance;
         pressKey.clear();
@@ -900,14 +977,16 @@ int main() {
         tiltYaw = tiltPitch = 0;  // a new drag starts untilted
         dropHoldUntil = {};
         pulseAt = Clock::now();
-        SendTo(out, "ft_pointer", "btn trigger 1");
+        heldButton = pressRight ? "b" : "trigger";
+        pressRight = false;
+        SendTo(out, "ft_pointer", "btn " + heldButton + " 1");
     };
     auto releaseLeft = [&] {
         leftHeld = false;
         tilting = false;
         // Hold the drag pose (tilt, frozen distance) while SteamVR finishes the drop.
         dropHoldUntil = Clock::now() + std::chrono::milliseconds(500);
-        SendTo(out, "ft_pointer", "btn trigger 0");
+        SendTo(out, "ft_pointer", "btn " + heldButton + " 0");
         // ft-screens releases a button held on its screens in KWin even when SteamVR hands
         // the release to some other overlay (its catcher usually gets it; this is the backstop).
         SendTo(out, "ft_screens", "up");
@@ -915,28 +994,98 @@ int main() {
     };
     // The left button, from the relay's "btn trigger", with gaze mode's held-back press (see
     // the top).
+    auto canAim = [&] {
+        return gazeOn && gazeMousePrecision && gazeOwns && !aimHeld && !clickPress && !clickRelease &&
+               hold.src == Src::None;
+    };
+    // Hold the press back: the pointer stops where the gaze put it.
+    auto aimStart = [&](bool right) {
+        gazeOwns = false;
+        nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
+        nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+        nudgeAt = aimSince = Clock::now(), nudgeMoved = 0;
+        aimHeld = true, aimRight = right;
+    };
+    // A drag the right button began (chordDrag): it lasts while either button is held.
+    auto chordDrop = [&] {
+        chordDrag = false;
+        if (leftHeld) releaseLeft();
+        if (debug) std::printf("mouse drag dropped\n");
+        if (debug) std::fflush(stdout);
+    };
     auto leftButton = [&](bool down) {
+        leftDown = down;
         if (down) {
-            if (gazeOn && gazeMousePrecision && gazeOwns && !aimHeld && !clickPress && !clickRelease &&
-                hold.src == Src::None) {
-                // Hold the press back: the pointer stops where the gaze put it.
-                gazeOwns = false;
-                nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
-                nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
-                nudgeAt = aimSince = Clock::now(), nudgeMoved = 0;
-                aimHeld = true;
+            if (aimHeld && aimRight && !aimHand) {
+                ignoreLeftUp = true;  // the right's press is held back: the left does nothing
+                return;
+            }
+            if (canAim()) {
+                aimStart(false);
                 return;
             }
             pressLeft();
             return;
         }
-        if (aimHeld && !aimHand) {
+        if (ignoreLeftUp) {
+            ignoreLeftUp = false;
+            return;
+        }
+        if (chordDrag) {
+            if (!rightDown) chordDrop();  // otherwise the right holds it (tilting, maybe)
+            return;
+        }
+        if (aimHeld && !aimHand && !aimRight) {
             aimHeld = false;
             clickPress = true;  // after this frame's pose, so it lands where the pointer was moved to
             gazeBack = nudgeMoved < 0.2;
             return;
         }
         if (leftHeld) releaseLeft();
+    };
+    // The right button (see the top); false: not taken here (a tilt, or passed on as it is).
+    auto rightButton = [&](bool down) {
+        rightDown = down;
+        if (down) {
+            if (aimHeld && !aimHand && !aimRight) {
+                // During the left's held-back press: press the left where the pointer is now (the
+                // correction is a lesson), and the mouse drags.
+                aimHeld = false;
+                chordDrag = gazeBack = true;
+                pressLeft();
+                if (debug) std::printf("mouse drag began (right during left)\n");
+                if (debug) std::fflush(stdout);
+                return true;
+            }
+            if (canAim() && !leftHeld) {
+                aimStart(true);
+                return true;
+            }
+            return false;
+        }
+        if (chordDrag) {
+            if (leftDown) return !swallowedRight;  // the left holds it; a tilt's release ends the tilt
+            tilting = swallowedRight = false;
+            chordDrop();
+            return true;
+        }
+        if (aimHeld && !aimHand && aimRight) {
+            aimHeld = aimRight = false;
+            pressRight = clickPress = true;  // the right click, where the pointer was moved to
+            gazeBack = nudgeMoved < 0.2;
+            return true;
+        }
+        if (leftHeld && heldButton == "b") {  // its press, held still into a real one
+            releaseLeft();
+            return true;
+        }
+        return false;
+    };
+    // POINTER_GAZE_MOUSE_MOVE=held (see the top): the gaze is fresh and nothing is pressed, so a
+    // mouse move doesn't move the pointer.
+    auto mouseMoveHeld = [&] {
+        return gazeOn && gazeMouseHeld && !inGame && !headsetOff && Clock::now() - gz.at < std::chrono::seconds(1) &&
+               !aimHeld && !leftHeld && !tilting && hold.src == Src::None && !clickPress && !clickRelease;
     };
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
@@ -1157,6 +1306,27 @@ int main() {
                 gz = {g[0], g[1], g[2], g[3], Clock::now()};
                 continue;
             }
+            // The gaze calibration panel (see the top): presses answer it instead of clicking.
+            {
+                int on;
+                if (std::sscanf(buf, "calpanel %d", &on) == 1) {
+                    const bool was = Clock::now() < calPanelUntil;
+                    calPanelUntil = on ? Clock::now() + std::chrono::seconds(3) : Clock::time_point{};
+                    if (on && !was) calOpened = true;
+                    continue;
+                }
+            }
+            if (Clock::now() < calPanelUntil) {
+                const bool accept = !std::strncmp(buf, "btn trigger 1", 13) || !std::strncmp(buf, "gazekey left 1", 14);
+                const bool quit = !std::strncmp(buf, "btn b 1", 7) || !std::strncmp(buf, "gazekey right 1", 15);
+                if (accept || quit) {
+                    SendTo(out, "ft_gazed", accept ? "calaccept" : "calquit");
+                    continue;
+                }
+                if (!std::strncmp(buf, "btn ", 4) || !std::strncmp(buf, "gazekey ", 8) ||
+                    !std::strncmp(buf, "precision ", 10) || !std::strncmp(buf, "gazedrag ", 9))
+                    continue;  // their releases, and the other buttons: nothing to click now
+            }
             {
                 char kind[16], source[16];
                 int v;
@@ -1165,6 +1335,13 @@ int main() {
                     lastMouse = Clock::now();
                     if (!active) wake(Clock::now());
                     devicePresses.push_back({source, !std::strcmp(kind, "gazedrag"), v != 0});
+                    continue;
+                }
+                if (std::sscanf(buf, "gazekey %15s %d", source, &v) == 2 &&
+                    (!std::strcmp(source, "left") || !std::strcmp(source, "right"))) {
+                    lastMouse = Clock::now();
+                    if (!active) wake(Clock::now());
+                    keyPresses.push_back({!std::strcmp(source, "right"), v != 0});
                     continue;
                 }
             }
@@ -1208,9 +1385,13 @@ int main() {
             }
             const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
                                     std::strncmp(buf, "scroll", 6) == 0;
-            if (mouseInput) lastMouse = Clock::now();
+            // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
+            // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
+            const bool moveHeldBack = std::strncmp(buf, "move", 4) == 0 && mouseMoveHeld();
+            if (mouseInput && !moveHeldBack) lastMouse = Clock::now();
             // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
             if (!active && mouseInput) wake(Clock::now());
+            if (moveHeldBack) continue;
             double a, b;
             char key[128];
             double px, py, pz, pyaw, ppitch, proll = 0, pgrab = -1;
@@ -1258,6 +1439,10 @@ int main() {
                 continue;
             } else if (std::strncmp(buf, "btn trigger 0", 13) == 0) {
                 leftButton(false);
+                continue;
+            } else if (std::strncmp(buf, "btn b 1", 7) == 0 && rightButton(true)) {
+                continue;
+            } else if (std::strncmp(buf, "btn b 0", 7) == 0 && rightButton(false)) {
                 continue;
             } else if (std::strncmp(buf, "btn b 1", 7) == 0 && leftHeld) {
                 tilting = tiltStart = swallowedRight = true;  // right press while dragging: tilt, no right-click
@@ -1454,11 +1639,14 @@ int main() {
                     if (gazeOn) gazeOwns = true, nudging = false;  // no click: the pointer goes back to the gaze
                 } else {
                     clickPress = true;  // the click is on the release, where the pointer is now
+                    pressRight = hold.right;
                     gazeBack = nudgeMoved < 0.2;
                 }
             }
             if (debug)
-                std::printf("hold %s %s%s\n", hold.src == Src::Hand ? (hold.grip ? "grip" : "pinch") : hold.grip ? "gaze drag" : "gaze precision",
+                std::printf("hold %s %s%s\n", hold.src == Src::Hand ? (hold.grip ? "grip" : "pinch")
+                                              : hold.src == Src::Head ? (hold.right ? "key right" : "key left")
+                                              : hold.grip ? "gaze drag" : "gaze precision",
                             lost ? "lost" : "released", hold.pressed ? "" : lost ? " (no click)" : " (click)");
             if (debug) std::fflush(stdout);
             hold = {};
@@ -1493,7 +1681,12 @@ int main() {
             }
             yaw = std::remainder(hold.startYaw + gain * dy, 360.0);
             pitch = std::clamp(hold.startPitch + gain * dp, -85.0, 85.0);
-            if (!hold.pressed) nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
+            // How far the nudge went: for a keyboard click, from where the dot was at the press
+            // (a head wobbles on the way); otherwise the path, as with the mouse.
+            if (!hold.pressed && hold.src == Src::Head)
+                nudgeMoved = std::hypot(std::remainder(yaw - hold.pressYaw, 360.0), pitch - hold.pressPitch);
+            else if (!hold.pressed)
+                nudgeMoved += std::hypot(std::remainder(yaw - hold.lastYaw, 360.0), pitch - hold.lastPitch);
             hold.lastYaw = yaw, hold.lastPitch = pitch;
             lastMove = tnow;  // the dot shows while it moves (gaze mode)
         };
@@ -1551,6 +1744,85 @@ int main() {
             if (debug) std::fflush(stdout);
         }
         devicePresses.clear();
+        // Keyboard clicks (see the top): held back at the gaze, steered by the head.
+        auto headAngles = [&](double &hy, double &hp) {
+            if (!hmd.bPoseIsValid) return false;
+            const Vec3 f = Normalize({-hm[0][2], -hm[1][2], -hm[2][2]});
+            hy = std::atan2(-f.x, -f.z) * 180 / M_PI;
+            hp = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
+            return true;
+        };
+        for (const KeyPress &k : keyPresses) {
+            (k.right ? keyRightDown : keyLeftDown) = k.down;
+            if (!k.down) {
+                if (keyTilting && k.right) {  // the tilt ends; the head drags again from here
+                    keyTilting = tilting = false;
+                    hold.engaged = false;
+                    if (debug) std::printf("hold key left: tilt ended\n");
+                    if (debug) std::fflush(stdout);
+                }
+                // The keys holding it: a gaze_left then gaze_right drag, either; otherwise its own.
+                const bool held = hold.keyDrag ? keyLeftDown || keyRightDown : hold.right ? keyRightDown : keyLeftDown;
+                if (hold.src == Src::Head && !held) {
+                    if (!hold.pressed && aimHeld && tnow - aimSince < std::chrono::duration<double>(keyTap)) {
+                        // A quick tap: a click where the dot was at the press, and the gaze was right.
+                        yaw = hold.pressYaw, pitch = hold.pressPitch;
+                        nudgeMoved = 0;
+                        confirmLesson = true;
+                    }
+                    endHold(false);
+                    keyTilting = false;
+                }
+                continue;
+            }
+            if (k.right && hold.src == Src::Head && !hold.right && hold.pressed && leftHeld) {
+                // gaze_right during a gaze_left drag: tilt while it's held (see the top).
+                tilting = tiltStart = keyTilting = true;
+                headAngles(keyTiltYaw, keyTiltPitch);
+                if (debug) std::printf("hold key left: tilt began\n");
+                if (debug) std::fflush(stdout);
+                continue;
+            }
+            if (k.right && hold.src == Src::Head && !hold.right && !hold.pressed && aimHeld) {
+                // gaze_right while gaze_left aims: press the left button where the dot is now
+                // (the correction is a lesson), then the head drags.
+                aimHeld = aimHand = false;
+                hold.pressed = hold.grip = hold.keyDrag = true, hold.promote = false, hold.engaged = false;
+                headAngles(hold.refYaw, hold.refPitch);
+                gazeBack = gazeOn;
+                pressRight = false;
+                pressLeft();
+                if (debug) std::printf("hold key left: pressed (right key)\n");
+                if (debug) std::fflush(stdout);
+                continue;
+            }
+            if (hold.src != Src::None || leftHeld || aimHeld || clickPress || clickRelease) continue;
+            Hold h;
+            h.src = Src::Head, h.promote = true, h.right = k.right, h.pressYaw = yaw, h.pressPitch = pitch;
+            if (!headAngles(h.refYaw, h.refPitch)) continue;
+            hold = h;
+            startHold(false);
+            if (debug) std::printf("hold key %s began\n", k.right ? "right" : "left");
+            if (debug) std::fflush(stdout);
+        }
+        keyPresses.clear();
+        if (calOpened) {  // the calibration panel came up: a press in progress ends, no click
+            calOpened = false;
+            if (hold.src != Src::None) endHold(true);
+            if (leftHeld) releaseLeft();
+            aimHeld = aimHand = clickPress = false;
+        }
+        if (hold.src == Src::Head) {
+            double hy, hp;
+            if (headAngles(hy, hp) && keyTilting) {
+                // The head turns the panel, as the mouse does in a tilt; the pointer stays put.
+                tiltYaw += std::remainder(hy - keyTiltYaw, 360.0);
+                tiltPitch = std::clamp(tiltPitch + hp - keyTiltPitch, -80.0, 80.0);
+                keyTiltYaw = hy, keyTiltPitch = hp;
+            } else if (headAngles(hy, hp)) {
+                steer(hy, hp, hold.pressed ? 0.3 : headDeadzone, 1.0);
+            }
+        }
         fh_gestures_t hg;
         const bool handOk = handsOn && handFile.Read(hg);
         if (handOk && (hg.seq != handSeq || handFile.opens != handOpens)) {
@@ -1857,6 +2129,7 @@ int main() {
                     auto secs = [&](Clock::time_point t) { return std::chrono::duration<double>(tnow - t).count(); };
                     alpha = std::clamp(1 - std::min(secs(lastMove) - gazeShow, secs(lastHeld)) / 0.25, 0.0, 1.0);
                 }
+                if (tnow < calPanelUntil) alpha = 0;
                 overlay->SetOverlayAlpha(marker, float(alpha));
                 overlay->SetOverlayWidthInMeters(marker, float(2 * SETTINGS_DOT * std::tan(cursorDeg * M_PI / 360)));
                 auto mm = Billboard(near, eye);
@@ -1886,6 +2159,7 @@ int main() {
                         alpha = std::max(alpha, std::clamp((0.6 - pulse) / 0.3, 0.0, 1.0));
                     }
                 }
+                if (tnow < calPanelUntil) alpha = 0;  // the calibration panel is up (see the top)
                 overlay->SetOverlayAlpha(show, float(alpha));
                 overlay->SetOverlayWidthInMeters(show, float(2 * dist * std::tan(scale * cursorDeg * M_PI / 360)));
                 auto m = Billboard(at, eye);
@@ -1945,11 +2219,30 @@ int main() {
 
         // A held-back press (see the top): held still long enough, it's a real press (a drag);
         // released, it's a click where the pointer is now (this frame's pose has gone out).
-        if (!active) aimHeld = clickPress = aimHand = false;  // released meanwhile: nothing to click
+        if (!active) aimHeld = aimRight = clickPress = aimHand = confirmLesson = false;  // released meanwhile: nothing to click
         if (aimHeld && !aimHand && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
             aimHeld = false;
             gazeBack = true;
+            pressRight = aimRight;  // the right button's: a real right press (see the top)
+            aimRight = false;
             pressLeft();
+        }
+        // A keyboard click held still for POINTER_GAZE_HOLD: a real press, then the head drags
+        // (from where it is now).
+        if (aimHeld && aimHand && hold.promote && !hold.engaged &&
+            tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
+            aimHeld = aimHand = false;
+            hold.pressed = hold.grip = true;
+            if (hmd.bPoseIsValid) {
+                const Vec3 f = Normalize({-hm[0][2], -hm[1][2], -hm[2][2]});
+                hold.refYaw = std::atan2(-f.x, -f.z) * 180 / M_PI;
+                hold.refPitch = std::asin(std::clamp(f.y, -1.0, 1.0)) * 180 / M_PI;
+            }
+            gazeBack = gazeOn;
+            pressRight = hold.right;
+            pressLeft();
+            if (debug) std::printf("hold key %s: pressed (held still)\n", hold.right ? "right" : "left");
+            if (debug) std::fflush(stdout);
         }
         if (clickPress) {
             clickPress = false;

@@ -64,6 +64,9 @@ ACTION_LABELS = {
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
     "gaze_precision": "Gaze precision: hold to steer, release to click",
     "gaze_drag": "Gaze drag: press where you look, steer, release",
+    "gaze_left": "Gaze left click: tap, or hold and turn your head to aim",
+    "gaze_right": "Gaze right click: tap, or hold and turn your head to aim",
+    "gaze_quickcal": "Gaze quick check (one dot)",
     "sens_up": "Faster pointer",
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
@@ -90,8 +93,12 @@ CONTROLLER_BUTTONS = {
     "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
     "right/thumbstick": "Right stick click",
 }
-# Not the gaze actions: gaze mode is a mouse feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
-CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none", "gaze_toggle", "gaze_precision", "gaze_drag")]
+# Gaze mode is a mouse and keyboard feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
+GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
+CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none") + GAZE_ACTIONS]
+# Key combinations take any action but key and none; the keyboard clicks only work there.
+SHORTCUT_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none")]
+KEYBOARD_ONLY = ("gaze_left", "gaze_right")
 # Profiles (docs/profiles.md): "profile:NAME" opens one (the relay runs ft-layout use NAME).
 LAYOUT_PATH = os.path.expanduser("~/.config/frametop-layout.json")
 PROFILE = "profile:"
@@ -109,13 +116,22 @@ def action_label(a):
     return ACTION_LABELS.get(a, a)
 
 
+def is_profile(a):
+    return a.startswith(PROFILE) and len(a) > len(PROFILE)
+
+
 def mappable(a):
-    """An action a controller button or key combination can have."""
-    return a in CONTROLLER_ACTIONS or (a.startswith(PROFILE) and len(a) > len(PROFILE))
+    """An action a controller button can have."""
+    return a in CONTROLLER_ACTIONS or is_profile(a)
+
+
+def shortcut_mappable(a):
+    """An action a key combination can have: the gaze ones too."""
+    return a in SHORTCUT_ACTIONS or is_profile(a)
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
-    ("POINTER_GAZE_NUDGE_MAX", "Largest nudge to learn", 8, 1, 30, 0.5, "°"),
+    ("POINTER_GAZE_NUDGE_MAX", "Largest correction to learn", 55, 1, 110, 1, "°"),
     ("POINTER_GAZE_HOLD", "Hold still to drag", 0.5, 0.1, 2.0, 0.05, "s"),
     ("POINTER_GAZE_SHOW", "Dot shows after moving", 1.0, 0.0, 5.0, 0.1, "s"),
 ]
@@ -127,8 +143,9 @@ POINTER_ROLES = {"right": "Right hand", "left": "Left hand", "stylus": "Stylus (
 # Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
-# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): Meta+Shift+F.
-DEFAULT_KEY_BINDINGS = {"42+125+33": "float_toggle"}
+# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): Meta+J and
+# Meta+K click at the gaze, Meta+Shift+F floats a window.
+DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
 
 
 def key_bindings(rules):
@@ -286,6 +303,7 @@ class Backend(QObject):
         self._gaze_prev = None  # the status before, for rates
         self._gaze_at = 0.0
         self._gaze_mode = None  # the helper's gaze mode: True, False, None (no answer)
+        self._check_asked = 0.0  # when quickcal or calibrate went to the gaze service (its errors)
         self._driver_block = ""  # set by _check_driver
         self._panels = None  # SteamVR's overlays, from the helper; None until it answers
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -349,6 +367,10 @@ class Backend(QObject):
             except BlockingIOError:
                 return
             text = data.decode(errors="replace")
+            if text.startswith("error ") and self._check_asked and time.monotonic() - self._check_asked < 3:
+                self._check_asked = 0.0  # the gaze service's answer to quickcal or calibrate
+                self.message.emit("Gaze check: " + text[6:], True)
+                continue
             if text in ("ok on", "ok off"):  # the helper's answer to "gaze ?" (from an unbound socket)
                 self._gaze_mode = text == "ok on"
                 self._gaze_at = time.monotonic()
@@ -501,7 +523,7 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def actions(self):
-        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items()] + \
+        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items() if k not in KEYBOARD_ONLY] + \
             [{"value": a, "text": action_label(a)} for a in profile_actions()]
 
     @Slot(str, result="QVariantList")
@@ -841,6 +863,18 @@ class Backend(QObject):
             self.message.emit(f"Mouse in gaze mode: {GAZE_MOUSE[mode].lower()}", False)
 
     @Property(bool, notify=pointerChanged)
+    def gazeMouseHeld(self):
+        return read_conf().get("POINTER_GAZE_MOUSE_MOVE", "held") != "free"
+
+    @Slot(bool)
+    def setGazeMouseHeld(self, on):
+        write_conf_value("POINTER_GAZE_MOUSE_MOVE", "held" if on else "free")
+        self.reload_timer.start()
+        self.pointerChanged.emit()
+        self.message.emit("Mouse in gaze mode: " + ("moves the pointer only while a button is held" if on
+                                                    else "moves the pointer any time"), False)
+
+    @Property(bool, notify=pointerChanged)
     def gazeDotAlways(self):
         return read_conf().get("POINTER_GAZE_DOT", "always") != "moving"
 
@@ -881,7 +915,7 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def shortcutActions(self):
-        return [{"value": a, "text": action_label(a)} for a in CONTROLLER_ACTIONS + profile_actions()]
+        return [{"value": a, "text": action_label(a)} for a in SHORTCUT_ACTIONS + profile_actions()]
 
     @Property(bool, notify=shortcutCaptureChanged)
     def capturingShortcut(self):
@@ -889,7 +923,7 @@ class Backend(QObject):
 
     @Slot(str)
     def startShortcutCapture(self, action):
-        if mappable(action):
+        if shortcut_mappable(action):
             self._capture_combo = action
             self._combo_mods = set()
             self._send("watch 60")
@@ -972,14 +1006,32 @@ class Backend(QObject):
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
 
     @Slot()
-    def openGazeProbe(self):
-        """Calibrate in ft-gazeprobe (a GTK app on the host, fullscreen on a Frametop screen)."""
-        self._open_probe([], "Opening the gaze probe: calibrate there, then close it")
+    def gazeQuickCheck(self):
+        """The gaze service's one-dot check, in the panel fixed to the headset."""
+        self._gaze_check("quickcal", "Quick check: look at the dot in front of you")
 
     @Slot()
-    def openHeadsetFit(self):
-        """The probe's Headset fit mode: how well the tracker sees each eye, as you adjust."""
-        self._open_probe(["--mode", "fit"], "Opening the headset fit check in the gaze probe")
+    def gazeCalibrate(self):
+        """The full calibration in the panel fixed to the headset (gaze/gazecheck.py)."""
+        self._gaze_check("calibrate", "Calibration: look at each dot in the headset; right click or Meta+K stops")
+
+    def _gaze_check(self, command, done):
+        if self._send(command, GAZED):
+            self._check_asked = time.monotonic()
+            self.message.emit(done, False)
+        else:
+            self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def gazeFitCheck(self):
+        """The headset fit check, in the panel fixed to the headset (gaze/gazecheck.py)."""
+        self._gaze_check("fitcheck", "Headset fit: in the headset, adjust it while you watch; right click or Meta+K closes it")
+
+    @Slot()
+    def openGazeProbe(self):
+        """ft-gazeprobe, the gaze tracking's development tool (a GTK app on the host, fullscreen on
+        a Frametop screen). Day to day, the checks and the calibration run in the headset panel."""
+        self._open_probe([], "Opening the gaze probe (a development tool)")
 
     def _open_probe(self, args, done):
         runner = ["distrobox-host-exec"] if shutil.which("distrobox-host-exec") else []

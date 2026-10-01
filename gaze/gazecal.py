@@ -544,6 +544,9 @@ class SteamEyeLog:
     each time the headset goes on ("HMD on"): the eye model starts over then too."""
 
     PATH = Path.home() / ".local" / "share" / "Steam" / "logs" / "eyetracking.txt"
+    # It writes "HMD on" again every minute or so while on, and flickers off for 0.01-0.3 s:
+    # only an on after an off of BLIP or longer counts.
+    BLIP = 1.5
 
     def __init__(self):
         self.pos = 0
@@ -595,9 +598,14 @@ class SteamEyeLog:
                 self.starts.append(t)
                 restarted = not first
             elif "HMD on" in line:
-                self.wears.append(t)
+                off = bool(self.offs) and (not self.wears or self.offs[-1] > self.wears[-1])
+                if off and self.wears and t - self.offs[-1] < self.BLIP:
+                    self.offs.pop()  # the sensor flickering: it never came off
+                elif off or not self.wears:
+                    self.wears.append(t)
             elif "HMD off" in line:
-                self.offs.append(t)
+                if not self.offs or (self.wears and self.wears[-1] > self.offs[-1]):
+                    self.offs.append(t)
             elif "Accept usercal" in line:
                 self.accepts.append(t)
             elif "Reject usercal" in line:

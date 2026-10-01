@@ -815,16 +815,25 @@ Kirigami.ApplicationWindow {
             property var status: backend.gazeStatus
             actions: [
                 Kirigami.Action {
-                    text: "Calibrate…"
+                    text: "Quick check"
                     icon.name: "crosshairs"
-                    tooltip: "Open the gaze probe to calibrate (fullscreen on a Frametop screen)"
-                    onTriggered: backend.openGazeProbe()
+                    enabled: backend.gazeServiceRunning
+                    tooltip: "One dot in front of you in the headset: look at it, and the gaze tracker relearns where it sits"
+                    onTriggered: backend.gazeQuickCheck()
                 },
                 Kirigami.Action {
-                    text: "Check headset fit…"
+                    text: "Calibrate"
+                    icon.name: "crosshairs"
+                    enabled: backend.gazeServiceRunning
+                    tooltip: "The full calibration in the headset: dots in three rounds, dark to bright"
+                    onTriggered: backend.gazeCalibrate()
+                },
+                Kirigami.Action {
+                    text: "Check headset fit"
                     icon.name: "view-visible"
-                    tooltip: "How well the eye tracker sees each eye, and where it loses one, while you adjust the headset"
-                    onTriggered: backend.openHeadsetFit()
+                    enabled: backend.gazeServiceRunning
+                    tooltip: "In the headset: how well the eye tracker sees each eye, live, while you adjust it"
+                    onTriggered: backend.gazeFitCheck()
                 },
                 Kirigami.Action {
                     text: "Reload calibration"
@@ -838,6 +847,14 @@ Kirigami.ApplicationWindow {
                     enabled: backend.gazeServiceRunning
                     tooltip: "Drop what your mouse nudges taught; the calibration stays"
                     onTriggered: backend.forgetGazeLessons()
+                },
+                Kirigami.Action {
+                    // A development tool: the checks and the calibration run in the headset panel.
+                    text: "Gaze probe (development)…"
+                    icon.name: "tools"
+                    displayHint: Kirigami.DisplayHint.AlwaysHide
+                    tooltip: "The gaze tracking's lab tool, for developing it: experiments, accuracy tests, practice"
+                    onTriggered: backend.openGazeProbe()
                 }
             ]
 
@@ -877,6 +894,22 @@ Kirigami.ApplicationWindow {
                     }
                 }
                 Controls.Switch {
+                    Kirigami.FormData.label: "Mouse movement:"
+                    text: "Only while a button is held (recommended)"
+                    checked: backend.gazeMouseHeld
+                    onToggled: backend.setGazeMouseHeld(checked)
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    Controls.ToolTip.text: checked
+                        ? "Your eyes move the pointer, so moving the mouse on its own does nothing. Hold a button "
+                          + "and the pointer stops where you look: move onto the target and let go to click there "
+                          + "(left or right). To drag after moving, press right while holding left. It's on because a "
+                          + "bumped mouse can't pull the pointer away, and every mouse move is a real correction the "
+                          + "eye tracker learns from. If the eye tracker stops, the mouse works as usual."
+                        : "The mouse moves the pointer any time, as without gaze. Moves that weren't corrections can "
+                          + "teach the eye tracker the wrong thing."
+                }
+                Controls.Switch {
                     Kirigami.FormData.label: "Gaze dot:"
                     text: "Always shown (off: only while the mouse moves it)"
                     checked: backend.gazeDotAlways
@@ -885,9 +918,11 @@ Kirigami.ApplicationWindow {
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 30
                     wrapMode: Text.WordWrap
-                    text: "Gaze works with the mouse. The Frame controllers don't take part, and moving one hands the "
-                          + "pointer back to the controllers. Gaze pointer on/off, Gaze precision, and Gaze drag can go on "
-                          + "a mouse button (Buttons page) or a key combination (Keyboard page)."
+                    text: "Gaze works with the mouse and the keyboard. Keyboard clicks (Meta+J left, Meta+K right by "
+                          + "default): tap to click where you look, or hold, turn your head until the dot sits on the "
+                          + "target, and let go; hold still to drag. The Frame controllers don't take part, and moving "
+                          + "one hands the pointer back to them. Gaze pointer on/off, Gaze precision, and Gaze drag can "
+                          + "also go on a mouse button (Buttons page) or another key combination (Keyboard page)."
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
@@ -911,7 +946,7 @@ Kirigami.ApplicationWindow {
                              && (!gpage.status.own_running || gpage.status.own_reseat || !gpage.status.calibration_samples)
                     text: !gpage.status.eyegrab ? "Needs its frame grabber: run gaze/tracker/install.sh (asks for sudo)"
                           : !gpage.status.own_running ? "Starting…"
-                          : !gpage.status.calibration_samples ? "Not calibrated: use Calibrate… with Own tracker"
+                          : !gpage.status.calibration_samples ? "Not calibrated: use Calibrate"
                           : "The headset was off: your first nudge and click resets where it sits"
                     color: gpage.status.own_running ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.negativeTextColor
                     font: Kirigami.Theme.smallFont
@@ -999,7 +1034,7 @@ Kirigami.ApplicationWindow {
                             + (gpage.status.one_eye_share > 0.5 ? " · only one eye tracked" : "")
                     color: gpage.status.one_eye_share > 0.5 ? Kirigami.Theme.neutralTextColor : Kirigami.Theme.textColor
                     Controls.ToolTip.text: "Only one eye tracked: the gaze comes from the other eye, a little less "
-                                           + "precisely. Check headset fit… shows where the tracker loses it."
+                                           + "precisely. Check headset fit shows where the tracker loses it."
                     Controls.ToolTip.visible: gpage.status.one_eye_share > 0.5 && ghover.hovered
                     HoverHandler { id: ghover }
                 }
@@ -1023,7 +1058,7 @@ Kirigami.ApplicationWindow {
                           ? gpage.status.calibration_samples + " points ("
                             + (gpage.status.tracker === "own" ? "Own tracker, " + gpage.status.calibration_made
                                : gpage.status.kind === "eyes" ? gpage.status.model + ", each eye" : gpage.status.model) + ")"
-                          : "none yet: use Calibrate…"
+                          : "none yet: use Calibrate"
                 }
                 Controls.Label {
                     visible: backend.gazeServiceRunning
@@ -1037,13 +1072,13 @@ Kirigami.ApplicationWindow {
                 padding: Kirigami.Units.largeSpacing
                 wrapMode: Text.Wrap
                 opacity: 0.7
-                text: "Map a mouse button (Buttons) or a controller button (Controllers) to \"Gaze pointer on/off\" "
+                text: "Map a mouse button (Buttons) or a key combination (Keyboard) to \"Gaze pointer on/off\" "
                       + "to switch it on the fly. A click waits for the release: if the gaze is off, drag onto the target "
                       + "with the button held and let go there. Hold still to drag: hold a press this long without moving "
                       + "to drag something instead. Look away to hand back: how far from the pointer you look before the "
-                      + "gaze takes it back from the mouse. Largest nudge to learn: bigger mouse moves before a click "
-                      + "are treated as using the mouse, not correcting the gaze. Eye tracker: SteamVR's, or our own "
-                      + "(gaze/tracker), which keeps its own calibration (Calibrate… with Own tracker). Eye bias: the gaze "
+                      + "gaze takes it back from the mouse. Largest correction to learn: a click corrected further than "
+                      + "this isn't learned; the tracker is that far off, so the quick check runs instead. Eye tracker: SteamVR's, or our own "
+                      + "(gaze/tracker), which keeps its own calibration. Eye bias: the gaze "
                       + "combines both eyes, since their errors partly cancel; Left or Right counts that eye twice as "
                       + "much, and Auto weights each by how far off it was at your recent nudges."
             }
