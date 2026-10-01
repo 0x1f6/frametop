@@ -70,9 +70,10 @@ if [ "${1:-}" != --inner ]; then
   # Plasma can't find them and opens Discover instead.
   export XDG_DATA_DIRS=${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
   set +u; . /etc/profile.d/flatpak.sh; set -u
-  # Arrange the screens in the saved layout once they're up (layout; skipped
-  # when auto-arrange is off).
-  setsid "$here/../layout/ft-layout" apply --wait 90 > /tmp/frametop-layout.log 2>&1 < /dev/null &
+  # Arrange the screens once they're up: in the profile this desktop starts with (FT_PROFILE,
+  # from a profile's launcher entry, or the default profile), which also opens its apps, or
+  # else in the saved layout (skipped when auto-arrange is off). docs/profiles.md.
+  setsid "$here/../layout/ft-layout" start --wait 90 > /tmp/frametop-layout.log 2>&1 < /dev/null &
 
   if [ "$backend" = gamescope ]; then
     export ENABLE_GAMESCOPE_WSI=1 GAMESCOPE_MANGOAPP_SOCKET_DISABLE=1
@@ -222,5 +223,9 @@ elif [ "$(kreadconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library --delete
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
 fi
+
+# Profiles reopen apps (docs/profiles.md), so Plasma's own session restore stays off here;
+# with both, apps would open twice.
+kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginMode emptySession
 
 dbus-run-session startplasma-wayland

@@ -48,7 +48,7 @@ The Visibility & pins tab of Frametop Display Settings decides when the screens 
 - While you look at a chosen controller (the wrist gesture).
 - Only after you show them with the hotkey.
 
-In the last three modes the hotkey shows the screens anyway. Two more settings on the same tab cover VR games, which ft-screens detects as SteamVR scene apps:
+In the last three modes the hotkey shows the screens anyway. A screen can also be hidden on its own (Screens shown on the same tab, or `ft-layout hide N`): it stays hidden whatever the mode or the hotkey says, until it's shown again there. Windows on it stay put, and a new window that would open on it floats instead (ft-floatd). Profiles use this to show only some screens. Two more settings on the same tab cover VR games, which ft-screens detects as SteamVR scene apps:
 
 - During VR games, the Always mode hides the screens unless the dashboard is open (the default), or leaves them up.
 - Controllers on the screens. Visible screens can keep SteamVR's laser mouse on, so controllers work them with the dashboard closed, but that also takes the controllers away from a game. By default this is off while a VR game runs, and the 3D mouse or the dashboard works the screens. The other choices are always on, or only with the dashboard open, which also suits flatscreen games since they aren't scene apps.
@@ -139,13 +139,16 @@ Frametop Display Settings has four tabs (three with the gamescope backend, which
 ```
 layout/ft-layout apply      # arrange every screen
 layout/ft-layout capture    # save the current arrangement and sizes as the layout
-layout/ft-layout save NAME  # ...under a name too, and use it
-layout/ft-layout use NAME   # switch to a named layout and arrange the screens in it
+layout/ft-layout save NAME  # ...under a name too, with the open apps and hidden screens (a profile, docs/profiles.md), and use it
+layout/ft-layout use NAME   # switch to a profile: arrange the screens in it and open its apps
+layout/ft-layout open NAME  # a profile's launcher entry: use it, or start the desktop in it
+layout/ft-layout default NAME|none  # the profile the desktop starts with (start --wait runs it at desktop start)
 layout/ft-layout layouts    # list the named layouts (* = in use); rename OLD NEW, delete NAME
 layout/ft-layout pin N|all left|right|head   # pin as they are now; unpin N|all
 layout/ft-layout plan       # print the arrangement as JSON (no VR needed)
 layout/ft-layout scale      # per-screen scale, positions (as the screens are around you), and taskbar screen, to KWin
 layout/ft-layout toggle     # hide or show all screens
+layout/ft-layout hide N|all # hide a screen on its own, whatever the visibility mode; show N|all brings it back, hidden lists them
 display-settings/install.sh # menu entries and the Meta+Shift+R and Meta+Shift+H shortcuts
 ```
 

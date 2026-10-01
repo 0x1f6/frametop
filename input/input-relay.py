@@ -27,7 +27,8 @@ to the helper), sens_up, sens_down,
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
 keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the desktop window under the
 pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
-window back (both to ft-floatd, @frametop_float), key = pass through as a key, none).
+window back (both to ft-floatd, @frametop_float), profile:NAME = switch to that profile (ft-layout
+use NAME: its screens and apps; docs/profiles.md), key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
 rules file; any action but key and the gaze ones, GAZE_ACTIONS: gaze mode is a mouse feature,
@@ -195,6 +196,15 @@ SCREENS = "\0ft_screens"
 FLOAT = "\0frametop_float"  # ft-floatd, floating windows in the Frametop desktop
 # Actions for ft-floatd ("float_toggle", "dock_all"): they don't need pointer mode.
 FLOAT_ACTIONS = {"float_toggle": b"float pointer", "dock_all": b"dock all"}
+PROFILE = "profile:"  # "profile:NAME": switch to that profile (doesn't need pointer mode either)
+
+
+def known_action(a):
+    return a in ACTIONS or (isinstance(a, str) and a.startswith(PROFILE) and len(a) > len(PROFILE))
+
+
+def needs_pointer(a):
+    return a not in FLOAT_ACTIONS and not a.startswith(PROFILE)
 # Key combinations a rules file without "key_bindings" gets: Meta+Shift+F floats a window.
 DEFAULT_KEY_BINDINGS = {"42+125+33": "float_toggle"}
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
@@ -657,7 +667,7 @@ def main():
         else:
             state["vr_capture_until"] = 0.0
             buttons = " ".join(b for b, a in state["rules"]["controller_buttons"].items()
-                               if b in VR_BUTTONS and a in ACTIONS and a not in ("key", "none")
+                               if b in VR_BUTTONS and known_action(a) and a not in ("key", "none")
                                and a not in GAZE_ACTIONS) or "-"
             if state["rules"].get("controller_in_games"):
                 buttons = "+games " + buttons
@@ -675,7 +685,8 @@ def main():
                 reply(addr, {"t": "event", "id": VR_DEVICE, "path": "", "name": "Steam Frame controllers",
                              "type": "vr", "code": button, "value": value})
         action = state["rules"]["controller_buttons"].get(button)
-        if state["pointer"] and action in ACTIONS and action not in ("key", "none") and action not in GAZE_ACTIONS:
+        if (state["pointer"] or (action and not needs_pointer(action))) and known_action(action) \
+                and action not in ("key", "none") and action not in GAZE_ACTIONS:
             do_action(action, value, now, button.split("/")[0])
 
     def vr_keyboard_mode():
@@ -701,10 +712,16 @@ def main():
 
     def do_action(action, value, now, source="mouse"):
         """A mapped mouse or controller button, or key combination (pointer mode only, but
-        for FLOAT_ACTIONS)."""
+        for FLOAT_ACTIONS and profiles)."""
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
+        elif action.startswith(PROFILE):
+            if value == 1:
+                # Runs a few seconds and borrows the pointer, like layout_reset.
+                subprocess.Popen([FT_LAYOUT, "use", action[len(PROFILE):]], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                log(action)
         elif action in FLOAT_ACTIONS:
             if value == 1:
                 try:
@@ -726,17 +743,17 @@ def main():
             return False
         if value == 0 and code in combos_down:
             action = combos_down.pop(code)
-            if state["pointer"] or action in FLOAT_ACTIONS:
+            if state["pointer"] or not needs_pointer(action):
                 do_action(action, 0, now, "keyboard")
             return True
         if value != 1 or not state["rules"]["key_bindings"]:
             return value == 2 and code in combos_down
         combo = "+".join(str(c) for c in sorted(held_modifiers) + [code])
         action = state["rules"]["key_bindings"].get(combo)
-        if action not in ACTIONS or action in ("key", "none"):
+        if not known_action(action) or action in ("key", "none"):
             return False
         combos_down[code] = action
-        if state["pointer"] or action in FLOAT_ACTIONS:
+        if state["pointer"] or not needs_pointer(action):
             do_action(action, 1, now, "keyboard")
         log(f"key combination {combo}: {action}")
         return True

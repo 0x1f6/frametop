@@ -92,6 +92,26 @@ CONTROLLER_BUTTONS = {
 }
 # Not the gaze actions: gaze mode is a mouse feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
 CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none", "gaze_toggle", "gaze_precision", "gaze_drag")]
+# Profiles (docs/profiles.md): "profile:NAME" opens one (the relay runs ft-layout use NAME).
+LAYOUT_PATH = os.path.expanduser("~/.config/frametop-layout.json")
+PROFILE = "profile:"
+
+
+def profile_actions():
+    """One action per profile (named layout), for buttons, controllers, and key combinations."""
+    names = sorted(read_json(LAYOUT_PATH).get("layouts", {}), key=str.casefold)
+    return [PROFILE + n for n in names]
+
+
+def action_label(a):
+    if a.startswith(PROFILE):
+        return f"Open profile {a[len(PROFILE):]}"
+    return ACTION_LABELS.get(a, a)
+
+
+def mappable(a):
+    """An action a controller button or key combination can have."""
+    return a in CONTROLLER_ACTIONS or (a.startswith(PROFILE) and len(a) > len(PROFILE))
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
@@ -481,7 +501,8 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def actions(self):
-        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items()]
+        return [{"value": k, "text": v} for k, v in ACTION_LABELS.items()] + \
+            [{"value": a, "text": action_label(a)} for a in profile_actions()]
 
     @Slot(str, result="QVariantList")
     def mappings(self, device_id):
@@ -496,7 +517,7 @@ class Backend(QObject):
             r = rows[code]
             r["isDefault"] = code in DEFAULT_BUTTONS  # a built-in binding (left/right/middle/side/extra)
             r["name"] = self.codeName(code)
-            r["actionLabel"] = ACTION_LABELS.get(r["action"], r["action"])
+            r["actionLabel"] = action_label(r["action"])
             out.append(r)
         return out
 
@@ -515,7 +536,7 @@ class Backend(QObject):
         rules.setdefault("buttons", {}).setdefault(device_id, {})[str(code)] = action
         self._remember_name(rules, device_id)
         self._save_rules(rules)
-        self.message.emit(f"{self.codeName(code)} → {ACTION_LABELS.get(action, action)}", False)
+        self.message.emit(f"{self.codeName(code)} → {action_label(action)}", False)
 
     @Slot(str, int)
     def removeMapping(self, device_id, code):
@@ -681,7 +702,7 @@ class Backend(QObject):
     # --- controllers ---
     @Property("QVariantList", constant=True)
     def controllerActions(self):
-        return [{"value": a, "text": ACTION_LABELS[a]} for a in CONTROLLER_ACTIONS]
+        return [{"value": a, "text": action_label(a)} for a in CONTROLLER_ACTIONS + profile_actions()]
 
     @Property("QVariantList", constant=True)
     def controllerButtons(self):
@@ -691,7 +712,7 @@ class Backend(QObject):
     def controllerMappings(self):
         mapped = read_json(RULES_PATH).get("controller_buttons", {})
         return [{"button": b, "label": label, "action": mapped[b],
-                 "actionLabel": ACTION_LABELS.get(mapped[b], mapped[b])}
+                 "actionLabel": action_label(mapped[b])}
                 for b, label in CONTROLLER_BUTTONS.items() if b in mapped]
 
     @Property("QVariantMap", notify=controllersChanged)
@@ -715,12 +736,12 @@ class Backend(QObject):
 
     @Slot(str, str)
     def setControllerMapping(self, button, action):
-        if button not in CONTROLLER_BUTTONS or action not in CONTROLLER_ACTIONS:
+        if button not in CONTROLLER_BUTTONS or not mappable(action):
             return
         rules = read_json(RULES_PATH)
         rules.setdefault("controller_buttons", {})[button] = action
         self._save_rules(rules)
-        self.message.emit(f"{CONTROLLER_BUTTONS[button]} → {ACTION_LABELS[action]}", False)
+        self.message.emit(f"{CONTROLLER_BUTTONS[button]} → {action_label(action)}", False)
 
     @Slot(str)
     def removeControllerMapping(self, button):
@@ -855,12 +876,12 @@ class Backend(QObject):
     @Property("QVariantList", notify=mappingsChanged)
     def keyShortcuts(self):
         bound = key_bindings(read_json(RULES_PATH))
-        return [{"combo": c, "label": self.comboName(c), "action": a, "actionLabel": ACTION_LABELS.get(a, a)}
+        return [{"combo": c, "label": self.comboName(c), "action": a, "actionLabel": action_label(a)}
                 for c, a in sorted(bound.items())]
 
     @Property("QVariantList", constant=True)
     def shortcutActions(self):
-        return [{"value": a, "text": ACTION_LABELS[a]} for a in CONTROLLER_ACTIONS]
+        return [{"value": a, "text": action_label(a)} for a in CONTROLLER_ACTIONS + profile_actions()]
 
     @Property(bool, notify=shortcutCaptureChanged)
     def capturingShortcut(self):
@@ -868,7 +889,7 @@ class Backend(QObject):
 
     @Slot(str)
     def startShortcutCapture(self, action):
-        if action in CONTROLLER_ACTIONS:
+        if mappable(action):
             self._capture_combo = action
             self._combo_mods = set()
             self._send("watch 60")
@@ -883,7 +904,7 @@ class Backend(QObject):
         rules = read_json(RULES_PATH)
         rules["key_bindings"] = dict(key_bindings(rules), **{combo: action})
         self._save_rules(rules)
-        self.message.emit(f"{self.comboName(combo)} → {ACTION_LABELS[action]}", False)
+        self.message.emit(f"{self.comboName(combo)} → {action_label(action)}", False)
 
     @Slot(str)
     def removeShortcut(self, combo):

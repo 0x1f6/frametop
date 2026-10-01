@@ -424,7 +424,7 @@ Kirigami.ApplicationWindow {
         id: layoutPage
         Kirigami.ScrollablePage {
             id: lpage
-            title: "Layout"
+            title: "Layout & profiles"
             property var layout: backend.layout
             property var preset: layout.preset || {}
             property bool hasCustom: (layout.screens || []).some(s => s.pos !== undefined)
@@ -440,16 +440,17 @@ Kirigami.ApplicationWindow {
 
             actions: [
                 Kirigami.Action {
-                    text: "Arrange now"
+                    text: lpage.named ? "Open profile" : "Arrange now"
                     icon.name: "view-restore"
-                    tooltip: "Float the screens out of the dashboard and put them in this layout, around where you're facing"
+                    tooltip: lpage.named ? "Put the screens in this profile's places, around where you're facing, and open its apps (windows already open move; nothing closes)"
+                                         : "Float the screens out of the dashboard and put them in this layout, around where you're facing"
                     enabled: backend.desktopRunning && backend.busy === ""
                     onTriggered: backend.arrange()
                 },
                 Kirigami.Action {
-                    text: "Save current arrangement…"
+                    text: "Save as profile…"
                     icon.name: "document-save"
-                    tooltip: "Save where the screens are now (placed by hand) as a named layout, and use it"
+                    tooltip: "Save where the screens are now, which ones are hidden, and the open apps and where their windows are, under a name"
                     enabled: backend.desktopRunning && backend.busy === ""
                     onTriggered: nameDialog.openFor("save", lpage.named ? lpage.layout.active
                                                                         : "Layout " + (lpage.names.length + 1))
@@ -507,14 +508,59 @@ Kirigami.ApplicationWindow {
                     Controls.Label {
                         visible: lpage.layout.mode === "custom"
                         Kirigami.FormData.label: ""
-                        text: lpage.named ? "Where the screens were when you saved it. Arrange now puts them there. "
-                                            + "Save current arrangement updates it or saves a new one."
-                              : lpage.hasCustom ? "Where the screens were when you saved. Save current arrangement "
+                        text: lpage.named ? "Where the screens were when you saved it, and the apps that were open. Open "
+                                            + "profile puts the screens there and opens the apps. Save as profile updates "
+                                            + "it or saves a new one."
+                              : lpage.hasCustom ? "Where the screens were when you saved. Save as profile "
                                                   + "names it. Pick a preset to edit."
-                              : "Nothing saved yet: place the screens by hand, then Save current arrangement."
+                              : "Nothing saved yet: place the screens by hand, open your apps, then Save as profile."
                         opacity: 0.7
                         wrapMode: Text.Wrap
                         Layout.maximumWidth: Kirigami.Units.gridUnit * 20
+                    }
+
+                    // The profile's apps (docs/profiles.md): each window and where it goes.
+                    ColumnLayout {
+                        id: profileApps
+                        visible: lpage.named
+                        Kirigami.FormData.label: "Apps:"
+                        property var windows: lpage.named ? backend.profileWindows(lpage.layout.active) : []
+                        property var hidden: lpage.named ? backend.profileHidden(lpage.layout.active) : []
+                        Connections {
+                            target: backend
+                            function onChanged() {
+                                profileApps.windows = lpage.named ? backend.profileWindows(lpage.layout.active) : []
+                                profileApps.hidden = lpage.named ? backend.profileHidden(lpage.layout.active) : []
+                            }
+                        }
+                        Controls.Label {
+                            visible: profileApps.windows.length === 0
+                            text: "None saved. Open the apps you want, place their windows, then Save as profile."
+                            opacity: 0.7
+                            wrapMode: Text.Wrap
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 20
+                        }
+                        Repeater {
+                            model: profileApps.windows
+                            delegate: RowLayout {
+                                required property var modelData
+                                required property int index
+                                Controls.Label { text: modelData.app + " (" + modelData.where + ")" }
+                                Controls.ToolButton {
+                                    icon.name: "list-remove"
+                                    text: "Leave out"
+                                    display: Controls.AbstractButton.IconOnly
+                                    Controls.ToolTip.text: "Leave this window out of the profile"
+                                    Controls.ToolTip.visible: hovered
+                                    onClicked: backend.removeProfileWindow(lpage.layout.active, index)
+                                }
+                            }
+                        }
+                        Controls.Label {
+                            visible: profileApps.hidden.length > 0
+                            text: "Hides screen" + (profileApps.hidden.length > 1 ? "s " : " ") + profileApps.hidden.join(", ")
+                            opacity: 0.7
+                        }
                     }
 
                     Controls.SpinBox {
@@ -554,7 +600,18 @@ Kirigami.ApplicationWindow {
                         Kirigami.FormData.label: "When the desktop starts:"
                         text: "Float the screens and arrange them"
                         checked: lpage.layout.auto !== false
+                        enabled: backend.defaultProfile === ""
                         onToggled: backend.setAuto(checked)
+                    }
+                    Controls.ComboBox {
+                        Kirigami.FormData.label: "Start in profile:"
+                        model: [{ text: "None", value: "" }].concat(lpage.names.map(n => ({ text: n, value: n })))
+                        textRole: "text"
+                        valueRole: "value"
+                        currentIndex: Math.max(0, indexOfValue(backend.defaultProfile))
+                        onActivated: backend.setDefaultProfile(currentValue)
+                        Controls.ToolTip.text: "The desktop starts in this profile: its screens, and its apps open. Each profile also has its own entry in SteamVR's Launch a program list"
+                        Controls.ToolTip.visible: hovered
                     }
                 }
 
@@ -800,6 +857,27 @@ Kirigami.ApplicationWindow {
                                 Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                             }
                         }
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Screens shown" }
+
+                    Repeater {
+                        model: backend.screensShown
+                        delegate: Controls.Switch {
+                            required property var modelData
+                            required property int index
+                            Kirigami.FormData.label: "Screen " + (index + 1) + ":"
+                            text: modelData ? "Shown" : "Hidden"
+                            checked: modelData
+                            onToggled: backend.setScreenShown(index, checked)
+                        }
+                    }
+                    Controls.Label {
+                        text: "A hidden screen stays hidden whatever the choices above say, and Meta+Shift+H doesn't bring it back. Windows on it stay there; new ones that would open on it float instead."
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     }
 
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Pinned screens" }

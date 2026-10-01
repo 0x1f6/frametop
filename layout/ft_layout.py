@@ -18,6 +18,10 @@ you face (yaw only), like a recenter. It lives in ~/.config/frametop-layout.json
    "layouts": {"Work": [{"pos": ..., "face": ..., "roll": ..., "metres": ..., "curve": ...,
                          "pin": ...}, ...]},   named layouts: each screen's place (SPATIAL)
    "active": "Work",                  the named layout the custom arrangement came from
+   "profiles": {"Work": {"hidden": [3], "windows": [...]}},   what a named layout opens too
+                                      (docs/profiles.md): screens hidden on their own, and the
+                                      apps' windows (ft-floatd's "windows")
+   "default_profile": "Work",         the profile the desktop starts with (FT_PROFILE overrides)
    "visibility": {"mode": "always",   ft-screens: always | dashboard (only with the SteamVR
                   "wrist_angle": 60,    dashboard open) | gesture (while you look at a controller)
                   "gesture_hand": "left", "gesture_angle": 20},   | toggle (hidden until shown);
@@ -28,6 +32,8 @@ you face (yaw only), like a recenter. It lives in ~/.config/frametop-layout.json
                 "pin": {"hand": "left", "rel": [12]},  ft-screens: riding on that controller
                                                       (left | right), or on the headset (head)
                 "scale": 1.0,                         KWin output scale (1.0 = 100%)
+                "hidden": true,                       ft-screens: hidden on its own, whatever the
+                                                      visibility mode (ft-layout hide N)
                 "pos": [x, y, z], "face": [yaw, pitch], "roll": 0,   custom layout
                 "rotation": "normal" | "left" | "right"}, ...],      gamescope only
    "panel_size": [w, h]}              gamescope: last measured panel size
@@ -42,8 +48,14 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout apply [--wait SECONDS]   arrange every screen; --wait is for desktop start:
                                      wait for the screens, skip if "auto" is off
   ft-layout capture                  save the current arrangement as the custom layout
-  ft-layout save NAME                save it as a named layout too, and use that
-  ft-layout use NAME                 switch to a named layout and arrange the screens in it
+  ft-layout save NAME                save it as a named layout too, and use that; with the
+                                     desktop's apps and hidden screens, as a profile
+  ft-layout use NAME                 switch to a named layout, arrange the screens in it, and
+                                     open its apps (moving open windows, nothing closed)
+  ft-layout start [--wait SECONDS]   desktop start: the profile in FT_PROFILE or default_profile,
+                                     or else as apply --wait
+  ft-layout open NAME                a profile's launcher entry: use it, or start the desktop in it
+  ft-layout default NAME|none        the profile the desktop starts with
   ft-layout layouts                  list the named layouts (* = the one in use)
   ft-layout rename OLD NEW | delete NAME
   ft-layout plan                     print the arrangement as JSON (no VR needed)
@@ -52,6 +64,9 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout screen-args              ft-screens' --screen arguments for the session script
   ft-layout remote-view              the primary screen's place in the workspace, for the VNC bridge
   ft-layout toggle                   hide or show all screens (ft-screens)
+  ft-layout hide N|all               hide a screen on its own (it stays hidden whatever the
+  ft-layout show N|all               visibility mode or the hotkey say), or show it again
+  ft-layout hidden                   the screens hidden on their own
   ft-layout pin all|N left|right|head  pin screens to a wrist or your head as they are;
                                      unpin all|N
 """
@@ -71,6 +86,9 @@ VRCMD = "/opt/steamvr/bin/linuxarm64/vrcmd"
 HELPER = "\0ft_pointer_helper"
 SCREENS = "\0ft_screens"
 LOCK_PATH = "/tmp/ft-layout.lock"
+FLOAT = "\0frametop_float"  # ft-floatd: the apps' windows (profiles)
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+LAUNCHERS = os.path.expanduser("~/.local/share/applications")  # a profile's launcher entry each
 DEFAULT_PANEL = (1.18, 0.664)  # gamescope: a floating 16:9 dashboard panel, measured on the Frame
 PIXELS_PER_METRE = 800         # ft-screens: a new screen's default size in VR (1920 px: 2.4 m)
 # controllers: when controllers' lasers work the screens (always | outside_games | dashboard).
@@ -393,6 +411,42 @@ def send_visibility(sock, layout):
     sock.ask(f"ingames {v['in_games']}")
 
 
+def send_hidden(sock, layout):
+    """Screens hidden on their own (ft-screens' conceal/reveal)."""
+    for i in range(screen_count(layout)):
+        word = "conceal" if screen_entry(layout, i).get("hidden") else "reveal"
+        try:
+            sock.ask(f"{word} {i + 1}")
+        except RuntimeError as e:
+            log(f"screens hidden on their own: {e}")  # an ft-screens from before conceal
+            return
+
+
+def set_hidden(which, hidden):
+    """Hide (or show) screen N (1-based) or "all" on its own: saved, and applied if the
+    desktop runs."""
+    layout = load_layout()
+    n = screen_count(layout)
+    picked = range(n) if which == "all" else [int(which) - 1] if which.isdigit() else []
+    if not picked or not all(0 <= i < n for i in picked):
+        raise RuntimeError(f"no screen {which} (1 to {n})")
+    screens = layout.setdefault("screens", [])
+    while len(screens) < n:
+        screens.append({})
+    for i in picked:
+        if hidden:
+            screens[i]["hidden"] = True
+        else:
+            screens[i].pop("hidden", None)
+    save_layout(layout)
+    try:
+        sock = screens_socket()
+        for i in picked:
+            sock.ask(f"{'conceal' if hidden else 'reveal'} {i + 1}")
+    except RuntimeError as e:
+        log(f"saved; not applied now: {e}")
+
+
 def parse_get(reply):
     """ft-screens' "get": pose, size, curve, and the pin (hand and controller->screen)."""
     f = reply.split()[1:]
@@ -441,6 +495,7 @@ def apply_screens(wait=0):
                 sock.ask(f"pin {i + 1} {pin['hand']} " + " ".join(f"{v:.5f}" for v in pin["rel"]))
             except RuntimeError as e:
                 log(f"screen {i + 1}: {e}")  # that controller isn't on
+    send_hidden(sock, layout)
     try:
         sock.ask("vrkeyboard close")  # the keyboard, if open, goes too: a reset starts over
     except RuntimeError:
@@ -654,6 +709,11 @@ def rename_named(layout, old, new):
     if new != old and new in named:
         raise RuntimeError(f"there's already a layout called {new!r}")
     named[new] = named.pop(old)
+    profiles = layout.get("profiles", {})
+    if old in profiles:
+        profiles[new] = profiles.pop(old)
+    if layout.get("default_profile") == old:
+        layout["default_profile"] = new
     if layout.get("active") == old:
         layout["active"] = new
     return new
@@ -663,8 +723,131 @@ def delete_named(layout, name):
     """The screens stay where the layout put them, as an unnamed custom arrangement."""
     if layout.get("layouts", {}).pop(name, None) is None:
         raise RuntimeError(f"no layout called {name!r}")
+    layout.get("profiles", {}).pop(name, None)
+    if layout.get("default_profile") == name:
+        layout.pop("default_profile")
     if layout.get("active") == name:
         layout.pop("active")
+
+
+# ---------------------------------------------------------------- profiles (docs/profiles.md)
+
+def ask_float(text, timeout=6.0):
+    """ft-floatd (floating windows, in the desktop's session); None if it isn't running."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    sock.bind("")
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(text.encode(), FLOAT)
+        return sock.recv(1 << 20).decode()
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def capture_profile(layout, name):
+    """The desktop's apps and hidden screens into profile `name` (kept as they were if
+    ft-floatd doesn't answer)."""
+    hidden = [i + 1 for i in range(screen_count(layout)) if screen_entry(layout, i).get("hidden")]
+    profile = layout.setdefault("profiles", {}).setdefault(name, {})
+    profile["hidden"] = hidden
+    reply = ask_float("windows")
+    if reply and reply.startswith("ok "):
+        profile["windows"] = json.loads(reply[3:])
+        log(f"profile {name!r}: {len(profile['windows'])} windows, hidden screens {hidden or 'none'}")
+    else:
+        log(f"profile {name!r}: the apps weren't saved ({reply or 'ft-floatd is not running'})")
+
+
+def use_hidden(layout, name):
+    """A profile's hidden screens as the screens' own setting (applied with the arrangement)."""
+    profile = layout.get("profiles", {}).get(name)
+    if profile is None:
+        return
+    hidden = set(profile.get("hidden", []))
+    screens = layout.setdefault("screens", [])
+    for i in range(screen_count(layout)):
+        while len(screens) <= i:
+            screens.append({})
+        if i + 1 in hidden:
+            screens[i]["hidden"] = True
+        else:
+            screens[i].pop("hidden", None)
+
+
+def open_apps(name, wait=0):
+    """Have ft-floatd open a profile's apps (waiting up to `wait` seconds for it to start)."""
+    if not load_layout().get("profiles", {}).get(name, {}).get("windows"):
+        return
+    deadline = time.time() + wait
+    while True:
+        reply = ask_float(f"profile {name}")
+        if reply is not None or time.time() >= deadline:
+            break
+        time.sleep(1)
+    log(f"apps: {reply or 'ft-floatd is not running'}")
+
+
+def launcher_name(name):
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "profile"
+    return f"frametop-profile-{slug}.desktop"
+
+
+def write_launchers(layout):
+    """A launcher entry for each profile (SteamVR's Launch a program list, the Application
+    Launcher, KRunner), and none for ones that are gone."""
+    os.makedirs(LAUNCHERS, exist_ok=True)
+    want = {}
+    for name in layout_names(layout):
+        # Quoted for Exec (\" \` \$ \\), then each backslash doubled for the key file.
+        quoted = ('"' + re.sub(r'(["`$\\])', r"\\\1", name) + '"').replace("\\", "\\\\")
+        want[launcher_name(name)] = "\n".join([
+            "[Desktop Entry]", "Type=Application", f"Name=Frametop: {name}",
+            "Comment=Open the Frametop desktop in this profile: its screens and apps",
+            f"Exec={os.path.join(REPO, 'layout', 'ft-layout')} open {quoted}",
+            "Icon=preferences-desktop-display", "Categories=Utility;", "X-Frametop-Profile=true", ""])
+    for f in os.listdir(LAUNCHERS):
+        if f.startswith("frametop-profile-") and f.endswith(".desktop") and f not in want:
+            os.remove(os.path.join(LAUNCHERS, f))
+    for f, text in want.items():
+        path = os.path.join(LAUNCHERS, f)
+        try:
+            with open(path) as old:
+                if old.read() == text:
+                    continue
+        except OSError:
+            pass
+        with open(path, "w") as out:
+            out.write(text)
+
+
+def start_profile(layout):
+    """The profile the desktop starts with: FT_PROFILE, else default_profile."""
+    name = os.environ.get("FT_PROFILE") or layout.get("default_profile")
+    return name if name and name in layout.get("layouts", {}) else None
+
+
+def desktop_running():
+    try:
+        screens_socket().ask("screens", timeout=2)
+        return True
+    except RuntimeError:
+        return False
+
+
+def start_desktop(profile):
+    """Start the Frametop desktop in a profile (as desktops.sh start does)."""
+    if subprocess.run(["pgrep", "-x", "vrcompositor"], capture_output=True).returncode != 0:
+        raise RuntimeError("SteamVR isn't running")
+    subprocess.run(["systemctl", "--user", "reset-failed", "frametop-desktop"], capture_output=True)
+    session = os.path.join(REPO, "session", "frametop-session.sh")
+    r = subprocess.run(["systemd-run", "--user", "--collect", "--quiet", "--unit", "frametop-desktop",
+                        f"--setenv=FT_PROFILE={profile}", "bash", "-c",
+                        f'exec "{session}" > /tmp/frametop-session.log 2>&1'], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"couldn't start the desktop: {r.stderr.strip()}")
+    log(f"starting the desktop in {profile!r}")
 
 
 # ---------------------------------------------------------------- KWin (scale, positions, primary)
@@ -855,6 +1038,11 @@ def main(argv):
             print(remote_view())
         elif cmd == "toggle":
             log(screens_socket().ask("toggle"))
+        elif cmd in ("hide", "show") and len(argv) == 3:
+            set_hidden(argv[2], cmd == "hide")
+        elif cmd == "hidden":
+            layout = load_layout()
+            print(" ".join(str(i + 1) for i in range(screen_count(layout)) if screen_entry(layout, i).get("hidden")))
         elif cmd == "layouts":
             layout = load_layout()
             for name in layout_names(layout):
@@ -866,6 +1054,46 @@ def main(argv):
             else:
                 delete_named(layout, argv[2])
             save_layout(layout)
+            write_launchers(layout)
+        elif cmd == "default" and len(argv) == 3:
+            layout = load_layout()
+            if argv[2] == "none":
+                layout.pop("default_profile", None)
+            elif argv[2] in layout.get("layouts", {}):
+                layout["default_profile"] = argv[2]
+            else:
+                raise RuntimeError(f"no profile called {argv[2]!r}")
+            save_layout(layout)
+        elif cmd == "open" and len(argv) == 3:
+            if argv[2] not in load_layout().get("layouts", {}):
+                raise RuntimeError(f"no profile called {argv[2]!r}")
+            if desktop_running():
+                return main([argv[0], "use", argv[2]])
+            start_desktop(argv[2])
+        elif cmd == "start":
+            # Desktop start (the session script): the profile it starts with, or the arrangement.
+            layout = load_layout()
+            name = start_profile(layout)
+            if not name:
+                return main([argv[0], "apply"] + argv[2:])
+            use_named(layout, name)
+            use_hidden(layout, name)
+            save_layout(layout)
+            log(f"starting in profile {name!r}")
+            wait = float(argv[argv.index("--wait") + 1]) if "--wait" in argv else 60
+            with open(LOCK_PATH, "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                apply(wait)
+                for _ in range(30):  # Plasma may still be starting
+                    try:
+                        log("kwin: " + (" ".join(apply_scales()) or "unchanged"))
+                        break
+                    except RuntimeError as e:
+                        last = e
+                        time.sleep(1)
+                else:
+                    log(f"kwin: {last}")
+            open_apps(name, wait=90)  # ft-floatd starts with Plasma
         elif cmd in ("pin", "unpin") and len(argv) >= 3:
             log(screens_socket().ask(" ".join(argv[1:])))
             kwin_follow()  # pinned screens go last
@@ -887,6 +1115,7 @@ def main(argv):
                                 while screens_up(sock) < screen_count() and time.time() < deadline:
                                     time.sleep(1)
                                 send_visibility(sock, load_layout())
+                                send_hidden(sock, load_layout())
                             except RuntimeError as e:
                                 log(f"visibility: {e}")
                     else:
@@ -912,12 +1141,16 @@ def main(argv):
                     check_name(argv[2])
                     capture()
                     layout = load_layout()
-                    log(f"saved layout {save_named(layout, argv[2])!r}")
+                    name = save_named(layout, argv[2])
+                    capture_profile(layout, name)
                     save_layout(layout)
+                    write_launchers(layout)
+                    log(f"saved layout {name!r}")
                     kwin_follow()
                 elif cmd == "use":
                     layout = load_layout()
                     use_named(layout, argv[2])
+                    use_hidden(layout, argv[2])
                     save_layout(layout)
                     log(f"using layout {argv[2]!r}")
                     try:
@@ -926,6 +1159,7 @@ def main(argv):
                         log(f"not arranged now: {e}")
                     else:
                         kwin_follow()
+                        open_apps(argv[2])
                 else:
                     changes = apply_scales()
                     log("kwin: " + (" ".join(changes) if changes else "unchanged"))

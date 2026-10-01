@@ -48,7 +48,7 @@ function info(w) {
         frame: rect(w.frameGeometry), client: rect(w.clientGeometry), popup: w.popupWindow,
         transient: w.transient, parent: w.transientFor ? String(w.transientFor.internalId) : "",
         normal: w.normalWindow, dialog: w.dialog, fullScreen: w.fullScreen, minimized: w.minimized,
-        onAllDesktops: w.onAllDesktops
+        onAllDesktops: w.onAllDesktops, maximized: w.maximizeMode === 3
     };
 }
 
@@ -172,6 +172,7 @@ function run(c) {
             workspace.sendClientToScreen(w, o);
             w.frameGeometry = {x: c.x, y: c.y, width: c.w, height: c.h};
             if (c.onAllDesktops !== undefined) w.onAllDesktops = c.onAllDesktops;
+            if (c.maximized) w.setMaximize(true, true);
             break;
         }
         case "geometry":
@@ -188,6 +189,10 @@ function run(c) {
             break;
         case "info":
             if (w) report("window", w);
+            break;
+        case "report-all":  // a profile's capture: every window as it is now, then a marker
+            workspace.windowList().forEach(w => report("window", w));
+            send({ev: "reported", token: c.token});
             break;
         case "request-active":  // ft-float float|dock active
             requestFloat(workspace.activeWindow);

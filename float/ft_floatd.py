@@ -13,6 +13,8 @@ Commands and ft-screens' events arrive as datagrams on @frametop_float (ft-float
 command-line side). Replies go to the sender:
   float [ID|active|pointer]   dock [ID|active|all]   close ID   list   quit   (ft-float)
   launch APP.desktop   run ["argv", ...]   (start an app and float its first window)
+  windows   (-> JSON: the open apps' windows and where they are, for a profile; ft-layout save)
+  profile NAME   (open a profile's apps: move the matching windows, launch the missing ones)
   ("float pointer" is the float key: the window under the pointer, else the active one,
   floated or docked; the input relay sends it for float_toggle, and "dock all" for dock_all)
   dock N | close N | resize N W H | scale N STEPS                      (ft-screens, N = its screen)
@@ -33,6 +35,14 @@ D-Bus-activated apps open their window from a process that was already running, 
 name. Each app's last floating place (its pose relative to the primary screen, so it moves
 with the screens' layout), size in pixels, and scale are kept in PLACES_PATH, by desktop
 file name, whenever one of its windows stops floating.
+
+Profiles (docs/profiles.md): "windows" lists every app window with where it is: on a screen
+(its rectangle on that output, maximized or not) or floating (its pose relative to the primary
+screen, size, scale). "profile NAME" takes a profile's windows from the layout file: the
+windows of each app already open (oldest first) move to its entries, and for the entries
+left the app is launched once, and again for each window still missing 3 seconds after its
+first one shows up (a browser restores its own windows; a terminal opens one each time).
+Nothing is ever closed.
 
 Launch as Standalone (float/ft_apps.py): copies of the apps' desktop files with that action,
 which only the Frametop desktop reads. ft-floatd rewrites them when apps change.
@@ -126,6 +136,20 @@ def kscreen(*args):
         return ""
 
 
+def output_rects():
+    """Each output's place and size in KWin's layout (logical)."""
+    try:
+        data = json.loads(kscreen("-j") or "{}")
+    except ValueError:
+        return {}
+    out = {}
+    for o in data.get("outputs", []):
+        pos, size, scale = o.get("pos") or {}, o.get("size") or {}, float(o.get("scale", 1)) or 1.0
+        if o.get("name") and size:
+            out[o["name"]] = (pos.get("x", 0), pos.get("y", 0), size.get("width", 0) / scale, size.get("height", 0) / scale)
+    return out
+
+
 def output_scales():
     try:
         data = json.loads(kscreen("-j") or "{}")
@@ -185,12 +209,36 @@ def pid_chain(pid):
     return out
 
 
-class Launch:
-    """An app we started, whose first window floats."""
+# Windows a profile doesn't keep: Plasma's own, the Frametop settings apps, the login splash.
+SKIP_APPS = ("org.kde.plasmashell", "org.kde.krunner", "org.kde.ksplashqml", "org.kde.polkit-kde-authentication-agent-1")
 
-    def __init__(self, app, pid):
+
+def recordable(ev):
+    """An app's top-level window, the kind a profile keeps."""
+    if not ev.get("normal") or ev.get("popup") or ev.get("transient"):
+        return False
+    app, cls = ev.get("app", ""), ev.get("cls", "")
+    return app not in SKIP_APPS and not any(n.startswith(("ft-", "frametop", "ksplash")) for n in (app, cls))
+
+
+def cmdline(pid):
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            return [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+class Launch:
+    """An app we started: its first window floats, or (for a profile) its windows go to the
+    profile's entries for it, in order."""
+
+    def __init__(self, app, pid, entries=None, argv=None):
         self.app = app            # its desktop file name, without .desktop ("" for a command)
-        self.pid = pid            # the process we started (None when D-Bus started it)
+        self.argv = argv          # the command, when it isn't a desktop file's app
+        self.pids = [pid] if pid else []  # the processes we started (none when D-Bus started it)
+        self.entries = entries    # a profile's entries still waiting for a window, or None
+        self.relaunched = False
         self.until = time.monotonic() + LAUNCH_SECONDS
 
 
@@ -238,6 +286,9 @@ class Daemon:
         self.sub_numbers = {}    # popup/dialog id -> (window id, number)
         self.next_sub = 1
         self.launches = []       # Launch: apps we started, waiting for their window
+        self.captures = {}       # token -> sender: "windows" requests waiting for the script's report
+        self.next_token = 1
+        self.sock = None         # our socket (set by main), for deferred replies
         self.places = load_places()  # app -> {"rel": pose by the primary screen, "pixels", "scale"}
 
     # ------------------------------------------------------------ the script
@@ -313,11 +364,24 @@ class Daemon:
         if wid:
             self.windows[wid] = ev
         f = self.floats.get(wid)
+        if kind == "reported":
+            self.captured(ev.get("token"))
+            return
         if kind == "added" and self.launches and not f:
             launch = self.launched(ev)
-            if launch:
+            if launch and launch.entries is None:
                 self.float_launched(ev, launch)
                 return
+            if launch:
+                self.place_entry(ev, launch.entries.pop(0))
+                if launch.entries and not launch.relaunched:
+                    GLib.timeout_add_seconds(3, lambda: self.relaunch(launch) and False)
+                return
+        if kind == "added" and not f and self.on_hidden_screen(ev):
+            # Nobody would see it there (a profile can hide every screen): it floats instead.
+            log(f"{wid[:9]} ({ev.get('cls')}) opened on a hidden screen")
+            self.float_launched(ev, None)
+            return
         if kind == "float-request":
             self.float_window(ev)
         elif kind == "dock-request":
@@ -387,8 +451,16 @@ class Daemon:
                                        for o in self.floats.values()):
             self.float_window(ev)
         else:
-            self.command(cmd="place", id=wid, output="WL-0", x=ev["frame"]["x"] % 400 + 100,
-                         y=ev["frame"]["y"] % 300 + 100, w=ev["frame"]["w"], h=ev["frame"]["h"])
+            # Onto the first screen that shows (or floating, if none does).
+            hidden = self.concealed()
+            shown = [i for i in range(self.screens_n) if i + 1 not in hidden]
+            if not shown:
+                self.float_launched(ev, None)
+                return
+            name = f"WL-{shown[0]}"
+            x0, y0, _, _ = output_rects().get(name, (0, 0, 0, 0))
+            self.command(cmd="place", id=wid, output=name, x=x0 + ev["frame"]["x"] % 400 + 100,
+                         y=y0 + ev["frame"]["y"] % 300 + 100, w=ev["frame"]["w"], h=ev["frame"]["h"])
 
     # ------------------------------------------------------------ floating and docking
 
@@ -562,14 +634,15 @@ class Daemon:
         want, slot.want = slot.size, None
         self.set_size(slot, want)
 
-    def dock(self, f, frame=None):
-        """Back where it came from (or onto screen 1 if we don't know)."""
+    def dock(self, f, frame=None, output=None, maximized=False):
+        """Back where it came from (or onto screen 1 if we don't know), or onto output at frame."""
         saved = f.saved or {"output": "WL-0", "frame": dict(f.frame or {"x": 100, "y": 100, "w": 800, "h": 600}),
                             "onAllDesktops": False}
         fr = frame or saved["frame"]
-        log(f"{f.id[:9]} back to {saved['output']}")
-        self.command(cmd="place", id=f.id, output=saved["output"], x=fr["x"], y=fr["y"], w=fr["w"], h=fr["h"],
-                     onAllDesktops=bool(saved.get("onAllDesktops")))
+        output = output or saved["output"]
+        log(f"{f.id[:9]} back to {output}")
+        self.command(cmd="place", id=f.id, output=output, x=fr["x"], y=fr["y"], w=fr["w"], h=fr["h"],
+                     onAllDesktops=bool(saved.get("onAllDesktops")), maximized=maximized)
 
     def remember(self, f):
         """Keep where an app's window floated (before its panel goes)."""
@@ -633,30 +706,32 @@ class Daemon:
         return c, ft_layout.turn_yaw((1.0, 0.0, 0.0), heading), (0.0, 1.0, 0.0), ft_layout.turn_yaw((0.0, 0.0, 1.0), heading)
 
     def launch(self, app=None, argv=None):
-        """Start an app (a desktop file name) or a command; its first window will float."""
+        """Start an app (a desktop file name) or a command; its first window will float.
+        Returns (reply, pid or None)."""
         if app:
             app = app.removesuffix(".desktop")
             info = Gio.DesktopAppInfo.new(app + ".desktop")
             if info is None:
-                return f"error no app {app}"
+                return f"error no app {app}", None
             pids = []
             try:
                 info.launch_uris_as_manager([], Gio.AppLaunchContext(), GLib.SpawnFlags.SEARCH_PATH,
                                             None, None, lambda _info, pid, *_: pids.append(pid), None)
             except GLib.Error as e:
-                return f"error {app}: {e.message}"
+                return f"error {app}: {e.message}", None
             self.launches.append(Launch(app, pids[0] if pids else None))
             log(f"launched {app} (pid {pids[0] if pids else 'by D-Bus'})")
+            return "ok", (pids[0] if pids else None)
         else:
             try:
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True)
             except OSError as e:
-                return f"error {argv[0]}: {e}"
+                return f"error {argv[0]}: {e}", None
             GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, lambda *_: None)  # reap it
             self.launches.append(Launch("", proc.pid))
             log(f"started {argv[0]} (pid {proc.pid})")
-        return "ok"
+            return "ok", proc.pid
 
     def launched(self, ev):
         """Is this new window the one an app we started was to open? Takes it off the list."""
@@ -667,15 +742,30 @@ class Daemon:
         chain = pid_chain(int(ev.get("pid") or 0))
         app = ev.get("app", "")
         for la in self.launches:
-            if (la.pid and la.pid in chain) or (la.app and app and la.app == app):
-                self.launches.remove(la)
+            if any(p in chain for p in la.pids) or (la.app and app and la.app == app):
+                if not la.entries or len(la.entries) <= 1:
+                    self.launches.remove(la)
                 return la
         return None
 
+    def concealed(self):
+        """The screens (1-based) hidden on their own (ft-layout hide N)."""
+        reply = self.screens.ask("concealed", quiet=True)
+        return {int(w) for w in reply.split()[1:] if w.isdigit()} if reply.startswith("ok") else set()
+
+    def on_hidden_screen(self, ev):
+        """A new top-level window on a screen that's hidden on its own."""
+        m = re.match(r"WL-(\d+)$", ev.get("output", ""))
+        if not m or int(m.group(1)) >= self.screens_n:
+            return False
+        if not ev.get("normal") or ev.get("popup") or ev.get("transient") or ev.get("cls") == "ksplashqml":
+            return False
+        return int(m.group(1)) + 1 in self.concealed()
+
     def float_launched(self, ev, launch):
-        """Float a launched app's window where that app last floated (its size and scale too),
-        or in front of you, at the primary screen's density."""
-        app = ev.get("app") or launch.app
+        """Float a launched app's window (or one that opened on a hidden screen) where that app
+        last floated (its size too), or in front of you, at the primary screen's density."""
+        app = ev.get("app") or (launch.app if launch else "")
         known = self.places.get(app) if app else None
         ref = self.reference()
         place = to_world(ref, known["rel"]) if known and ref and len(known.get("rel", [])) == 12 else self.in_front()
@@ -689,6 +779,160 @@ class Daemon:
         # the output resizes, and follow resizes the output after the window), which needs
         # fixing first (docs/floating-windows.md, Known problems).
         self.float_window(dict(ev, app=app), place=place, mpp=mpp)
+
+    # ------------------------------------------------------------ profiles (docs/profiles.md)
+
+    def capture(self, sender):
+        """"windows": have the script report every window as it is now, and answer when the
+        report is in (or after 3 seconds with what we know)."""
+        if not sender:
+            return "error windows needs a reply address"
+        token = self.next_token
+        self.next_token += 1
+        self.captures[token] = sender
+        self.command(cmd="report-all", token=token)
+        GLib.timeout_add(3000, lambda: self.captured(token) and False)
+        return None  # answered by captured
+
+    def captured(self, token):
+        sender = self.captures.pop(token, None)
+        if sender and self.sock:
+            try:
+                self.sock.sendto(("ok " + json.dumps(self.window_entries())).encode(), sender)
+            except OSError as e:
+                log(f"windows: {e}")
+
+    def window_entries(self):
+        """Every app window and where it is, as a profile keeps it."""
+        ref = self.reference()
+        rects = None
+        out = []
+        for wid, ev in self.windows.items():
+            if not recordable(ev):
+                continue
+            entry = {"app": ev["app"]} if ev.get("app") else {"cmd": cmdline(ev.get("pid")), "class": ev.get("cls", "")}
+            if not entry.get("app") and not entry.get("cmd"):
+                continue
+            f = self.floats.get(wid)
+            if f:
+                g = self.panel_get(f.slot.index)
+                if not g or not ref or not f.frame:
+                    continue
+                pixels = list(f.normal or (round(f.frame["w"] * f.scale), round(f.frame["h"] * f.scale)))
+                entry["float"] = {"rel": to_local(ref, g), "pixels": pixels, "scale": f.scale, "mpp": round(f.mpp, 8)}
+            else:
+                m = re.match(r"WL-(\d+)$", ev.get("output", ""))
+                if not m or int(m.group(1)) >= self.screens_n:
+                    continue
+                fr, o = ev["frame"], ev.get("outputRect")
+                if not o:
+                    rects = rects if rects is not None else output_rects()
+                    x0, y0, _, _ = rects.get(ev["output"], (0, 0, 0, 0))
+                    o = {"x": x0, "y": y0}
+                entry["screen"] = int(m.group(1)) + 1
+                entry["rect"] = [round(fr["x"] - o["x"]), round(fr["y"] - o["y"]), round(fr["w"]), round(fr["h"])]
+                if ev.get("maximized"):
+                    entry["maximized"] = True
+            out.append(entry)
+        return out
+
+    def window_key(self, ev):
+        return ev.get("app") or json.dumps(cmdline(ev.get("pid")))
+
+    def open_profile(self, name):
+        """Open a profile's apps (additive: nothing closes)."""
+        try:
+            profile = ft_layout.load_layout().get("profiles", {}).get(name)
+        except (OSError, ValueError):
+            profile = None
+        if profile is None:
+            return f"error no profile {name!r}"
+        groups = {}
+        for e in profile.get("windows", []):
+            key = e.get("app") or json.dumps(e.get("cmd") or [])
+            if key != "[]":
+                groups.setdefault(key, []).append(e)
+        claimed = set()
+        for key, entries in groups.items():
+            have = [ev for wid, ev in self.windows.items()
+                    if wid not in claimed and recordable(ev) and self.window_key(ev) == key]
+            for e, ev in zip(entries, have):
+                claimed.add(ev["id"])
+                self.place_entry(ev, e)
+            rest = entries[len(have):]
+            if rest:
+                self.launch_entries(rest)
+        log(f"profile {name!r}: {sum(len(v) for v in groups.values())} windows, {len(claimed)} already open")
+        return "ok"
+
+    def launch_entries(self, entries):
+        """Launch an app for a profile's entries that have no window yet."""
+        e = entries[0]
+        if e.get("app"):
+            reply, pid = self.launch(app=e["app"])
+            app = e["app"]
+        else:
+            reply, pid = self.launch(argv=e["cmd"])
+            app = ""
+        if not reply.startswith("ok"):
+            log(f"profile: {reply}")
+            return
+        la = self.launches[-1]  # the one launch() just added
+        la.entries, la.argv = list(entries), (None if app else e["cmd"])
+
+    def relaunch(self, la):
+        """3 seconds after a profile's app showed its first window: start it again for each
+        entry still waiting (an app that restores its own windows has shown them by now)."""
+        if la.relaunched or not la.entries or la not in self.launches:
+            return
+        la.relaunched = True
+        la.until = time.monotonic() + LAUNCH_SECONDS
+        for _ in la.entries:
+            if la.app:
+                reply, pid = self.launch(app=la.app)
+            else:
+                reply, pid = self.launch(argv=la.argv)
+            if reply.startswith("ok"):
+                self.launches.pop()  # launch() added one of its own; this one waits for them all
+                if pid:
+                    la.pids.append(pid)
+
+    def place_entry(self, ev, e):
+        """Move a window to a profile entry's place: on a screen, or floating."""
+        f = self.floats.get(ev["id"])
+        if "float" in e:
+            fl, ref = e["float"], self.reference()
+            if not ref or len(fl.get("rel", [])) != 12:
+                return
+            place = to_world(ref, fl["rel"])
+            pixels = fl.get("pixels")
+            if f:
+                self.pose(f, *place)
+                if pixels and f.frame:
+                    m = self.margin
+                    self.command(cmd="geometry", id=f.id, x=f.slot.pos[0] + m / f.scale,
+                                 y=f.slot.pos[1] + m / f.scale, w=pixels[0] / f.scale, h=pixels[1] / f.scale)
+                return
+            if pixels:
+                s = output_scales().get(ev["output"], 1.0)
+                ev = dict(ev, frame=dict(ev["frame"], w=pixels[0] / s, h=pixels[1] / s))
+            self.float_window(ev, place=place, mpp=fl.get("mpp"))
+            return
+        n = int(e.get("screen", 1)) - 1
+        if not 0 <= n < self.screens_n:
+            n = 0
+        name = f"WL-{n}"
+        x0, y0, ow, oh = output_rects().get(name, (0, 0, 0, 0))
+        rx, ry, rw, rh = (e.get("rect") or [100, 100, ev["frame"]["w"], ev["frame"]["h"]])[:4]
+        if ow and oh:  # keep it on the screen if the screen got smaller
+            rw, rh = min(rw, ow), min(rh, oh)
+            rx, ry = max(0, min(rx, ow - rw)), max(0, min(ry, oh - rh))
+        frame = {"x": x0 + rx, "y": y0 + ry, "w": rw, "h": rh}
+        if f:
+            self.dock(f, frame=frame, output=name, maximized=bool(e.get("maximized")))
+        else:
+            self.command(cmd="place", id=ev["id"], output=name, x=frame["x"], y=frame["y"], w=rw, h=rh,
+                         maximized=bool(e.get("maximized")))
 
     # ------------------------------------------------------------ popups and dialogs
 
@@ -727,13 +971,13 @@ class Daemon:
                 return s.window
         return None
 
-    def request(self, text):
+    def request(self, text, sender=None):
         words = text.split()
         if not words:
             return "error empty"
         cmd, rest = words[0], words[1:]
         if cmd == "launch" and len(rest) == 1:
-            return self.launch(app=rest[0])
+            return self.launch(app=rest[0])[0]
         if cmd == "run" and rest:
             try:
                 argv = json.loads(text.split(None, 1)[1])
@@ -741,7 +985,11 @@ class Daemon:
                 return "error run takes a JSON list"
             if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
                 return "error run takes a JSON list"
-            return self.launch(argv=argv)
+            return self.launch(argv=argv)[0]
+        if cmd == "windows":
+            return self.capture(sender)
+        if cmd == "profile" and rest:
+            return self.open_profile(text.split(None, 1)[1])
         if cmd == "list":
             return "ok " + " ".join(f"{s.output}:{s.window.id if s.window else '-'}" for s in self.slots)
         if cmd == "quit":
@@ -863,6 +1111,7 @@ def main():
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     sock.bind("\0" + args.socket)
     sock.setblocking(False)
+    daemon.sock = sock
 
     def readable(*_):
         while True:
@@ -870,8 +1119,8 @@ def main():
                 data, sender = sock.recvfrom(4096)
             except BlockingIOError:
                 return True
-            reply = daemon.request(data.decode(errors="replace").strip())
-            if sender:
+            reply = daemon.request(data.decode(errors="replace").strip(), sender)
+            if sender and reply is not None:
                 try:
                     sock.sendto(reply.encode(), sender)
                 except OSError:
