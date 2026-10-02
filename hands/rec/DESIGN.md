@@ -190,7 +190,7 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
   - Per take: `prompts.jsonl`, `poses.jsonl`, `take.json`, and `sets.bin.zst` (sets in deleted ranges removed, then zstd -10 with 2 threads).
   - `SHA256SUMS`.
 
-  Compression runs at nice 19. Before starting, the window warns if the headset is worn: `/sys/bus/iio/devices/iio:device2/in_proximity_raw` over 20, if readable. CPU work while in VR causes stutter.
+  Compression runs at nice 19. Before starting, the window warns if the headset is worn, judged the way `frame-job` does: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` reads over 0 (SteamVR turns the panel off 5 s after the headset comes off). CPU work while in VR causes stutter. The proximity sensor is no use here: it read 9-43 with the headset sitting unworn.
 - **Upload.** The Upload page shows `UPLOAD.md` with the export's path and size filled in, plus the copyable command.
 
 ## Licensing and consent (texts in `CONSENT.md`)
