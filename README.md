@@ -13,6 +13,8 @@ Two settings apps come with it: Frametop Display Settings for the screens, profi
 
 Frametop is an independent project, not made by or affiliated with Valve.
 
+Join the [Frametop Discord](https://discord.gg/W3X9f7z3Bc) for questions, ideas, and help with your setup.
+
 ## Install on the headset
 
 You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or the on-screen one), and about 3 GB of free space.
@@ -139,7 +141,7 @@ In a terminal on the headset, run:
 cd ~/frametop && scripts/report.sh
 ```
 
-This writes `frametop-report-<date>.txt` with version numbers, service states, settings, and recent logs. Bluetooth addresses and the headset's serial number are masked. Then [open an issue](https://github.com/DeeJanuz/frametop/issues), describe what you did, what you expected, and what happened, and attach the file.
+This writes `frametop-report-<date>.txt` with version numbers, service states, settings, and recent logs. Bluetooth addresses and the headset's serial number are masked. Then [open an issue](https://github.com/DeeJanuz/frametop/issues), describe what you did, what you expected, and what happened, and attach the file. Quick questions can go to [Discord](https://discord.gg/W3X9f7z3Bc) instead.
 
 ## Update
 
