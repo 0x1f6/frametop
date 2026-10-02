@@ -479,9 +479,24 @@ int main(int argc, char **argv) {
     double lastEmit = 0;
     int actionErrors = 0;
     vr::EVRInputError lastActionError = vr::VRInputError_None;
+    // During a VR game, SteamVR's gaze action is left alone. With ft-gaze reading the eyes, SteamVR
+    // restarted its eye tracker every 10 s or so in a game, as if the headset came off, and each
+    // restart took input focus from the game: Beat Saber paused (PR #13). Of what ft-gaze reads,
+    // only the action reaches SteamVR (the mmap and our tracker are files), so gaze still works
+    // over the dashboard. Games are told apart the way ft-screens does it, by the scene app.
+    bool inGame = false;
+    double nextGameCheck = 0;
 
     while (true) {
         const double now = NowRaw();
+        if (now >= nextGameCheck) {
+            nextGameCheck = now + 0.5;
+            const bool game = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
+            if (game != inGame)
+                std::fprintf(stderr, "ft-gaze: %s\n",
+                             game ? "a VR game is running: SteamVR's gaze action left alone" : "the VR game ended");
+            inGame = game;
+        }
         vr::TrackedDevicePose_t hp;
         sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &hp, 1);
         if (hp.bPoseIsValid) history.Add(now, hp.mDeviceToAbsoluteTracking);
@@ -502,24 +517,26 @@ int main(int argc, char **argv) {
             // SteamVR's action: a room-space origin and fixation point, turned into the head
             // frame so every source reports the same kind of angles.
             std::string action = "{\"ok\":0}";
-            vr::VRActiveActionSet_t active{};
-            active.ulActionSet = set;
-            active.nPriority = vr::k_nActionSetOverlayGlobalPriorityMin;
-            input->UpdateActionState(&active, sizeof active, 1);
-            vr::VREyeTrackingData_t e{};
-            const vr::EVRInputError ae =
-                input->GetEyeTrackingDataRelativeToNow(gaze, vr::TrackingUniverseStanding, 0, &e, sizeof e);
-            if (ae == vr::VRInputError_None && e.bActive && e.bValid) {
-                const Vec3 o{e.vGazeOrigin.v[0], e.vGazeOrigin.v[1], e.vGazeOrigin.v[2]};
-                const Vec3 t{e.vGazeTarget.v[0], e.vGazeTarget.v[1], e.vGazeTarget.v[2]};
-                const Vec3 dHead = RotateInverse(headNow, Normalize(t - o));
-                char extra[96];
-                std::snprintf(extra, sizeof extra, "\"tracked\":%d,\"dist\":%.3f,", int(e.bTracked), Length(t - o));
-                action = SrcJson(list, headNow, dHead, extra);
-            } else if (ae != lastActionError || (verbose && ++actionErrors % 90 == 1)) {
-                std::fprintf(stderr, "ft-gaze: action: error %d active %d valid %d\n", int(ae), int(e.bActive),
-                             int(e.bValid));
-                lastActionError = ae;
+            if (!inGame) {
+                vr::VRActiveActionSet_t active{};
+                active.ulActionSet = set;
+                active.nPriority = vr::k_nActionSetOverlayGlobalPriorityMin;
+                input->UpdateActionState(&active, sizeof active, 1);
+                vr::VREyeTrackingData_t e{};
+                const vr::EVRInputError ae =
+                    input->GetEyeTrackingDataRelativeToNow(gaze, vr::TrackingUniverseStanding, 0, &e, sizeof e);
+                if (ae == vr::VRInputError_None && e.bActive && e.bValid) {
+                    const Vec3 o{e.vGazeOrigin.v[0], e.vGazeOrigin.v[1], e.vGazeOrigin.v[2]};
+                    const Vec3 t{e.vGazeTarget.v[0], e.vGazeTarget.v[1], e.vGazeTarget.v[2]};
+                    const Vec3 dHead = RotateInverse(headNow, Normalize(t - o));
+                    char extra[96];
+                    std::snprintf(extra, sizeof extra, "\"tracked\":%d,\"dist\":%.3f,", int(e.bTracked), Length(t - o));
+                    action = SrcJson(list, headNow, dHead, extra);
+                } else if (ae != lastActionError || (verbose && ++actionErrors % 90 == 1)) {
+                    std::fprintf(stderr, "ft-gaze: action: error %d active %d valid %d\n", int(ae), int(e.bActive),
+                                 int(e.bValid));
+                    lastActionError = ae;
+                }
             }
 
             std::string m1 = "{\"ok\":0}", m2 = m1, left = m1, right = m1, eye = "null";
