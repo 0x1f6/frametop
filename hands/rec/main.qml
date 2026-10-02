@@ -383,19 +383,36 @@ Kirigami.ApplicationWindow {
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     wrapMode: Text.Wrap
-                    text: "Press Start, then put the headset on. A panel in the headset says what to do, one "
-                          + "section at a time: hand poses, gestures, typing and the mouse, your objects, touching a "
-                          + "dot, and moves with the controllers on and off. Each section is recorded as one take.\n\n"
-                          + "Space in this window pauses and Esc stops. You can also skip a section.\n\n"
+                    text: "Press Start, then put the headset on. A panel in the headset shows each step: a picture "
+                          + "of the hand pose, where to hold your hands, and what to do. The sections: hand poses, "
+                          + "gestures, typing and the mouse, your objects, touching a dot, and moves with the "
+                          + "controllers on and off. Each section is recorded as one take.\n\n"
+                          + "Each step waits until you're ready: press Space or click Next in this window. A 3-2-1 "
+                          + "countdown follows, then hold the pose until the bar runs out. Nothing is recorded while "
+                          + "a step waits. P pauses, R records the last step again, S skips a section and Esc stops.\n\n"
                           + "Nothing leaves the headset. Afterwards you watch the takes in Review, delete anything "
                           + "you don't want to share, and only then export."
+                }
+                Controls.CheckBox {
+                    id: autoAdvance
+                    Kirigami.FormData.label: "Pace:"
+                    text: "Advance by itself (no Next between steps)"
+                }
+                Controls.Label {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                    text: (autoAdvance.checked
+                           ? "Each step shows for a few seconds and the next follows by itself. Quicker if you "
+                             + "know the steps already. "
+                           : "") + "Length: " + backend.planText(checklist.answers(), autoAdvance.checked) + "."
                 }
                 Controls.Button {
                     text: "Start"
                     icon.name: "media-record"
                     enabled: checklist.ready
                     onClicked: {
-                        if (backend.startSession(checklist.answers(), lighting.currentValue))
+                        if (backend.startSession(checklist.answers(), lighting.currentValue, autoAdvance.checked))
                             root.show(sessionPage)
                     }
                 }
@@ -417,16 +434,34 @@ Kirigami.ApplicationWindow {
             title: "Session"
             readonly property var st: backend.status
             readonly property string state: st.state || ""
+            readonly property bool waiting: !!st.waiting
+            readonly property bool stepMode: st.mode !== "auto"
             readonly property var stateText: ({
-                starting: "Starting…", intro: "Get ready", running: "Recording", paused: "Paused",
-                between: "Between sections", done: "Done", stopped: "Stopped", error: "Error"
+                starting: "Starting…", intro: "Get ready", ready: "Get ready", countdown: "Starting",
+                running: "Recording", paused: "Paused", between: "Between sections", done: "Done",
+                stopped: "Stopped", error: "Error"
             })
 
-            // Space and Esc while the window has focus (the panel in the headset says so too).
+            // The keys while the window has focus (the panel in the headset lists them too).
             Shortcut {
                 sequence: "Space"
                 enabled: backend.sessionActive
+                onActivated: backend.nextStep()
+            }
+            Shortcut {
+                sequence: "P"
+                enabled: backend.sessionActive
                 onActivated: backend.togglePause()
+            }
+            Shortcut {
+                sequence: "R"
+                enabled: backend.sessionActive
+                onActivated: backend.redo()
+            }
+            Shortcut {
+                sequence: "S"
+                enabled: backend.sessionActive
+                onActivated: backend.skipSection()
             }
             Shortcut {
                 sequence: "Esc"
@@ -446,6 +481,114 @@ Kirigami.ApplicationWindow {
                 background: Rectangle {
                     radius: height / 2
                     color: parent.ok ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
+                }
+            }
+
+            // The pose picture as the panel shows it: a right hand as drawn, a left hand flipped,
+            // both hands as a flipped copy beside it (DESIGN.md "The pose pictures").
+            component PosePicture: Row {
+                property string path
+                property string mode
+                property real side: Kirigami.Units.gridUnit * 9
+                spacing: Kirigami.Units.smallSpacing
+                visible: path !== ""
+                Image {
+                    visible: parent.mode === "both"
+                    width: visible ? parent.side * 0.75 : 0
+                    height: width
+                    source: parent.path ? "file://" + parent.path : ""
+                    fillMode: Image.PreserveAspectFit
+                    mirror: true
+                    smooth: true
+                    mipmap: true
+                }
+                Image {
+                    width: parent.mode === "both" ? parent.side * 0.75 : parent.side
+                    height: width
+                    source: parent.path ? "file://" + parent.path : ""
+                    fillMode: Image.PreserveAspectFit
+                    mirror: parent.mode === "mirror"
+                    smooth: true
+                    mipmap: true
+                }
+            }
+
+            // Where to hold the hands: a front view (left, centre, right, up, down; the push
+            // sections' chest, desk and eye) and how far out (near, mid, far), as on the panel.
+            component WhereDiagram: RowLayout {
+                id: where
+                property string position
+                property string distance
+                readonly property var cell: ({ centre: [1, 1], center: [1, 1], chest: [1, 1], left: [0, 1],
+                                               right: [2, 1], up: [1, 0], eye: [1, 0], down: [1, 2],
+                                               desk: [1, 2] })[position] || null
+                readonly property int step: ["near", "mid", "far"].indexOf(distance)
+                readonly property real unit: Kirigami.Units.gridUnit * 1.1
+                readonly property color accent: "#4cd9ff"
+                spacing: Kirigami.Units.gridUnit
+                visible: cell !== null || step >= 0
+                ColumnLayout {
+                    visible: where.cell !== null
+                    Grid {
+                        Layout.alignment: Qt.AlignHCenter
+                        columns: 3
+                        spacing: 2
+                        Repeater {
+                            model: 9
+                            Rectangle {
+                                required property int index
+                                width: where.unit * 1.33
+                                height: where.unit
+                                radius: 3
+                                readonly property bool on: where.cell !== null && index === where.cell[1] * 3 + where.cell[0]
+                                color: on ? where.accent
+                                          : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                                    Kirigami.Theme.textColor.b, 0.12)
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        font: Kirigami.Theme.smallFont
+                        text: ({ left: "To your left", right: "To your right", up: "Up high", down: "Down low",
+                                 chest: "Chest height", desk: "Desk height", eye: "Eye level" })[where.position]
+                              || "In front"
+                    }
+                }
+                ColumnLayout {
+                    visible: where.step >= 0
+                    Row {
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: where.unit * 0.6
+                        height: where.unit * 1.2
+                        // the head, seen from the side, then the arm's reach
+                        Rectangle {
+                            width: where.unit
+                            height: width
+                            radius: width / 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                           Kirigami.Theme.textColor.b, 0.6)
+                        }
+                        Repeater {
+                            model: 3
+                            Rectangle {
+                                required property int index
+                                readonly property bool on: index === where.step
+                                width: on ? where.unit * 0.8 : where.unit * 0.35
+                                height: width
+                                radius: width / 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: on ? where.accent : Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                                                   Kirigami.Theme.textColor.b, 0.35)
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        font: Kirigami.Theme.smallFont
+                        text: ["Close: a hand's length", "Halfway out", "Arm stretched out"][Math.max(0, where.step)]
+                    }
                 }
             }
 
@@ -475,29 +618,105 @@ Kirigami.ApplicationWindow {
                 visible: sessionView.state !== ""
                 spacing: Kirigami.Units.largeSpacing
 
-                Kirigami.Heading {
-                    level: 1
-                    text: sessionView.stateText[sessionView.state] || sessionView.state
+                RowLayout {
+                    Layout.fillWidth: true
+                    Kirigami.Heading {
+                        level: 1
+                        text: sessionView.stateText[sessionView.state] || sessionView.state
+                    }
+                    Item { Layout.fillWidth: true }
+                    Controls.Label {
+                        visible: !!sessionView.st.take && sessionView.state !== "paused"
+                                 && (sessionView.state === "countdown" || sessionView.state === "running"
+                                     || !sessionView.stepMode)
+                        text: "● Recording"
+                        color: Kirigami.Theme.negativeTextColor
+                    }
                 }
                 Controls.Label {
                     visible: (sessionView.st.section_index || 0) > 0
                     text: "Section " + sessionView.st.section_index + " of " + sessionView.st.section_count
                           + (sessionView.st.title ? ": " + sessionView.st.title : "")
+                          + ((sessionView.st.step_index || 0) > 0 && sessionView.stepMode
+                             ? " · step " + sessionView.st.step_index + " of " + sessionView.st.step_count : "")
                     font.bold: true
                 }
-                Controls.Label {
+
+                RowLayout {
                     Layout.fillWidth: true
-                    visible: !!sessionView.st.prompt
-                    wrapMode: Text.Wrap
-                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
-                    text: sessionView.st.prompt || ""
+                    spacing: Kirigami.Units.gridUnit * 1.5
+
+                    ColumnLayout {
+                        visible: !!sessionView.st.image || !!sessionView.st.position || !!sessionView.st.distance
+                        spacing: Kirigami.Units.largeSpacing
+                        PosePicture {
+                            Layout.alignment: Qt.AlignHCenter
+                            path: sessionView.st.image || ""
+                            mode: sessionView.st.image_mode || ""
+                        }
+                        Controls.Label {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 14
+                            visible: !!sessionView.st.image && !!sessionView.st.caption
+                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter
+                            opacity: 0.7
+                            font: Kirigami.Theme.smallFont
+                            text: sessionView.st.caption || ""
+                        }
+                        WhereDiagram {
+                            id: where
+                            Layout.alignment: Qt.AlignHCenter
+                            position: sessionView.st.position || ""
+                            distance: sessionView.st.distance || ""
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+                        Controls.Label {
+                            Layout.fillWidth: true
+                            visible: !!sessionView.st.prompt
+                            wrapMode: Text.Wrap
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
+                            text: sessionView.st.prompt || ""
+                        }
+                        // The countdown's 3, 2, 1, then the hold's word, big
+                        Controls.Label {
+                            visible: !!sessionView.st.big && sessionView.state !== "paused"
+                            text: sessionView.st.big || ""
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 4
+                            font.bold: true
+                            color: Kirigami.Theme.highlightColor
+                        }
+                        Controls.Label {
+                            visible: !sessionView.waiting && sessionView.state !== "countdown"
+                                     && sessionView.state !== "ready" && sessionView.st.seconds_left !== undefined
+                                     && sessionView.st.seconds_left !== null && sessionView.st.seconds_left > 0
+                            text: Math.ceil(sessionView.st.seconds_left || 0) + " s left"
+                            opacity: 0.7
+                        }
+                        Controls.Button {
+                            visible: sessionView.waiting && sessionView.state !== "paused"
+                            focusPolicy: Qt.NoFocus
+                            text: "Next"
+                            icon.name: "go-next"
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.5
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                            Layout.preferredHeight: Kirigami.Units.gridUnit * 3
+                            onClicked: backend.nextStep()
+                        }
+                        Controls.Label {
+                            visible: sessionView.waiting && sessionView.state !== "paused"
+                            opacity: 0.7
+                            text: "Ready? Press Space or click Next. A 3-2-1 countdown starts the recording."
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+                    }
                 }
-                Controls.Label {
-                    visible: sessionView.st.seconds_left !== undefined && sessionView.st.seconds_left !== null
-                             && sessionView.st.seconds_left >= 0
-                    text: Math.ceil(sessionView.st.seconds_left || 0) + " s left"
-                    opacity: 0.7
-                }
+
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
                     visible: !!sessionView.st.note
@@ -513,7 +732,7 @@ Kirigami.ApplicationWindow {
                 }
                 Controls.Label {
                     visible: !!sessionView.st.take
-                    text: "Recording to take " + (sessionView.st.take || "")
+                    text: "Take " + (sessionView.st.take || "")
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                 }
@@ -524,8 +743,10 @@ Kirigami.ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     opacity: 0.7
-                    text: "The instructions appear in the headset. While this window has focus, Space pauses "
-                          + "and resumes, and Esc stops. Stopping keeps what's recorded so far."
+                    text: "The instructions appear in the headset. While this window has focus: "
+                          + (sessionView.stepMode ? "Space: next · " : "")
+                          + "P: pause or resume · R: record the last step again · S: skip section · Esc: stop. "
+                          + "Stopping keeps what's recorded so far."
                 }
                 RowLayout {
                     // No keyboard focus on the buttons, so Space always reaches the shortcut.
@@ -542,6 +763,14 @@ Kirigami.ApplicationWindow {
                         text: sessionView.state === "paused" ? "Resume" : "Pause"
                         icon.name: sessionView.state === "paused" ? "media-playback-start" : "media-playback-pause"
                         onClicked: backend.togglePause()
+                    }
+                    Controls.Button {
+                        visible: backend.sessionActive
+                        enabled: !!sessionView.st.can_redo
+                        focusPolicy: Qt.NoFocus
+                        text: "Redo step"
+                        icon.name: "edit-undo"
+                        onClicked: backend.redo()
                     }
                     Controls.Button {
                         visible: backend.sessionActive

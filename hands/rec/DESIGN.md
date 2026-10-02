@@ -11,6 +11,7 @@ The plan this belongs to is `~/Desktop/Projects/frame-hands/notes/hands-plan.md`
 | `hands/rec/panel/ft-handpanel.cpp` (C++, dev container) | The headset panel: a SteamVR overlay fixed to the head that shows the prompts. It also places the "touch the dot" target in the room and logs head and controller poses. Driven over `@ft_handpanel`. |
 | `hands/rec/session.py` (Python, no Qt) | The session runner. It reads `script.json`, starts and stops the recordings, and drives the panel. It reads the live hands file for feedback and writes each take's files. It also runs from the command line (`--dry-run`) for testing. |
 | `hands/rec/script.json` | The guided script: sections, prompts, timings. |
+| `hands/rec/poses/` | The pose pictures, `poses.json` and its PNGs (below). |
 | `hands/rec/takes.py` (Python, no Qt) | Reads sessions and takes from disk: frame sets for review, deleted ranges, export (compress, strip, manifest, checksums). |
 | `hands/rec/ft_handrec.py` + `main.qml` (PySide6 + Kirigami, dev container) | The desktop window: consent, the before-you-start checklist, the session controls, review, export and upload instructions. |
 | `hands/rec/ft-handrec` | The host launcher, like `input-settings/ft-input-settings`. |
@@ -24,13 +25,16 @@ Every part runs in the dev container, as ft-hands and Input Settings do. The hos
 
 - **ft-camd** publishes the camera ring. If it isn't running, the session starts it as the transient user unit `frametop-handrec-camd.service`, the way `hands/ft-cutouts` starts `frametop-cutouts-camd.service` (needs `hands/build/ft-camd` with capabilities: `hands/run.sh caps`). An ft-camd already running from ft-cutouts or ft-handsctl is used as it is.
 - **A tracking ft-hands** gives feedback through the hands file: which hands are seen, the palm's distance, the index tip. If none is running, the session starts `ft-hands --no-gestures --status 0` (unit `frametop-handrec-hands.service`). An ft-hands already running is used as it is.
-- **A recording ft-hands** runs once per take: `ft-hands --record-only --record TAKE_DIR --record-for SECONDS --record-hz 10 --status 0`. It runs as a plain child process of the session, ended with SIGTERM if the take stops early. SIGTERM ends ft-hands' loop, and `Recorder` writes out its queue when it's destroyed.
+- **A recording ft-hands** runs once per recording part: `ft-hands --record-only --record DIR --record-for SECONDS --record-hz 10 --status 0`. It runs as a plain child process of the session, ended with SIGTERM when the part ends. SIGTERM ends ft-hands' loop, and `Recorder` writes out its queue when it's destroyed. In step mode (below) a part is one step's countdown and hold, so a take has one part per step (about 40 in the hand poses); in auto mode a take is one part, plus one more after each pause. `--record-for` is only a safety net.
+  - Why a process per part rather than one kept alive and paused: measured in the dev container with `ft-ringplay`'s ring (2026-10-02), `ft-hands --record-only` writes its first set 16-27 ms after it starts and ends 4-6 ms after SIGTERM, so a new part costs nothing the 3 s countdown doesn't cover. Every reader already takes parts in order (`takes.py`, `validate.py` through the export's single stream, the labeller's `fhl_io.py`, numbering `sets-10.bin` after `sets-9.bin`), ft-hands needs no new control, and nothing is written while a step waits. Before the hold starts the session checks that the part has written a set (`Recorder.has_data`, up to 3 s more), so the hold is recorded from its first frame.
 - **ft-handpanel** runs as a child process with `--watch-stdin`. It shows the panel and logs poses during each take.
 
 Test hooks:
 - `--ring PATH` goes to both ft-hands (`ft-ringplay` publishes a recording there, so the whole flow runs without the headset).
 - `--no-start` uses only what's already running.
 - `--dry-run` runs no processes and only prints the panel commands, with timing sped up by `--speed X`.
+- `--next-after S` presses Next by itself after S seconds of waiting (real time), so a step-mode session runs unattended. Lines on stdin steer it too: `n` or an empty line is Next, `p` pause or resume, `r` redo, `s` skip the section, `q` stop.
+- `--auto` runs the timed flow; `--poses DIR` takes the pose pictures from DIR; `--plan` prints the sections, their steps and length.
 
 ## Files
 
@@ -38,11 +42,12 @@ Test hooks:
 ~/.local/share/frametop/hands/contrib/
   profile.json                  consent and contributor id (below)
   sessions/<YYYYMMDD-HHMMSS>/   (a second session started in the same second gets -2, and so on)
-    session.json                the session: checklist answers, lighting, versions, takes
+    session.json                the session: checklist answers, lighting, versions, mode, takes
     calibration.json            /persist/xrservice.json with identifying fields removed (below)
     device.json                 the rig's pose in the CAD frame from /persist/device_config.json (below)
     takes/<NN>-<section>/
-      sets.bin                  ft-hands' recording (FHSET01, hands/track/record.h), 10 sets/s
+      sets.bin                  ft-hands' recording (FHSET01, hands/track/record.h), 10 sets/s: the first part
+      sets-2.bin, sets-3.bin, ...  the next parts (step mode: one per step; any mode: after a pause)
       prompts.jsonl             what the person was asked to do, when (below)
       poses.jsonl               head and controller poses from ft-handpanel (below)
       take.json                 {"section", "title", "started_ns", "ended_ns", "status": "complete"|"stopped"|"skipped",
@@ -69,8 +74,10 @@ No name, email, or account. The contributor id is random, so several sessions fr
  "checklist": {"objects": ["pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small"], "own_objects": ["..."],
                "controllers": "straps|none", "sleeves": "short|long|", "rings": false, "watch": false, "notes": ""},
  "device": {"steamos": "<VERSION_ID from /etc/os-release>", "steamvr": "<version if known>", "cameras": [{"name", "width", "height"}]},
- "takes": ["01-hand-size", "..."]}
+ "mode": "step|auto", "takes": ["01-hand-size", "..."]}
 ```
+
+A session started before step mode existed has no `mode`: it ran as `auto`.
 
 ### calibration.json
 
@@ -100,10 +107,24 @@ One JSON object per line:
 {"t": 123, "event": "feedback", "left": true, "right": false, "palm_m": [0.0, 0.0]}
 {"t": 123, "event": "pause"}
 {"t": 123, "event": "resume"}
+{"t": 123, "event": "ready", "id": "static-poses/fist/left/near", "seconds": 3}
+{"t": 123, "event": "wait"}
+{"t": 123, "event": "redo", "id": "static-poses/fist/left/near", "from": 123, "to": 123}
 {"t": 123, "event": "end", "status": "complete|stopped|skipped"}
 ```
 
-`feedback` is written about twice a second. It's the live tracker's view, kept for later checks; it's not a label.
+`feedback` is written about twice a second while recording. It's the live tracker's view, kept for later checks; it's not a label.
+
+A prompt holds from its `prompt` until the next `prompt`, `ready`, `wait` or `end`. A step in step mode reads:
+
+```
+ready      Next pressed: recording part N starts, the 3-2-1 countdown runs (recorded, no label)
+prompt     the hold: its labels start here
+(bar, target, feedback, pause/resume during the hold)
+wait       the hold is over: no labels from here; part N stops
+```
+
+The touch-the-dot targets after the first follow straight on: no `ready` or `wait` between them. `redo` marks a try done again (R): `from` is that step's `ready` (or its `prompt` if it had none), `to` its end. Its prompt is skipped; the sets stay. In auto mode there's no `ready` or `wait`, and the intro is a recorded prompt `<section>/intro`. Readers that knew only `prompt` and `end` keep working, but they'd give the countdown to the step before: `hub_review.py` (frame-hands `train/hub`) shows it as "(countdown)" and redone prompts as "(redone)"; `FORMAT.md` in the dataset repo has the rules.
 
 ### poses.jsonl
 
@@ -118,7 +139,8 @@ ft-handpanel writes one line per sample, 250 a second, from `GetDeviceToAbsolute
 
 ## The panel (`ft-handpanel`)
 
-- **Placement.** A SteamVR overlay fixed to the head, like `gaze/panel/ft-gazepanel.cpp`: key `frametop.handpanel`, sort order 250. It sits 1.2 m ahead, centred 12 degrees above straight ahead, so the hands stay clear below it. It's 36 degrees wide, 4:3, 1024x768 pixels, dim and see-through. It's drawn on the CPU with stb_truetype into three shared DMA-BUFs SteamVR imports once, as ft-gazepanel does, and is drawn again only when something changes.
+- **Placement.** A SteamVR overlay fixed to the head, like `gaze/panel/ft-gazepanel.cpp`: key `frametop.handpanel`, sort order 250. It sits 1.2 m ahead, centred 12 degrees above straight ahead, so the hands stay clear below it. It's 36 degrees wide, 4:3, 1024x768 pixels, dim and see-through. It's drawn on the CPU with stb_truetype (and stb_image for the pose pictures, PNG only, the same pinned stb commit) into three shared DMA-BUFs SteamVR imports once, as ft-gazepanel does, and is drawn again only when something changes.
+- **Layout.** The title and step on top (a red "Rec" by the step while recording), a rule. With a pose picture or a diagram, a 14-degree column on the left holds the picture (or the flipped copy and the picture side by side) and the where-to diagram under it; the text takes the right. The text column holds the instruction, the orange note, the big countdown ("3", "2", "1", then "Hold" or "Go") and the cyan action line ("Ready? Press Space or click Next"), centred together. At the bottom: the near/far bar, the hand chips, the time-left bar and the key hints.
 - **Socket.** Abstract unix datagram `@ft_handpanel` (`--socket NAME`). A sender with an address gets `ok ...` or `error ...`.
 - **Options:** `--watch-stdin` (quit when stdin closes), `--socket NAME`, `--distance M`, `--no-vr`. `--no-vr` makes no SteamVR connection and prints each picture's text to stdout: for testing without a headset.
 
@@ -135,20 +157,39 @@ Commands (UTF-8; `|` starts a new line in text):
 | `hands <left> <right>` | Two chips, "Left hand" and "Right hand", each `seen` (green), `lost` (orange) or `off` (hidden). |
 | `bar <target 0..1> <current 0..1 or -1> [near label] [far label]` / `bar off` | The near/far bar for the push out and back: a horizontal track with a target marker and the hand's current position. |
 | `paused on` / `paused off` | A "Paused" overlay over the picture. |
+| `image <path> [mirror\|both]` / `image off` | The pose picture, a PNG (below), in the left column. `mirror` flips it (a left hand); `both` draws a flipped copy on its left. A file that can't be read: `error ...` and no picture. |
+| `where <position\|-> <distance\|->` / `where off` | The where-to diagram under the picture: a 3x3 front view with the asked cell lit (`centre`, `left`, `right`, `up`, `down`, and the push sections' `chest`, `desk`, `eye`), and a side view of the head and three marks for `near` ("Close"), `mid` ("Halfway out") and `far` ("Arm out"). `-` leaves that half out. |
+| `action <text>` | The cyan line under the instruction (empty clears it). |
+| `big <text>` | Large cyan text under the instruction: the countdown (empty clears it). |
+| `keys <text>` | The faint key hints along the bottom. |
+| `rec on` / `rec off` | The red "Rec" by the step line. |
 | `target <x> <y> <z> [show\|hold <0..1>\|done]` / `target off` | The touch target: a small sphere-like dot about 2 cm across, in its own overlay (`frametop.handpanel.target`). The point is in the head frame (metres, +x right, +y up, -z forward). The first `target` with a new point places it in the room with the current HMD pose, and it stays there. Later commands with the same point change only the state. `hold` draws a filling ring, `done` turns it green. Reply: `ok <room x> <room y> <room z>`. |
 | `poses start <path>` / `poses stop` | Log poses to the path (appending, `poses.jsonl` format above) from a thread at 250 Hz, until stopped. |
 | `devices` | Reply: `ok hmd <r> left <r or -> right <r or ->`, the current `ETrackingResult` values (`-` for no device in that role). |
 | `head` | Reply: `ok <12 floats>`, the current HMD pose (standing universe). |
 | `ping` | `ok shown` or `ok hidden`. |
 
-It quits on SteamVR's quit event, as ft-gazepanel does.
+It quits on SteamVR's quit event, as ft-gazepanel does. `--no-vr --dump DIR` writes each picture to `DIR/panel.pam`, to check the layout without a headset.
+
+## The pose pictures (`poses/`)
+
+`poses/poses.json` maps the script's `pose` ids to pictures: `{"<pose>": {"file": "<name>.png", "two_hands": false, "caption": "..."}}`. Each PNG is RGBA, square (512x512), drawn as the wearer sees it: a right hand, unless `two_hands` (then it shows both). How a prompt shows it (`session.pose_view`):
+
+| Prompt's `hands` | Picture |
+|---|---|
+| `right` (and `any`, `none`, empty) | as drawn |
+| `left` | flipped left to right (`image ... mirror`) |
+| `both`, not `two_hands` | a flipped copy on the left, the picture on the right (`image ... both`) |
+| anything, `two_hands` | as drawn |
+
+A pose with no entry, or whose file is missing, shows no picture: the text alone. The session reads `poses.json` when it starts. The window shows the same picture (QML `Image.mirror`), its caption, and the same diagram.
 
 ## The script (`script.json`)
 
 ```json
 {"version": 1,
  "sections": [
-   {"id": "hand-size", "title": "Hand size", "requires": [], "intro": "text shown for 4 s before the first prompt",
+   {"id": "hand-size", "title": "Hand size", "requires": [], "intro": "text shown before the first prompt: 4 s, or until Next", "go": "Hold",
     "prompts": [{"text": "...", "seconds": 8, "hands": "both", "pose": "flat", "distance": "near"}]},
    {"id": "objects", "title": "Things you hold", "requires": ["objects"], "for_each": "object",
     "prompts": [{"text": "Pick up the {object} and use it the way you normally would.", "seconds": 15, "hands": "both", "object": "{object}"}]},
@@ -160,11 +201,26 @@ It quits on SteamVR's quit event, as ft-gazepanel does.
 ```
 
 - `requires`: `objects` (at least one object ticked), `controllers` (straps ticked). A section whose requirements aren't met is skipped and logged.
+- `go`: the word the countdown ends on, "Go" unless set ("Hold" for the still poses).
 - `kind`:
   - `prompts` (the default): each prompt shows for its `seconds` with a countdown.
   - `targets`: each target shows until the live index tip is within 3 cm of it for `hold_s`, or `timeout_s` passes.
   - `bar`: the target marker sweeps near to far and back, `reps` times per height, at `period_s` per sweep. The current marker follows the live palm distance.
-- Each section is one take, one recording. Prompts within it are marked in `prompts.jsonl`.
+- Each section is one take. Prompts within it are marked in `prompts.jsonl`.
+
+### Step mode (the default) and auto mode
+
+The first in-headset session (2026-10-02) went too fast: each prompt advanced after 4-8 s, before there was time to read it and find the hand shape. So by default every step waits:
+
+1. **Ready.** The panel shows the step: section title, "step N of M", the instruction, the pose picture, the where-to diagram, and "Ready? Press Space or click Next". The hand chips show which hands are seen, with no warnings yet. It waits as long as it takes, and nothing records.
+2. **Countdown.** Next starts a new recording part and a "ready" event, and the panel counts 3, 2, 1 (big), recorded so the hold is captured from its first frame. In the push sections the bar sits at near meanwhile.
+3. **Hold.** The `prompt` event, the section's word ("Hold" or "Go") and the time-left bar for the prompt's seconds (or the bar's sweeps, or the targets). Then a `wait` event and the part stops.
+
+Steps that wait: each prompt, each bar height, and the first touch-the-dot target (the others follow straight on, as each waits for the touch anyway). Before a section, one screen shows the section's intro (with its `before` text, such as putting on the controllers) and waits for Next too; the welcome screen as well. The take starts with the section's first countdown, so a section skipped at its intro leaves no take. A pause in a hold works as before (the part stops; resume starts the next one).
+
+Auto mode ("Advance by itself" on the checklist page, `session.py --auto`) is the old timed flow: the welcome, the between and before screens, the intro (recorded) and each prompt for its seconds, one recording per take. R still works there: it restarts the step running.
+
+Holds are 5 s for still poses (4 s counting fingers), 8-10 s for movements. The core session (no objects, no controllers) records about 11 min in 62 steps; with 5 s of reading a step that's about 16 min. Everything ticked: about 16.5 min recorded in 86 steps. The window and `session.py --plan` give these (`plan_summary`); in step mode they leave the reading time out and say so.
 
 The sections, in this order (see the plan):
 1. hand size
@@ -189,9 +245,9 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
 
 ### Controls
 
-- The window has Start, Pause/Resume, Skip section and Stop. Space pauses and Esc stops while the window has focus.
-- The panel's text says what to do: "Pause: Space in the Hand recorder window".
-- A pause stops the take's recording and starts it again on resume as the next part of the same take (`sets.bin` is appended to as a second recording file `sets-2.bin`, and so on). takes.py reads all parts in order.
+- The window has Start, a big Next (while a step waits), Pause/Resume, Redo step, Skip section and Stop. While it has focus: Space is Next, P pauses or resumes, R redoes, S skips the section, Esc stops. The panel's bottom line and the window list them. The window also shows the step's picture, diagram, countdown and "Hold".
+- **R (redo).** During a step's countdown or hold: that step starts again from its ready screen. At a step's ready screen: the step before it (in this section) goes again. Either way a `redo` event marks the range of the try being redone, so its labels are skipped; the sets stay, to delete in review if wanted.
+- A pause stops the take's recording and starts it again on resume as the next part of the same take (`sets-2.bin`, and so on). takes.py reads all parts in order. A pause while a step waits only shows "Paused"; a Next pressed while paused doesn't count.
 
 ## Review and export (`takes.py`, the window)
 
@@ -230,7 +286,7 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
     Errors get a plain explanation: not logged in, a token Hugging Face rejects (401), a token that can't open a pull request (403), terms not accepted, dataset not found, network errors. `--dry-run` does everything except the network calls and the record, and lists what it would upload.
   - **The page** shows the login (`whoami`, with "Check again"). If nobody is logged in, it explains how to run `distrobox enter dev -- hf auth login` in Konsole with a write token: the token goes only into that terminal. The page then has Upload and Cancel, the phase with a progress bar (a share while the export is checked, a sweep while it's sent, as `huggingface_hub` reports no progress), and the pull request's link when it's done. If this export was uploaded before, the page says so, and uploading it again asks first. A stale export can't be uploaded.
   - **While the texts are drafts**, Upload stays off unless `FT_HANDREC_ALLOW_UPLOAD=1`, so the maintainer can rehearse against a private test repo. `FT_HANDREC_DATASET` overrides `HF_DATASET`. `ft-handrec --hub-dry-run` makes Upload a dry run: no network, so it isn't held back by the drafts.
-  - **Rehearsal: `hands/rec/rehearse.sh [--repo ID]`** runs it all without the headset, in the dev container, in one `frame-job --local` scope when frame-job is installed. `ft-ringplay` plays 30 s of a recording into a ring in `/run/user/UID`. A tracking ft-hands that's already running is used, or one is started on that ring. `ft-handpanel --no-vr` stands in for the panel. `session.py --no-start` records a two-section test script, about 11 s and about 200 MB once exported. Then `takes.py` exports, `validate.py` checks, and `hub.py` uploads: a dry run by default, or for real to `--repo ID` with `FT_HANDREC_ALLOW_UPLOAD=1`. It prints a summary, deletes its temporary folders (camera images of a room) and stops everything it started, Ctrl+C included. The `--no-vr` panel logs no poses, so `poses.jsonl` is missing there (a warning).
+  - **Rehearsal: `hands/rec/rehearse.sh [--repo ID]`** runs it all without the headset, in the dev container, in one `frame-job --local` scope when frame-job is installed. `ft-ringplay` plays 30 s of a recording into a ring in `/run/user/UID`. A tracking ft-hands that's already running is used, or one is started on that ring. `ft-handpanel --no-vr` stands in for the panel. `session.py --no-start --next-after 0.3` records a two-section test script in step mode, three parts of 6 s (countdown and hold), about 360 MB once exported. Then `takes.py` exports, `validate.py` checks, and `hub.py` uploads: a dry run by default, or for real to `--repo ID` with `FT_HANDREC_ALLOW_UPLOAD=1`. It prints a summary, deletes its temporary folders (camera images of a room) and stops everything it started, Ctrl+C included. The `--no-vr` panel logs no poses, so `poses.jsonl` is missing there (a warning).
 
 ## Licensing and consent (texts in `CONSENT.md`)
 

@@ -11,8 +11,12 @@ gives feedback ("I can't see your left hand").
 Plain Python, standard library only: ft_handrec.py imports it, and it runs from the command line
 for testing (in the dev container):
 
-  python3 hands/rec/session.py --dry-run --speed 20            # no processes: prints the panel commands
-  python3 hands/rec/session.py --ring /tmp/ring --base /tmp/hr  # ft-ringplay's frames, no headset needed
+  python3 hands/rec/session.py --dry-run --speed 20 --next-after 0.2   # no processes: prints the panel commands
+  python3 hands/rec/session.py --ring /tmp/ring --base /tmp/hr        # ft-ringplay's frames, no headset needed
+
+Step mode (the default) shows each step and waits for Next (Space in the window, n or Enter
+here); a 3-2-1 countdown, recorded, then the hold. Only the countdowns and holds are recorded:
+each is a part of the take's recording (sets-N.bin). --auto is the old timed flow.
 
 All _ns times are CLOCK_MONOTONIC nanoseconds.
 """
@@ -40,6 +44,7 @@ FT_HANDS = os.path.join(HANDS, "build", "ft-hands")
 FT_CAMD = os.path.join(HANDS, "build", "ft-camd")
 PANEL_BIN = os.path.join(HERE, "build", "ft-handpanel")
 SCRIPT_PATH = os.path.join(HERE, "script.json")
+POSES_DIR = os.path.join(HERE, "poses")   # the pose pictures: poses.json and its PNGs
 BASE_DIR = os.path.expanduser("~/.local/share/frametop/hands/contrib")
 PANEL_SOCKET = "ft_handpanel"
 CAMD_UNIT = "frametop-handrec-camd.service"
@@ -52,7 +57,12 @@ LOST_S = 1.5             # an asked-for hand lost this long gets a note
 CONTROLLER_LOST_S = 1.0  # a controller off 200 (Running_OK) this long gets a note
 TOUCH_M = 0.03           # touch the dot: the index tip within this of the dot
 MIN_FREE = 1.5e9         # stop the session before the disk fills
-RESUME_HINT = "Paused. Resume: Space in the Hand recorder window"
+COUNTDOWN_S = 3          # step mode: the 3-2-1 before each step, recorded
+FIRST_SET_S = 3.0        # step mode: how long the hold may wait for its recording's first set
+RESUME_HINT = "Paused. Resume: P in the Hand recorder window"
+READY_TEXT = "Ready? Press Space or click Next"
+KEYS_STEP = "Hand recorder window:  Space next  \u00b7  P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
+KEYS_AUTO = "Hand recorder window:  P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
 
 
 def mono_ns():
@@ -470,6 +480,13 @@ class Recorder:
     def exited(self):
         return self.proc.poll() is not None
 
+    def has_data(self):
+        """It has written a set (ft-hands starts recording within a few tens of milliseconds)."""
+        try:
+            return os.path.getsize(os.path.join(self.dir, "sets.bin")) > 0
+        except OSError:
+            return False
+
     def stop(self):
         """End it (SIGTERM: ft-hands writes out its queue) and put the part in place."""
         if self.proc.poll() is None:
@@ -488,6 +505,40 @@ class Recorder:
             except OSError:
                 pass
         return self.proc.returncode
+
+
+# ------------------------------------------------------------------------------------------
+# The pose pictures (poses/poses.json: {"<pose>": {"file": "<name>.png", "two_hands", "caption"}})
+
+def load_poses(poses_dir):
+    """{pose id: {"path", "two_hands", "caption"}} from poses_dir/poses.json, or {} without one."""
+    try:
+        with open(os.path.join(poses_dir, "poses.json")) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for pose, e in (raw.items() if isinstance(raw, dict) else ()):
+        if isinstance(e, dict) and isinstance(e.get("file"), str) and e["file"]:
+            out[pose] = {"path": os.path.join(poses_dir, os.path.basename(e["file"])),
+                         "two_hands": bool(e.get("two_hands")), "caption": clean_text(e.get("caption", ""))}
+    return out
+
+
+def pose_view(poses, p):
+    """A prompt's picture: (path, mode, caption), mode "" (as drawn: a right hand, or both hands),
+    "mirror" (a left hand) or "both" (a mirrored copy on the left, the picture on the right).
+    The prompt's "picture" (a pose id) picks a picture other than its pose's, and
+    "picture_mirror" mirrors a two-hand picture. ("", "", "") when there's none."""
+    e = poses.get(p.get("picture") or p.get("pose") or "")
+    if not e or not os.path.isfile(e["path"]):
+        return "", "", ""
+    hands = p.get("hands")
+    if e["two_hands"]:
+        mode = "mirror" if p.get("picture_mirror") else ""
+    else:
+        mode = "mirror" if hands == "left" else "both" if hands == "both" else ""
+    return e["path"], mode, e["caption"]
 
 
 # ------------------------------------------------------------------------------------------
@@ -595,22 +646,49 @@ def build_plan(script, checklist):
     return plan, skipped
 
 
-def section_seconds(s, worst=False):
-    """A section's length in script seconds (targets: about 4 s each, or the timeout if worst)."""
-    t = s["intro_s"] + sum(p["seconds"] for p in s["prompts"])
+def section_steps(s):
+    """The steps that wait for Next in step mode: each prompt and bar height, and the first target."""
+    return (len(s["prompts"]) + (len(s.get("heights") or []) if s["kind"] == "bar" else 0)
+            + (1 if s["kind"] == "targets" and s.get("targets") else 0))
+
+
+def section_seconds(s, worst=False, auto=True):
+    """A section's length in script seconds (targets: about 4 s each, or the timeout if worst).
+    In step mode, what's recorded: a countdown before each step and the holds; the intro and
+    the waits for Next aren't."""
+    t = (s["intro_s"] if auto else COUNTDOWN_S * section_steps(s)) + sum(p["seconds"] for p in s["prompts"])
     if s["kind"] == "targets":
         t += len(s["targets"]) * (s.get("timeout_s", 8) if worst else min(4.0, s.get("timeout_s", 8)))
     if s["kind"] == "bar":
-        t += sum(s.get("lead_s", 3) + h["reps"] * s.get("period_s", 6) for h in s["heights"])
+        lead = s.get("lead_s", 3) if auto else 0
+        t += sum(lead + h["reps"] * s.get("period_s", 6) for h in s["heights"])
     return t
 
 
-def plan_seconds(script, plan, worst=False):
+def plan_seconds(script, plan, worst=False, auto=True):
+    """The session's length: in auto mode all of it; in step mode only what's recorded, as the
+    time spent reading each step before pressing Next is up to the person (plan_steps)."""
+    if not auto:
+        return sum(section_seconds(s, worst, auto=False) for s in plan)
     t = (script.get("welcome") or {}).get("seconds", 0) + (script.get("done") or {}).get("seconds", 0)
     for i, s in enumerate(plan):
         t += section_seconds(s, worst)
         t += s["before"]["seconds"] if s.get("before") else (script.get("between_s", 3) if i else 0)
     return t
+
+
+def plan_steps(plan):
+    return sum(section_steps(s) for s in plan)
+
+
+def plan_summary(script, plan, auto=False):
+    """The length in words, for the window and --plan."""
+    minutes = max(1, round(plan_seconds(script, plan, auto=auto) / 60))
+    if auto:
+        return "about %d min, each step advancing by itself" % minutes
+    n = plan_steps(plan)
+    return ("about %d min of recording in %d steps, plus the time you take to read each step before "
+            "pressing Next (at 5 s a step, about %d min more)" % (minutes, n, max(1, round(n * 5 / 60))))
 
 
 # ------------------------------------------------------------------------------------------
@@ -625,6 +703,10 @@ class _Stop(Exception):
 
 
 class _Fail(Exception):
+    pass
+
+
+class _Redo(Exception):
     pass
 
 
@@ -665,12 +747,18 @@ def _steamvr_version():
 
 
 class Session:
-    """One recording session. start() runs it in its own thread; pause(), resume(), skip()
-    and stop() steer it from any thread. on_status(dict) is called from the session thread
-    whenever something changes (see STATUS_KEYS)."""
+    """One recording session. start() runs it in its own thread; next_step(), pause(), resume(),
+    redo(), skip() and stop() steer it from any thread. on_status(dict) is called from the
+    session thread whenever something changes (the keys of _status).
+
+    auto=False is step mode: each step waits for next_step(), then a recorded countdown, then
+    the hold; nothing is recorded while it waits. auto=True: the timed flow, each prompt
+    advancing by itself, one recording per take. next_after (a test hook): press Next by itself
+    after that many seconds of waiting. poses_dir: the pose pictures (poses/)."""
 
     def __init__(self, base_dir, profile, checklist, lighting_choice, script_path, *, ring=None,
-                 start_processes=True, dry_run=False, speed=1.0, on_status=None, hands_dir=None, panel_bin=None):
+                 start_processes=True, dry_run=False, speed=1.0, on_status=None, hands_dir=None, panel_bin=None,
+                 auto=False, next_after=None, poses_dir=None):
         self.base_dir = os.path.abspath(os.path.expanduser(base_dir or BASE_DIR))
         self.profile = dict(profile or {})
         self.checklist = dict(checklist or {})
@@ -683,17 +771,26 @@ class Session:
         self.on_status = on_status
         self.hands_dir = hands_dir or run_dir()
         self.panel_bin = panel_bin or PANEL_BIN
+        self.auto = bool(auto)
+        self.next_after = next_after
         self.print = print   # where dry-run panel commands go (the CLI's stdout)
         self.script = load_script(self.script_path)
         self.plan, self.skipped = build_plan(self.script, self.checklist)
+        self._poses = load_poses(poses_dir or POSES_DIR)
         self.session_dir = ""
         self._thread = None
         self._lock = threading.Lock()
-        self._want = {"pause": False, "skip": False, "stop": False}
+        self._want = {"pause": False, "skip": False, "stop": False, "next": False, "redo": False}
         self._wake = threading.Event()
-        self._status = {"state": "starting", "section": "", "title": "", "section_index": 0,
-                        "section_count": len(self.plan), "prompt": "", "seconds_left": 0.0, "note": "",
-                        "hands": {"left": None, "right": None}, "take": None, "error": ""}
+        # state: starting, intro, ready (a step waits for Next), countdown, running (a hold),
+        # between, paused, done, stopped, error. waiting: Next is wanted. big: the countdown's
+        # number, then the hold's word ("Hold", "Go"), as the panel shows them. The picture and the
+        # diagram: image (a path or ""), image_mode ("", "mirror", "both"), position, distance.
+        self._status = {"state": "starting", "mode": "auto" if self.auto else "step", "section": "", "title": "",
+                        "section_index": 0, "section_count": len(self.plan), "step_index": 0, "step_count": 0,
+                        "prompt": "", "seconds_left": 0.0, "note": "", "hands": {"left": None, "right": None},
+                        "take": None, "error": "", "waiting": False, "countdown": 0, "big": "", "can_redo": False,
+                        "image": "", "image_mode": "", "caption": "", "position": "", "distance": ""}
         self._last_emit = 0.0
         self._log_file = None
         self._panel = None
@@ -706,6 +803,11 @@ class Session:
         self._live = None          # the hands file's last read
         self._hands_file = HandsFile(os.path.join(self.hands_dir, "hands"))
         self._paused = False
+        self._recording = False    # a recording part is running
+        self._paused_recording = False
+        self._waiting = False      # waiting for Next: no notes about lost hands
+        self._redo_ok = False      # R does something now
+        self._step_t0 = None       # the step's first event (ready or prompt), for R
         self._fb = {}              # feedback timers
 
     # --- controls (any thread)
@@ -719,6 +821,14 @@ class Session:
         with self._lock:
             self._want[key] = value
         self._wake.set()
+
+    def next_step(self):
+        """Step mode: start the step that's waiting (its countdown)."""
+        self._set("next", True)
+
+    def redo(self):
+        """Record a step again: the one running, or at a step's ready screen the one before."""
+        self._set("redo", True)
 
     def pause(self):
         self._set("pause", True)
@@ -763,12 +873,15 @@ class Session:
             self._log_file.flush()
 
     def _event(self, event, **fields):
+        """A line in the take's prompts.jsonl; returns its time."""
+        t = mono_ns()
         if not self._take:
-            return
-        line = {"t": mono_ns(), "event": event}
+            return t
+        line = {"t": t, "event": event}
         line.update(fields)
         self._take["prompts"].write(json.dumps(line) + "\n")
         self._take["prompts"].flush()
+        return t
 
     # --- the run
     def _run(self):
@@ -838,7 +951,7 @@ class Session:
             "calibration_removed": removed,
             "script": {"version": self.script.get("version"), "sections": [s["id"] for s in self.plan],
                        "skipped": self.skipped},
-            "takes": [], "status": "recording"}
+            "mode": "auto" if self.auto else "step", "takes": [], "status": "recording"}
         if self.dry_run:
             self._session_json["dry_run"] = True
         if self.speed != 1:
@@ -850,7 +963,9 @@ class Session:
         self._panel.cmd("show")
         self._panel.cmd("paused off")
         for key, c in (("note", "note "), ("countdown", "countdown off"), ("hands", "hands off off"),
-                       ("bar", "bar off"), ("target", "target off")):
+                       ("bar", "bar off"), ("target", "target off"), ("image", "image off"), ("where", "where off"),
+                       ("big", "big "), ("action", "action "), ("rec", "rec off"),
+                       ("keys", "keys " + (KEYS_AUTO if self.auto else KEYS_STEP))):
             self._panel.set(key, c)
 
     def _write_calibration(self):
@@ -1007,6 +1122,9 @@ class Session:
                                 "seconds": 4}}[state]
             try:
                 self._panel.cmd("paused off")
+                for key, c in (("big", "big "), ("action", "action "), ("rec", "rec off"), ("keys", "keys "),
+                               ("bar", "bar off"), ("target", "target off")):
+                    self._panel.set(key, c)
                 self._screen(state, screen, controls=False)
             except (_Stop, _Skip, _Fail):
                 pass
@@ -1016,18 +1134,23 @@ class Session:
             self._log_file = None
         screen = {"done": self.script.get("done"), "stopped": self.script.get("stopped")}.get(state) or {}
         self._emit(state=state, error=error, seconds_left=0.0, note="", take=None, section="",
-                   prompt=error or screen.get("text", "").replace("|", "\n"), hands={"left": None, "right": None})
+                   prompt=error or screen.get("text", "").replace("|", "\n"), hands={"left": None, "right": None},
+                   waiting=False, countdown=0, big="", can_redo=False, image="", image_mode="", caption="",
+                   position="", distance="")
 
     # --- the timing loop
     def _controls(self):
-        """Handle a pause (blocking until resumed), skip and stop. True if a pause happened."""
+        """Handle a pause (blocking until resumed), skip, stop and redo (only where _redo_ok:
+        else it's dropped). True if a pause happened."""
         with self._lock:
             want = dict(self._want)
-            self._want["skip"] = False
+            self._want["skip"] = self._want["redo"] = False
         if want["stop"]:
             raise _Stop()
         if want["skip"]:
             raise _Skip()
+        if want["redo"] and self._redo_ok:
+            raise _Redo()
         if not want["pause"]:
             return False
         self._pause()
@@ -1037,13 +1160,16 @@ class Session:
             self._wake.clear()
             with self._lock:
                 want = dict(self._want)
-                self._want["skip"] = False
-                if want["skip"]:
+                self._want["skip"] = self._want["redo"] = False
+                redo = want["redo"] and self._redo_ok
+                if want["skip"] or redo:
                     self._want["pause"] = False
             if want["stop"]:
                 outcome = _Stop
             elif want["skip"]:
                 outcome = _Skip
+            elif redo:
+                outcome = _Redo
             elif not want["pause"]:
                 outcome = True
         self._unpause(record=outcome is True)
@@ -1054,7 +1180,8 @@ class Session:
     def _pause(self):
         self._paused = True
         self._state_before = self._status["state"]
-        if self._take:
+        self._paused_recording = self._recording
+        if self._recording:
             self._stop_recording()
             self._event("pause")
         self._panel.cmd("paused on")
@@ -1067,7 +1194,9 @@ class Session:
         self._panel.cmd("paused off")
         self._panel.set("note", "note ")
         self._fb.clear()
-        if self._take and record:
+        with self._lock:
+            self._want["next"] = False   # a Next pressed while paused doesn't count
+        if self._take and self._paused_recording and record:
             self._event("resume")
             self._start_recording()
         self._emit(state=self._state_before, note="")
@@ -1115,6 +1244,7 @@ class Session:
         self._live = live
         p = self._prompt or {}
         asked = p.get("hands", "")
+        # While a step waits for Next the chips show what's seen, with no notes yet.
         seen = {s: (bool(live[s]) if live else None) for s in ("left", "right")}
         # the chips: the asked-for hands, seen or lost, while the tracker publishes
         chips = []
@@ -1124,7 +1254,7 @@ class Session:
         self._panel.set("hands", "hands %s %s" % tuple(chips))
         # a note when an asked-for hand stays lost, or a hand shows when none is wanted
         notes = []
-        if live is not None and asked:
+        if live is not None and asked and not self._waiting:
             if asked == "none":
                 missing = [] if not (seen["left"] or seen["right"]) else ["shown"]
             elif asked == "any":
@@ -1143,14 +1273,14 @@ class Session:
                     notes.append("I can't see your %s hand: bring it into view" % missing[0])
         else:
             fb.pop("lost_key", None)
-        notes = self._controller_feedback(now, p) + notes
+        notes = ([] if self._waiting else self._controller_feedback(now, p)) + notes
         note = notes[0] if notes else ""
         if not self._paused:
             self._panel.set("note", "note " + note)
         hands = {"left": seen["left"], "right": seen["right"]}
         if note != self._status["note"] or hands != self._status["hands"]:
             self._emit(note=note, hands=hands)
-        if self._take and live is not None and now - fb.get("logged", 0) >= 0.5:
+        if self._take and self._recording and live is not None and now - fb.get("logged", 0) >= 0.5:
             fb["logged"] = now
             self._event("feedback", left=seen["left"], right=seen["right"],
                         palm_m=[round(live[s]["palm_m"], 4) if live[s] else None for s in ("left", "right")])
@@ -1199,19 +1329,58 @@ class Session:
         if text is not None:
             self._panel.set("text", "text " + clean_text(text))
 
+    def _view(self, p=None):
+        """The prompt's picture and where-to diagram, on the panel and in the status (sent with
+        the next _emit); none without a prompt."""
+        p = p or {}
+        path, mode, caption = pose_view(self._poses, p)
+        pos, dist = p.get("position") or "", p.get("distance") or ""
+        self._panel.set("image", "image %s%s" % (path, " " + mode if mode else "") if path else "image off")
+        self._panel.set("where", "where %s %s" % (clean_text(pos) or "-", clean_text(dist) or "-")
+                        if pos or dist else "where off")
+        self._status.update(image=path, image_mode=mode, caption=caption, position=pos, distance=dist)
+
+    def _await_next(self):
+        """Step mode: wait for Next (or the next_after test hook), handling the controls and the
+        hands chips. Nothing records meanwhile."""
+        with self._lock:
+            self._want["next"] = False   # one pressed during the hold doesn't skip this
+        self._waiting = True
+        self._panel.set("action", "action " + READY_TEXT)
+        self._emit(waiting=True, seconds_left=0.0)
+        t0 = time.monotonic()
+        try:
+            while True:
+                self._controls()
+                self._feedback()
+                with self._lock:
+                    go, self._want["next"] = self._want["next"], False
+                if go or (self.next_after is not None and time.monotonic() - t0 >= self.next_after):
+                    break
+                self._wake.wait(TICK_S)
+                self._wake.clear()
+        finally:
+            self._waiting = False
+            self._panel.set("action", "action ")
+        self._emit(waiting=False)
+
     def _screen(self, state, screen, controls=True):
-        """A screen of its own (welcome, done): title, text, a few seconds. controls=False: the
-        session's end, which reports its state once all is done."""
+        """A screen of its own (welcome, done): title, text, a few seconds, or in step mode
+        until Next. controls=False: the session's end, which reports its state once all is done."""
         if not screen:
             return
         self._prompt = None
         self._show(screen.get("title", ""), "", screen.get("text", ""))
+        self._view()
         self._panel.set("countdown", "countdown off")
         if controls:
             self._emit(state=state, title=screen.get("title", ""), prompt=screen.get("text", "").replace("|", "\n"),
                        section="", seconds_left=float(screen.get("seconds", 0)))
             try:
-                self._wait(screen.get("seconds", 0), countdown=False)
+                if self.auto:
+                    self._wait(screen.get("seconds", 0), countdown=False)
+                else:
+                    self._await_next()
             except _Skip:
                 pass
         else:
@@ -1221,29 +1390,36 @@ class Session:
 
     def _section(self, i, s):
         step = "Section %d of %d" % (i + 1, len(self.plan))
-        status = {"section": s["id"], "title": s["title"], "section_index": i + 1, "section_count": len(self.plan)}
+        status = {"section": s["id"], "title": s["title"], "section_index": i + 1, "section_count": len(self.plan),
+                  "step_index": 0, "step_count": section_steps(s) if not self.auto else 0, "can_redo": False}
         try:
             before = s.get("before")
-            if before or i > 0:
-                self._prompt = None
-                text = before["text"] if before else "Next: %s" % s["title"]
-                secs = before.get("seconds", 10) if before else self.script.get("between_s", 3)
-                self._show("Get ready" if before else s["title"], step, text)
-                self._emit(state="between", prompt=text.replace("|", "\n"), take=None, **status)
-                self._wait(secs)
-            self._start_take(i, s)
-            self._status.update(state="intro", take=self._take["id"], **status)   # sent with the intro
-            self._run_prompt(s, {"id": s["id"] + "/intro", "text": s.get("intro", ""), "seconds": s["intro_s"],
-                                 "hands": "", "pose": "", "distance": "", "position": "", "object": "",
-                                 "controller": False, "controllers": []}, step, intro=True)
+            self._prompt = None
+            self._view()
+            if self.auto:
+                if before or i > 0:
+                    text = before["text"] if before else "Next: %s" % s["title"]
+                    secs = before.get("seconds", 10) if before else self.script.get("between_s", 3)
+                    self._show("Get ready" if before else s["title"], step, text)
+                    self._emit(state="between", prompt=text.replace("|", "\n"), take=None, **status)
+                    self._wait(secs)
+                self._start_take(i, s)
+                self._status.update(state="intro", take=self._take["id"], **status)   # sent with the intro
+                self._run_prompt(s, {"id": s["id"] + "/intro", "text": s.get("intro", ""), "seconds": s["intro_s"],
+                                     "hands": "", "pose": "", "distance": "", "position": "", "object": "",
+                                     "controller": False, "controllers": []}, step, intro=True)
+            else:
+                # One screen before the section: what to get ready, and the intro. The take
+                # starts with the first step's countdown, so a section skipped here leaves none.
+                text = "|".join(t for t in ((before or {}).get("text", ""), s.get("intro", "")) if t)
+                self._show(s["title"], step, text)
+                self._panel.set("countdown", "countdown off")
+                self._emit(state="intro", prompt=text.replace("|", "\n"), take=None, seconds_left=0.0, **status)
+                self._await_next()
             self._status["state"] = "running"   # sent with the first prompt
-            if s["kind"] == "targets":
-                self._targets(s, step)
-            elif s["kind"] == "bar":
-                self._bar(s, step)
-            for p in s["prompts"]:
-                self._run_prompt(s, p, step)
-            self._end_take("complete")
+            self._steps(i, s, step)
+            if self._take:
+                self._end_take("complete")
         except _Skip:
             self._log("skipped %s" % s["id"])
             if self._take:
@@ -1251,10 +1427,12 @@ class Session:
         except _Stop:
             raise
         finally:
-            self._panel.set("bar", "bar off")
-            self._panel.set("target", "target off")
+            self._redo_ok = False
+            self._status["big"] = ""
+            for key, c in (("bar", "bar off"), ("target", "target off"), ("big", "big "), ("action", "action ")):
+                self._panel.set(key, c)
 
-    def _start_take(self, i, s):
+    def _start_take(self, i, s, record=True):
         n = len(self._session_json["takes"]) + 1
         take_id = "%02d-%s" % (n, s["id"])
         d = os.path.join(self.session_dir, "takes", take_id)
@@ -1267,19 +1445,27 @@ class Session:
         self._session_json["takes"].append(take_id)
         self._save_session()
         self._event("take", section=s["id"], take=take_id)
-        self._start_recording()
+        if record:
+            self._start_recording()
         self._log("take %s" % take_id)
+        self._emit(force=False, take=take_id)
 
     def _start_recording(self):
         t = self._take
         t["part"] += 1
         if not self.dry_run:
             # a safety net only: the session ends the recording itself
-            remaining = section_seconds(t["section"], worst=True) / self.speed
+            remaining = section_seconds(t["section"], worst=True, auto=self.auto) / self.speed
             self._recorder = Recorder(t["dir"], t["part"], remaining * 1.5 + 60, self.ring, self._log_file)
+        self._recording = True
         self._panel.cmd("poses start " + os.path.join(t["dir"], "poses.jsonl"))
+        self._panel.set("rec", "rec on")
 
     def _stop_recording(self):
+        if not self._recording:
+            return
+        self._recording = False
+        self._panel.set("rec", "rec off")
         self._panel.cmd("poses stop", reply=not self.dry_run, timeout=1.0)
         if self._recorder:
             rec, self._recorder = self._recorder, None
@@ -1289,8 +1475,7 @@ class Session:
     def _end_take(self, status):
         t = self._take
         try:
-            if not self._paused:
-                self._stop_recording()
+            self._stop_recording()
         finally:
             self._event("end", status=status)
             self._take = None
@@ -1301,67 +1486,216 @@ class Session:
             self._log("take %s %s" % (t["id"], status))
 
     def _prompt_event(self, p):
-        self._event("prompt", id=p["id"], text=p["text"], hands=p["hands"], pose=p["pose"], distance=p["distance"],
-                    position=p["position"], object=p["object"], controller=bool(p["controller"]),
-                    **({"controllers": p["controllers"]} if p["controllers"] else {}))
+        return self._event("prompt", id=p["id"], text=p["text"], hands=p["hands"], pose=p["pose"],
+                           distance=p["distance"], position=p["position"], object=p["object"],
+                           controller=bool(p["controller"]), **({"controllers": p["controllers"]} if p["controllers"] else {}))
 
-    def _begin_prompt(self, s, p, step):
+    def _begin_prompt(self, s, p, step, state="running"):
         self._prompt = p
         self._fb.pop("lost_key", None)
         self._show(s["title"], step, p["text"])
-        self._prompt_event(p)
-        self._emit(prompt=p["text"].replace("|", "\n"), seconds_left=float(p["seconds"]))
+        self._view(p)
+        t = self._prompt_event(p)
+        if self._step_t0 is None:
+            self._step_t0 = t
+        self._emit(state=state, prompt=p["text"].replace("|", "\n"), seconds_left=float(p["seconds"]), countdown=0)
         self._log("  %s" % p["id"])
 
     def _run_prompt(self, s, p, step, intro=False):
         if intro and not p["text"]:
             return
-        self._begin_prompt(s, p, step)
+        self._begin_prompt(s, p, step, state="intro" if intro else "running")
         self._wait(p["seconds"])
 
-    def _targets(self, s, step):
-        hold_s, timeout_s = float(s.get("hold_s", 1.0)), float(s.get("timeout_s", 8))
+    # --- steps: a section's prompts, bar heights and targets
+    def _step_list(self, s):
+        """[{"kind": "prompt"|"bar"|"target", "p": prompt, "ready": waits for Next in step mode, ...}]."""
+        out = []
         defaults = s.get("defaults") or {}
-        for k, pt in enumerate(s["targets"]):
-            p = {"id": "%s/%d" % (s["id"], k + 1), "text": s.get("text", ""), "seconds": timeout_s,
-                 "hands": defaults.get("hands", "any"), "pose": defaults.get("pose", "point"), "distance": "",
-                 "position": "", "object": "", "controller": False, "controllers": []}
-            self._begin_prompt(s, p, step)
-            xyz = "%.3f %.3f %.3f" % tuple(pt)
-            reply = self._panel.cmd("target %s show" % xyz, reply=True) or ""
-            self._panel.sent["target"] = "target %s show" % xyz
-            tok = reply.split()
-            room = [float(v) for v in tok[1:4]] if tok[:1] == ["ok"] and len(tok) >= 4 else None
-            target = {"id": p["id"], "head": list(pt), "room": room}
-            self._event("target", state="show", **target)
-            st = {"hold": 0.0, "sent": 0.0, "holding": False}
+        if s["kind"] == "targets":
+            for k, pt in enumerate(s["targets"]):
+                p = {"id": "%s/%d" % (s["id"], k + 1), "text": s.get("text", ""), "seconds": float(s.get("timeout_s", 8)),
+                     "hands": defaults.get("hands", "any"), "pose": defaults.get("pose", "point"), "distance": "",
+                     "position": "", "object": "", "controller": False, "controllers": []}
+                out.append({"kind": "target", "p": p, "pt": pt, "ready": k == 0})
+        elif s["kind"] == "bar":
+            lead = float(s.get("lead_s", 3)) if self.auto else 0.0   # step mode: the countdown shows the bar at near
+            for h in s["heights"]:
+                p = {"id": "%s/%s" % (s["id"], h["id"]), "text": h["text"], "hands": defaults.get("hands", "both"),
+                     "pose": defaults.get("pose", "open"), "distance": "", "position": h["id"], "object": "",
+                     "picture": h.get("picture", defaults.get("picture", "")),
+                     "controller": bool(defaults.get("controller", False)),
+                     "controllers": list(defaults.get("controllers") or []),
+                     "seconds": lead + h["reps"] * float(s.get("period_s", 6))}
+                out.append({"kind": "bar", "p": p, "h": h, "lead": lead, "ready": True})
+        out += [{"kind": "prompt", "p": p, "ready": True} for p in s["prompts"]]
+        return out
 
-            def tick(dt, pt=pt, room=room, target=target, st=st, xyz=xyz):
-                d = self._tip_distance(pt, room)
-                if d is not None and d <= TOUCH_M:
-                    if not st["holding"]:
-                        st["holding"] = True
-                        self._event("target", state="hold", **target)
-                    st["hold"] += dt
-                elif st["holding"]:
-                    st["holding"], st["hold"] = False, 0.0
-                    self._panel.set("target", "target %s show" % xyz)
-                if st["holding"]:
-                    frac = min(1.0, st["hold"] / hold_s)
-                    if time.monotonic() - st["sent"] >= 0.1 or frac >= 1:
-                        st["sent"] = time.monotonic()
-                        self._panel.set("target", "target %s hold %.2f" % (xyz, frac))
-                return st["hold"] >= hold_s
+    def _steps(self, i, s, label):
+        """Run a section's steps. Step mode: each that's "ready" (and each to do again) shows
+        first and waits for Next; then the recorded countdown; the recording stops after a
+        step unless the next one follows straight on (the targets after the first). R: the
+        step running starts again; at a ready screen, the step before goes again. Either way
+        the range done before is marked with a "redo" event."""
+        steps = self._step_list(s)
+        done = []      # the steps finished in this take: (index, id, from_ns, to_ns), for R
+        again = set()  # steps to do again: they wait for Next too
+        k = 0
+        while k < len(steps):
+            st, p = steps[k], steps[k]["p"]
+            where = label if self.auto else "%s · step %d of %d" % (label, k + 1, len(steps))
+            self._status.update(step_index=k + 1, step_count=len(steps))
+            started, self._step_t0 = None, None
+            try:
+                if not self.auto and (st["ready"] or k in again):
+                    self._redo_ok = bool(done)
+                    self._ready(s, st, where, can_redo=bool(done))
+                    self._await_next()
+                    self._redo_ok = True
+                    started = self._countdown(i, s, st)
+                else:
+                    self._redo_ok = True
+                    self._emit(force=False, can_redo=True)
+                self._run_step(s, st, where)
+                done.append((k, p["id"], started if started is not None else self._step_t0, mono_ns()))
+                if not self.auto and (k + 1 == len(steps) or steps[k + 1]["ready"] or k + 1 in again):
+                    self._hold_end()
+                again.discard(k)
+                k += 1
+            except _Redo:
+                self._redo_ok = False
+                from_ns = started if started is not None else self._step_t0
+                self._panel.set("target", "target off")
+                self._panel.set("bar", "bar off")
+                if from_ns is not None:   # R during the step: it starts again
+                    self._event("redo", id=p["id"], **{"from": from_ns, "to": mono_ns()})
+                    self._log("    redo %s" % p["id"])
+                    if not self.auto:
+                        self._hold_end()
+                    elif self._take and not self._recording:   # R ended a pause: record again
+                        self._event("resume")
+                        self._start_recording()
+                    again.add(k)
+                elif done:                # R at its ready screen: the step before goes again
+                    k, pid, a, b = done.pop()
+                    self._event("redo", id=pid, **{"from": a, "to": b})
+                    self._log("    redo %s" % pid)
+                    again.add(k)
 
-            done = self._wait(timeout_s, tick)
-            state = "done" if done else "timeout"
-            if done:
-                self._panel.set("target", "target %s done" % xyz)
-            self._event("target", state=state, **target)
-            self._log("    %s %s" % (p["id"], state))
-            if done:
-                self._wait(0.6, countdown=False)
-            self._panel.set("target", "target off")
+    def _ready(self, s, st, where, can_redo):
+        """Step mode: show the step (text, picture, diagram) with "Ready?"."""
+        p = st["p"]
+        self._prompt = p   # the chips show which hands are seen while the person gets ready
+        self._fb.pop("lost_key", None)
+        self._show(s["title"], where, p["text"])
+        self._view(p)
+        for key, c in (("big", "big "), ("countdown", "countdown off"), ("bar", "bar off"), ("target", "target off")):
+            self._panel.set(key, c)
+        self._emit(state="ready", prompt=p["text"].replace("|", "\n"), seconds_left=float(p["seconds"]),
+                   can_redo=can_redo, countdown=0, big="")
+
+    def _countdown(self, i, s, st):
+        """Step mode: start recording and count 3-2-1 (logged as a "ready" event, so labels
+        cover only the hold), then make sure the recording has its first set. Returns the
+        ready event's time."""
+        p = st["p"]
+        if not self._take:
+            self._start_take(i, s, record=False)
+        t = self._event("ready", id=p["id"], seconds=COUNTDOWN_S)
+        self._step_t0 = t
+        self._start_recording()
+        tick = None
+        if st["kind"] == "bar":   # the bar at near, where the sweep starts
+            labels = "%s %s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
+            near, far = float(s.get("near_m", 0.2)), float(s.get("far_m", 0.6))
+
+            def tick(dt):
+                self._panel.set("bar", "bar 0.000 %.3f %s" % (self._palm_share(near, far), labels))
+                return False
+        for n in range(COUNTDOWN_S, 0, -1):
+            self._panel.set("big", "big %d" % n)
+            self._emit(state="countdown", countdown=n, big=str(n), can_redo=True)
+            self._wait(1.0, tick, countdown=False)
+        self._first_set()
+        self._panel.set("big", "big " + s.get("go", "Go"))
+        self._status["big"] = s.get("go", "Go")   # sent with the prompt
+        return t
+
+    def _first_set(self):
+        """The hold starts once its recording has a set. ft-hands --record-only writes its first
+        within about 30 ms of starting, so the countdown covers it; this is a safety net."""
+        rec = self._recorder
+        if not rec:
+            return
+        end = time.monotonic() + FIRST_SET_S
+        while not rec.has_data():
+            if rec.exited():
+                raise _Fail("The recording stopped by itself: see session.log")
+            if self._want["stop"]:
+                raise _Stop()
+            if time.monotonic() > end:
+                self._log("recording part %d: no set yet after the countdown" % rec.part)
+                return
+            time.sleep(0.02)
+
+    def _hold_end(self):
+        """Step mode: the step is over. A "wait" event ends its labels and the recording stops
+        until the next countdown."""
+        self._event("wait")
+        self._stop_recording()
+        self._status["big"] = ""
+        for key, c in (("big", "big "), ("countdown", "countdown off"), ("bar", "bar off"), ("target", "target off")):
+            self._panel.set(key, c)
+
+    def _run_step(self, s, st, where):
+        if st["kind"] != "bar":
+            self._panel.set("bar", "bar off")
+        if st["kind"] == "target":
+            self._target(s, st, where)
+        elif st["kind"] == "bar":
+            self._bar(s, st, where)
+        else:
+            self._run_prompt(s, st["p"], where)
+
+    def _target(self, s, st, where):
+        hold_s, timeout_s = float(s.get("hold_s", 1.0)), float(s.get("timeout_s", 8))
+        p, pt = st["p"], st["pt"]
+        self._begin_prompt(s, p, where)
+        xyz = "%.3f %.3f %.3f" % tuple(pt)
+        reply = self._panel.cmd("target %s show" % xyz, reply=True) or ""
+        self._panel.sent["target"] = "target %s show" % xyz
+        tok = reply.split()
+        room = [float(v) for v in tok[1:4]] if tok[:1] == ["ok"] and len(tok) >= 4 else None
+        target = {"id": p["id"], "head": list(pt), "room": room}
+        self._event("target", state="show", **target)
+        state = {"hold": 0.0, "sent": 0.0, "holding": False}
+
+        def tick(dt):
+            d = self._tip_distance(pt, room)
+            if d is not None and d <= TOUCH_M:
+                if not state["holding"]:
+                    state["holding"] = True
+                    self._event("target", state="hold", **target)
+                state["hold"] += dt
+            elif state["holding"]:
+                state["holding"], state["hold"] = False, 0.0
+                self._panel.set("target", "target %s show" % xyz)
+            if state["holding"]:
+                frac = min(1.0, state["hold"] / hold_s)
+                if time.monotonic() - state["sent"] >= 0.1 or frac >= 1:
+                    state["sent"] = time.monotonic()
+                    self._panel.set("target", "target %s hold %.2f" % (xyz, frac))
+            return state["hold"] >= hold_s
+
+        done = self._wait(timeout_s, tick)
+        result = "done" if done else "timeout"
+        if done:
+            self._panel.set("target", "target %s done" % xyz)
+        self._event("target", state=result, **target)
+        self._log("    %s %s" % (p["id"], result))
+        if done:
+            self._wait(0.6, countdown=False)
+        self._panel.set("target", "target off")
 
     def _tip_distance(self, pt, room):
         """The nearest seen index tip's distance from the target: in the room (with the head's
@@ -1391,35 +1725,28 @@ class Session:
             return -1.0
         return max(0.0, min(1.0, (sum(ds) / len(ds) - near) / (far - near)))
 
-    def _bar(self, s, step):
+    def _bar(self, s, st, where):
+        """One height of the push out and back: the target sweeps near to far and back."""
         near, far = float(s.get("near_m", 0.2)), float(s.get("far_m", 0.6))
-        period, lead = float(s.get("period_s", 6)), float(s.get("lead_s", 3))
+        period, lead = float(s.get("period_s", 6)), st["lead"]
         labels = "%s %s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
-        defaults = s.get("defaults") or {}
-        for h in s["heights"]:
-            p = {"id": "%s/%s" % (s["id"], h["id"]), "text": h["text"], "hands": defaults.get("hands", "both"),
-                 "pose": defaults.get("pose", "open"), "distance": "", "position": h["id"], "object": "",
-                 "controller": bool(defaults.get("controller", False)),
-                 "controllers": list(defaults.get("controllers") or [])}
-            total = lead + h["reps"] * period
-            p["seconds"] = total
-            self._begin_prompt(s, p, step)
-            st = {"t": 0.0, "sent": 0.0}
+        p = st["p"]
+        self._begin_prompt(s, p, where)
+        state = {"t": 0.0, "sent": 0.0}
 
-            def tick(dt, st=st):
-                st["t"] += dt
-                sweep = st["t"] - lead
-                target = 0.0 if sweep <= 0 else 1 - abs(1 - 2 * ((sweep % period) / period))
-                if time.monotonic() - st["sent"] >= 0.1:
-                    st["sent"] = time.monotonic()
-                    cur = self._palm_share(near, far)
-                    self._panel.set("bar", "bar %.3f %.3f %s" % (target, cur, labels))
-                    if sweep > 0:
-                        self._event("bar", target=round(target, 3), current=None if cur < 0 else round(cur, 3))
-                return False
+        def tick(dt):
+            state["t"] += dt
+            sweep = state["t"] - lead
+            target = 0.0 if sweep <= 0 else 1 - abs(1 - 2 * ((sweep % period) / period))
+            if time.monotonic() - state["sent"] >= 0.1:
+                state["sent"] = time.monotonic()
+                cur = self._palm_share(near, far)
+                self._panel.set("bar", "bar %.3f %.3f %s" % (target, cur, labels))
+                if sweep > 0:
+                    self._event("bar", target=round(target, 3), current=None if cur < 0 else round(cur, 3))
+            return False
 
-            self._wait(total, tick)
-        self._panel.set("bar", "bar off")
+        self._wait(p["seconds"], tick)
 
 
 # ------------------------------------------------------------------------------------------
@@ -1439,6 +1766,11 @@ def main():
     ap.add_argument("--panel", help="the panel program (default hands/rec/build/ft-handpanel)")
     ap.add_argument("--hands-dir", help="where the hands file is (default /run/user/UID/frametop-hands)")
     ap.add_argument("--plan", action="store_true", help="print the sections and their length, and exit")
+    ap.add_argument("--auto", action="store_true",
+                    help="advance by itself: each prompt for its time, no waiting for Next (the old timed flow)")
+    ap.add_argument("--next-after", type=float, metavar="S",
+                    help="test: press Next by itself after S seconds of waiting (real time)")
+    ap.add_argument("--poses", help="the pose pictures' folder, with poses.json (default hands/rec/poses)")
     a = ap.parse_args()
 
     known = ("pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small")
@@ -1462,15 +1794,21 @@ def main():
     last = {}
 
     def on_status(st):
-        key = (st["state"], st["section"], st["prompt"], st["note"], st["take"],
+        key = (st["state"], st["section"], st["prompt"], st["note"], st["take"], st["waiting"], st["countdown"],
                st["hands"]["left"], st["hands"]["right"], st["error"])
         if key == last.get("key"):
             return
         last["key"] = key
         hands = "".join("%s%s" % (s[0].upper(), {True: "+", False: "-", None: "?"}[st["hands"][s]])
                         for s in ("left", "right"))
-        line = "[%6.1f] %-8s %d/%d %-16s %s %s" % (time.monotonic() - t0, st["state"], st["section_index"],
-                                                   st["section_count"], st["section"] or "-", hands, st["prompt"])
+        state = "%s %d" % (st["state"], st["countdown"]) if st["state"] == "countdown" else st["state"]
+        line = "[%6.1f] %-11s %d/%d %-16s %s %s" % (time.monotonic() - t0, state, st["section_index"],
+                                                    st["section_count"], st["section"] or "-", hands,
+                                                    st["prompt"].replace("\n", " | "))
+        if st["image"]:
+            line += "  [%s%s]" % (os.path.basename(st["image"]), " " + st["image_mode"] if st["image_mode"] else "")
+        if st["waiting"]:
+            line += "  (waiting for Next)"
         if st["note"]:
             line += "  (%s)" % st["note"]
         if st["error"]:
@@ -1478,15 +1816,22 @@ def main():
         print(line, flush=True)
 
     s = Session(base, profile, checklist, a.lighting, a.script, ring=a.ring, start_processes=not a.no_start,
-                dry_run=a.dry_run, speed=a.speed, on_status=on_status, hands_dir=a.hands_dir, panel_bin=a.panel)
-    est, worst = plan_seconds(s.script, s.plan), plan_seconds(s.script, s.plan, worst=True)
-    print("%d sections, about %.1f min (at most %.1f)%s" % (len(s.plan), est / 60, worst / 60,
-                                                            ", %gx speed" % a.speed if a.speed != 1 else ""))
+                dry_run=a.dry_run, speed=a.speed, on_status=on_status, hands_dir=a.hands_dir, panel_bin=a.panel,
+                auto=a.auto, next_after=a.next_after, poses_dir=a.poses)
+    est = plan_seconds(s.script, s.plan, auto=a.auto)
+    worst = plan_seconds(s.script, s.plan, worst=True, auto=a.auto)
+    print("%d sections, %s mode: about %.1f min%s (at most %.1f)%s" % (
+        len(s.plan), "auto" if a.auto else "step", est / 60, "" if a.auto else " recorded", worst / 60,
+        ", %gx speed" % a.speed if a.speed != 1 else ""))
+    if not a.auto:
+        print("  %d steps wait for Next: add your reading time (at 5 s a step, %.1f min)"
+              % (plan_steps(s.plan), plan_steps(s.plan) * 5 / 60))
     for sk in s.skipped:
         print("  skipping %s: %s" % (sk["section"], sk["reason"]))
     if a.plan:
         for sec in s.plan:
-            print("  %-18s %-9s %3d prompts %5.0f s" % (sec["id"], sec["kind"], len(sec["prompts"]), section_seconds(sec)))
+            print("  %-18s %-9s %3d prompts %3d steps %5.0f s" % (sec["id"], sec["kind"], len(sec["prompts"]),
+                                                                section_steps(sec), section_seconds(sec, auto=a.auto)))
         return 0
     if not a.dry_run:
         light = ring_lighting(a.ring)
@@ -1501,19 +1846,23 @@ def main():
 
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
-    if sys.stdin.isatty():
-        def keys():
-            print("keys: p pause, r resume, s skip, q stop (then Enter)", flush=True)
-            for line in sys.stdin:
-                c = line.strip()[:1]
-                if c == "p":
-                    s.pause()
-                elif c == "r":
-                    s.resume()
-                elif c == "s":
-                    s.skip()
-                elif c == "q":
-                    s.stop(wait=0)
+    def keys():
+        # From a terminal, or lines piped in (a test); /dev/null ends at once.
+        if sys.stdin.isatty():
+            print("keys (then Enter): n or just Enter next, p pause/resume, r redo, s skip section, q stop", flush=True)
+        for line in sys.stdin:
+            c = line.strip()[:1].lower()
+            if c in ("n", ""):
+                s.next_step()
+            elif c == "p":
+                s.resume() if s.state == "paused" else s.pause()
+            elif c == "r":
+                s.redo()
+            elif c == "s":
+                s.skip()
+            elif c == "q":
+                s.stop(wait=0)
+    if sys.stdin is not None:
         threading.Thread(target=keys, daemon=True).start()
     s.start()
     while s._thread.is_alive():

@@ -11,8 +11,10 @@
 #                        drafts that also needs FT_HANDREC_ALLOW_UPLOAD=1 in the environment.
 #   --capture DIR        the recording to play (default the frame-hands capture
 #                        rec-20260930-103803-lit); --from S: start this far into it (60)
-#   --prompt-seconds N   each test prompt's length (3): about 11 s are recorded in all, a few
-#                        hundred MB before compression
+#   --prompt-seconds N   each test prompt's length (3). The session runs in step mode, Next
+#                        pressed by itself (--next-after): each prompt is a recording part of
+#                        its own, with its 3 s countdown, so about 18 s are recorded in all, a
+#                        few hundred MB before compression
 #   --keep               keep the temporary folders (camera images of a room: delete them after)
 #
 # It runs in the dev container (where ft-hands, ft-handpanel, zstd and huggingface_hub are),
@@ -162,6 +164,7 @@ sys.exit(0 if session.Panel().cmd('ping', reply=True) else 1)" 2>/dev/null && br
   sleep 0.2
 done
 run python3 "$here/session.py" --ring "$ring" --no-start --base "$base" --script "$work/script.json" --lighting room \
+  --next-after 0.3 \
   </dev/null > >(indent)
 sid=$(ls "$base/sessions" | tail -1)
 [ -n "$sid" ] || { echo "rehearse: the session left nothing" >&2; exit 1; }

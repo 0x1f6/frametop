@@ -24,6 +24,18 @@
 //                                at the hand's position (-1: not seen). The labels are split at
 //                                "|", or else at the first space (default "Near" and "Far")
 //   paused on|off                "Paused" over the picture
+//   image <path> [mirror|both] / image off
+//                                the pose picture (a PNG, square, RGBA, a right hand as the wearer
+//                                sees it) in a column on the left, the text moving right: mirror
+//                                flips it (a left hand), both shows a flipped copy on its left
+//   where <position|-> <distance|-> / where off
+//                                a small diagram under the picture: where to hold the hands, a
+//                                front view (centre, left, right, up, down; or the bar's chest,
+//                                desk, eye), and how far out (near, mid, far)
+//   action <text>                a cyan line under the instruction: "Ready? Press Space ..."
+//   big <text>                   large, under the instruction: the countdown's 3, 2, 1, then "Hold"
+//   keys <text>                  a small faint line along the bottom: the window's keys
+//   rec on|off                   a red "Rec" dot by the step line while recording
 //   target <x> <y> <z> [show|hold <0..1>|done] / target off
 //                                the touch target, about 2 cm across. The point is in the head
 //                                frame (metres, +x right, +y up, -z forward). The first command
@@ -61,6 +73,14 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"  // helpers only other formats use
+#include "stb_image.h"
+#pragma GCC diagnostic pop
 
 #include <drm_fourcc.h>
 #include <fcntl.h>
@@ -274,15 +294,146 @@ void Text(Picture &p, const std::string &s, int size, int x, int cy, double lum,
     Text(p, s, size, x, cy, lum, lum, lum, align);
 }
 
+// A pose picture as loaded (straight alpha), and scaled copies of it as drawn.
+struct Image {
+    std::string path;
+    Picture src{0, 0, {}};
+    std::map<std::pair<int, bool>, Picture> scaled;  // (side, mirrored) -> picture
+};
+
+// A PNG into img; false (and img empty) if it can't be read.
+bool LoadImage(Image &img, const std::string &path) {
+    img = Image{};
+    int w = 0, h = 0, n = 0;
+    unsigned char *px = stbi_load(path.c_str(), &w, &h, &n, 4);
+    if (!px) return false;
+    img.path = path;
+    img.src = Picture{w, h, std::vector<uint8_t>(px, px + size_t(w) * h * 4)};
+    stbi_image_free(px);
+    return true;
+}
+
+// The picture fitted into a side x side square (centred, aspect kept), averaging the source
+// pixels each output pixel covers, weighted by alpha so transparent edges don't darken.
+const Picture &Scaled(Image &img, int side, bool mirror) {
+    auto [it, fresh] = img.scaled.try_emplace({side, mirror}, Picture{side, side, {}});
+    Picture &out = it->second;
+    if (!fresh) return out;
+    out.px.assign(size_t(side) * side * 4, 0);
+    const Picture &src = img.src;
+    const double scale = std::max(src.w, src.h) / double(side);  // source pixels per output pixel
+    const double ox = (side - src.w / scale) / 2, oy = (side - src.h / scale) / 2;
+    for (int y = 0; y < side; ++y)
+        for (int x = 0; x < side; ++x) {
+            const double sx0 = (x - ox) * scale, sy0 = (y - oy) * scale;
+            const int x0 = std::max(0, int(std::floor(sx0))), y0 = std::max(0, int(std::floor(sy0)));
+            const int x1 = std::min(src.w, int(std::ceil(sx0 + scale))), y1 = std::min(src.h, int(std::ceil(sy0 + scale)));
+            double r = 0, g = 0, b = 0, a = 0;
+            int count = 0;
+            for (int sy = y0; sy < y1; ++sy)
+                for (int sx = x0; sx < x1; ++sx) {
+                    const uint8_t *q = &src.px[(size_t(sy) * src.w + (mirror ? src.w - 1 - sx : sx)) * 4];
+                    const double qa = q[3] / 255.0;
+                    r += q[0] * qa, g += q[1] * qa, b += q[2] * qa, a += qa, ++count;
+                }
+            if (!count || a <= 0) continue;
+            uint8_t *o = &out.px[(size_t(y) * side + x) * 4];
+            o[0] = uint8_t(std::lround(r / a)), o[1] = uint8_t(std::lround(g / a)), o[2] = uint8_t(std::lround(b / a));
+            o[3] = uint8_t(std::lround(255 * a / count));
+        }
+    return out;
+}
+
+void DrawPicture(Picture &dst, const Picture &src, int x0, int y0) {
+    for (int y = 0; y < src.h; ++y)
+        for (int x = 0; x < src.w; ++x) {
+            const uint8_t *q = &src.px[(size_t(y) * src.w + x) * 4];
+            if (q[3]) Blend(dst, x0 + x, y0 + y, q[0] / 255.0, q[1] / 255.0, q[2] / 255.0, q[3] / 255.0);
+        }
+}
+
+// The where-to diagram's cells: a front view, 3 x 3, (column, row) from the top left.
+bool WhereCell(const std::string &pos, int &col, int &row) {
+    col = 1, row = 1;
+    if (pos == "left") col = 0;
+    else if (pos == "right") col = 2;
+    else if (pos == "up" || pos == "eye") row = 0;
+    else if (pos == "down" || pos == "desk") row = 2;
+    else if (pos != "centre" && pos != "center" && pos != "chest") return false;
+    return true;
+}
+
+const char *WhereLabel(const std::string &pos) {
+    if (pos == "left") return "To your left";
+    if (pos == "right") return "To your right";
+    if (pos == "up") return "Up high";
+    if (pos == "down") return "Down low";
+    if (pos == "chest") return "Chest height";
+    if (pos == "desk") return "Desk height";
+    if (pos == "eye") return "Eye level";
+    return "In front";
+}
+
+int DistanceStep(const std::string &dist) { return dist == "near" ? 0 : dist == "mid" ? 1 : dist == "far" ? 2 : -1; }
+
+const char *DistanceLabel(int k) { return k == 0 ? "Close" : k == 1 ? "Halfway out" : "Arm out"; }
+
+constexpr double kCyan[3] = {0.3, 0.85, 1.0};
+
+// The diagram in x0..x0+w, y0..y0+h: the front view on the left, the distance on the right
+// (or either alone, centred), each with its caption under it.
+void DrawWhere(Picture &pic, int x0, int y0, int w, int h, const std::string &pos, const std::string &dist) {
+    const double ppd = kPxPerDeg;
+    int col, row;
+    const bool grid = WhereCell(pos, col, row);
+    const int step = DistanceStep(dist);
+    const int parts = int(grid) + int(step >= 0);
+    if (!parts) return;
+    const int capSize = int(ppd * 0.75), capH = int(capSize * 1.6), partW = w / parts;
+    const int boxH = h - capH;
+    int px = x0;
+    if (grid) {
+        const int gw = std::min(partW - int(ppd * 0.6), boxH * 4 / 3), gh = gw * 3 / 4;
+        const int gx = px + (partW - gw) / 2, gy = y0 + (boxH - gh) / 2;
+        RoundRect(pic, gx, gy, gx + gw, gy + gh, ppd * 0.3, 1, 1, 1, 0.08);
+        for (int k = 1; k < 3; ++k) {
+            Rect(pic, gx + gw * k / 3 - 1, gy + 3, gx + gw * k / 3 + 1, gy + gh - 3, 1, 1, 1, 0.18);
+            Rect(pic, gx + 3, gy + gh * k / 3 - 1, gx + gw - 3, gy + gh * k / 3 + 1, 1, 1, 1, 0.18);
+        }
+        const int pad = std::max(3, int(ppd * 0.12));
+        RoundRect(pic, gx + gw * col / 3 + pad, gy + gh * row / 3 + pad, gx + gw * (col + 1) / 3 - pad,
+                  gy + gh * (row + 1) / 3 - pad, ppd * 0.18, kCyan[0], kCyan[1], kCyan[2], 0.9);
+        Text(pic, WhereLabel(pos), capSize, px + partW / 2, y0 + boxH + capH / 2, 0.85);
+        px += partW;
+    }
+    if (step >= 0) {
+        // Seen from the side: the head on the left, the arm's reach to the right, three marks.
+        const int cy = y0 + boxH / 2, head = int(ppd * 0.55);
+        const int hx = px + int(ppd * 0.4) + head, ax0 = hx + head + int(ppd * 0.3), ax1 = px + partW - int(ppd * 0.5);
+        Disc(pic, hx, cy, head, 0, 1, 1, 1, 0.75);
+        RoundRect(pic, hx + head / 3, cy - head / 2, hx + head + int(ppd * 0.2), cy + head / 3, 3, 0.25, 0.25, 0.28, 1);
+        Rect(pic, ax0, cy - 1, ax1, cy + 1, 1, 1, 1, 0.3);
+        for (int k = 0; k < 3; ++k) {
+            const double x = ax0 + (ax1 - ax0) * (k + 1) / 3.0;
+            if (k == step) Disc(pic, x, cy, ppd * 0.38, 0, kCyan[0], kCyan[1], kCyan[2], 0.95);
+            else Disc(pic, x, cy, ppd * 0.16, 0, 1, 1, 1, 0.45);
+        }
+        Text(pic, DistanceLabel(step), capSize, px + partW / 2, y0 + boxH + capH / 2, 0.85);
+    }
+}
+
 struct Panel {
     Picture pic{kW, kH, {}};
-    std::string title, step, text, note;
+    std::string title, step, text, note, action, big, keys;
     double countdown = -1;  // the share of the prompt's time left, or -1: off
     std::string hands[2] = {"off", "off"};
     bool barOn = false;
     double barTarget = 0, barCurrent = -1;
     std::string nearLabel = "Near", farLabel = "Far";
-    bool paused = false;
+    bool paused = false, rec = false;
+    Image image;                     // the pose picture, if image.path isn't empty
+    std::string imageMode;           // "", "mirror" or "both"
+    std::string wherePos, whereDist; // the diagram's, "" for none
     // What the last Draw laid out, for --no-vr's printout.
     std::vector<std::string> lines, noteLines;
     double textDeg = 0;
@@ -301,23 +452,34 @@ void Draw(Panel &p) {
     const double ppd = kPxPerDeg, faint = 0.75;
     const int margin = int(ppd * 1.6), width = kW - 2 * margin;
 
-    // The title and the step share the top line; a faint rule under them.
+    // The title and the step share the top line, a red "Rec" by the step while recording; a
+    // faint rule under them.
     int top = margin;
-    if (!p.title.empty() || !p.step.empty()) {
+    if (!p.title.empty() || !p.step.empty() || p.rec) {
         const int titleSize = int(ppd * 1.6), stepSize = int(ppd * 0.9), cy = margin + titleSize / 2;
         Text(pic, p.step, stepSize, kW - margin, cy, faint, kRight);
+        if (p.rec) {
+            const int rx = kW - margin - TextWidth(p.step, stepSize) - (p.step.empty() ? 0 : int(ppd * 0.8));
+            Text(pic, "Rec", stepSize, rx, cy, 1.0, 0.45, 0.4, kRight);
+            Disc(pic, rx - TextWidth("Rec", stepSize) - ppd * 0.45, cy, ppd * 0.25, 0, 0.95, 0.2, 0.15, 1);
+        }
         Text(pic, p.title, titleSize, margin, cy, 1.0, kLeft);
         top = cy + int(titleSize * 0.85);
         Rect(pic, margin, top, kW - margin, top + 2, 1, 1, 1, 0.15);
         top += int(ppd * 0.8);
     }
 
-    // From the bottom up: the countdown, the chips, the near/far bar. The instruction gets what's left.
-    int bottom = kH - margin;
+    // From the bottom up: the keys, the countdown, the chips, the near/far bar. The rest gets what's left.
+    int bottom = kH - margin, foot = kH - int(ppd * 0.9);
+    if (!p.keys.empty()) {
+        Text(pic, p.keys, int(ppd * 0.7), kW / 2, foot, 0.55);
+        foot -= int(ppd * 1.0);
+        bottom = std::min(bottom, foot - int(ppd * 0.4));
+    }
     if (p.countdown >= 0) {
-        const int y = kH - int(ppd * 0.9), th = std::max(4, int(ppd * 0.22));
+        const int y = foot, th = std::max(4, int(ppd * 0.22));
         Rect(pic, margin, y, kW - margin, y + th, 1, 1, 1, 0.15);
-        Rect(pic, margin, y, margin + int(std::lround(width * p.countdown)), y + th, 0.3, 0.85, 1.0, 0.95);
+        Rect(pic, margin, y, margin + int(std::lround(width * p.countdown)), y + th, kCyan[0], kCyan[1], kCyan[2], 0.95);
         bottom = std::min(bottom, y - int(ppd * 0.6));
     }
     if (p.hands[0] != "off" || p.hands[1] != "off") {
@@ -342,25 +504,72 @@ void Draw(Panel &p) {
         Text(pic, p.farLabel, labelSize, x1, ly, faint, kRight);
         const double ring = ppd * 0.65;
         Disc(pic, x0 + (x1 - x0) * p.barTarget, ty, ring, ring - ppd * 0.14, 1, 1, 1, 0.95);
-        if (p.barCurrent >= 0) Disc(pic, x0 + (x1 - x0) * p.barCurrent, ty, ppd * 0.4, 0, 0.3, 0.85, 1.0, 0.95);
+        if (p.barCurrent >= 0) Disc(pic, x0 + (x1 - x0) * p.barCurrent, ty, ppd * 0.4, 0, kCyan[0], kCyan[1], kCyan[2], 0.95);
         bottom = ty - int(ring) - int(ppd * 0.8);
     }
 
-    // The instruction, then the note, centred together in the space between. A long instruction
-    // gets smaller, down to 1 degree a line, before it runs over.
-    const int noteSize = int(ppd * 1.1), noteLh = int(noteSize * 1.3), noteGap = int(ppd * 0.6);
-    p.noteLines = Wrap(p.note, noteSize, width);
+    // The pose picture and the diagram in a column on the left, centred together; the text
+    // takes the rest. "both": the picture flipped (the left hand) beside it as it is.
+    int textX0 = margin, textX1 = kW - margin;
+    int col, row;
+    const bool imageOn = !p.image.path.empty();
+    const bool whereOn = WhereCell(p.wherePos, col, row) || DistanceStep(p.whereDist) >= 0;
+    if (imageOn || whereOn) {
+        const int colW = int(ppd * 14), gap = int(ppd * 0.6);
+        const int whereH = whereOn ? int(ppd * 4.4) : 0, between = imageOn && whereOn ? gap : 0;
+        const bool both = p.imageMode == "both";
+        const int side = imageOn ? std::max(0, std::min(both ? (colW - gap) / 2 : colW, bottom - top - whereH - between)) : 0;
+        int y = top + std::max(0, (bottom - top - side - between - whereH) / 2);
+        if (side > 0) {
+            const int pw = both ? 2 * side + gap : side, x = margin + (colW - pw) / 2;
+            RoundRect(pic, x - gap / 2, y - gap / 2, x + pw + gap / 2, y + side + gap / 2, ppd * 0.6, 1, 1, 1, 0.05);
+            if (both) {
+                DrawPicture(pic, Scaled(p.image, side, true), x, y);
+                DrawPicture(pic, Scaled(p.image, side, false), x + side + gap, y);
+            } else {
+                DrawPicture(pic, Scaled(p.image, side, p.imageMode == "mirror"), x, y);
+            }
+            y += side + between;
+        }
+        if (whereOn) DrawWhere(pic, margin, y, colW, whereH, p.wherePos, p.whereDist);
+        textX0 = margin + colW + int(ppd * 1.2);
+    }
+    const int textW = textX1 - textX0, textCx = (textX0 + textX1) / 2;
+
+    // The instruction, the note, the big countdown and the action line, centred together in
+    // the space between. A long instruction gets smaller, down to 1 degree a line, before it runs over.
+    const int noteSize = int(ppd * 1.1), noteLh = int(noteSize * 1.3), gapY = int(ppd * 0.6);
+    const int bigSize = int(ppd * 3.0), bigLh = int(bigSize * 1.1), actionSize = int(ppd * 1.05), actionLh = int(actionSize * 1.4);
+    p.noteLines = Wrap(p.note, noteSize, textW);
+    const std::vector<std::string> actionLines = Wrap(p.action, actionSize, textW);
     int size = 0, lh = 0, block = 0;
     for (p.textDeg = 1.4;; p.textDeg -= 0.1) {
         size = int(ppd * p.textDeg), lh = int(size * 1.3);
-        p.lines = Wrap(p.text, size, width);
-        block = int(p.lines.size()) * lh + (p.noteLines.empty() ? 0 : noteGap + int(p.noteLines.size()) * noteLh);
+        p.lines = Wrap(p.text, size, textW);
+        block = int(p.lines.size()) * lh + (p.noteLines.empty() ? 0 : gapY + int(p.noteLines.size()) * noteLh) +
+                (p.big.empty() ? 0 : gapY + bigLh) + (actionLines.empty() ? 0 : gapY + int(actionLines.size()) * actionLh);
         if (block <= bottom - top || p.textDeg < 1.05) break;
     }
     int y = top + std::max(0, (bottom - top - block) / 2);
-    for (const std::string &line : p.lines) Text(pic, line, size, kW / 2, y + lh / 2, 1.0), y += lh;
-    if (!p.noteLines.empty()) y += p.lines.empty() ? 0 : noteGap;
-    for (const std::string &line : p.noteLines) Text(pic, line, noteSize, kW / 2, y + noteLh / 2, 1.0, 0.62, 0.3), y += noteLh;
+    bool first = true;
+    auto gapBefore = [&] { if (!first) y += gapY; first = false; };
+    if (!p.lines.empty()) {
+        first = false;
+        for (const std::string &line : p.lines) Text(pic, line, size, textCx, y + lh / 2, 1.0), y += lh;
+    }
+    if (!p.noteLines.empty()) {
+        gapBefore();
+        for (const std::string &line : p.noteLines) Text(pic, line, noteSize, textCx, y + noteLh / 2, 1.0, 0.62, 0.3), y += noteLh;
+    }
+    if (!p.big.empty()) {
+        gapBefore();
+        Text(pic, p.big, bigSize, textCx, y + bigLh / 2, kCyan[0], kCyan[1], kCyan[2]), y += bigLh;
+    }
+    if (!actionLines.empty()) {
+        gapBefore();
+        for (const std::string &line : actionLines)
+            Text(pic, line, actionSize, textCx, y + actionLh / 2, kCyan[0], kCyan[1], kCyan[2]), y += actionLh;
+    }
 
     if (p.paused) {
         // The picture stays faintly behind, so it's clear what resumes; the word sits on a
@@ -432,6 +641,15 @@ void Print(const Panel &p, const Target &t, bool visible, int number) {
                     p.nearLabel.c_str(), p.farLabel.c_str());
     else std::printf("bar: off\n");
     std::printf("paused: %s\n", p.paused ? "on" : "off");
+    std::printf("big: %s\naction: %s\nkeys: %s\nrec: %s\n", p.big.c_str(), p.action.c_str(), p.keys.c_str(),
+                p.rec ? "on" : "off");
+    if (!p.image.path.empty())
+        std::printf("image: %s %dx%d%s%s\n", p.image.path.c_str(), p.image.src.w, p.image.src.h,
+                    p.imageMode.empty() ? "" : " ", p.imageMode.c_str());
+    else std::printf("image: off\n");
+    if (!p.wherePos.empty() || !p.whereDist.empty())
+        std::printf("where: %s %s\n", p.wherePos.empty() ? "-" : p.wherePos.c_str(), p.whereDist.empty() ? "-" : p.whereDist.c_str());
+    else std::printf("where: off\n");
     if (t.on)
         std::printf("target: %s %.2f, head %.3f %.3f %.3f, room %.3f %.3f %.3f\n", t.state.c_str(), t.progress, t.head[0],
                     t.head[1], t.head[2], t.room[0], t.room[1], t.room[2]);
@@ -805,6 +1023,43 @@ int main(int argc, char **argv) {
             } else if (Is(buf, "paused", &rest)) {
                 if (!std::strcmp(rest, "on") || !std::strcmp(rest, "off")) p.paused = rest[1] == 'n', dirty = true;
                 else reply = "error usage: paused on|off";
+            } else if (Is(buf, "rec", &rest)) {
+                if (!std::strcmp(rest, "on") || !std::strcmp(rest, "off")) p.rec = rest[1] == 'n', dirty = true;
+                else reply = "error usage: rec on|off";
+            } else if (Is(buf, "action", &rest)) {
+                p.action = rest, dirty = true;
+            } else if (Is(buf, "big", &rest)) {
+                p.big = rest, dirty = true;
+            } else if (Is(buf, "keys", &rest)) {
+                p.keys = rest, dirty = true;
+            } else if (Is(buf, "image", &rest)) {
+                // image <path> [mirror|both]: the path may hold spaces, the mode is the last word
+                std::string path = rest, mode;
+                for (const char *m : {" mirror", " both"}) {
+                    const size_t n = std::strlen(m);
+                    if (path.size() > n && !path.compare(path.size() - n, n, m)) mode = m + 1, path.resize(path.size() - n);
+                }
+                if (path.empty()) {
+                    reply = "error usage: image <path> [mirror|both] | image off";
+                } else if (path == "off") {
+                    p.image = Image{}, p.imageMode.clear(), dirty = true;
+                } else if (path != p.image.path && !LoadImage(p.image, path)) {
+                    reply = "error can't read " + path + ": " + stbi_failure_reason();
+                    p.imageMode.clear(), dirty = true;  // no picture rather than the last one
+                } else {
+                    p.imageMode = mode, dirty = true;
+                }
+            } else if (Is(buf, "where", &rest)) {
+                char pos[16] = "", dist[16] = "";
+                if (!std::strcmp(rest, "off")) {
+                    p.wherePos.clear(), p.whereDist.clear(), dirty = true;
+                } else if (std::sscanf(rest, "%15s %15s", pos, dist) >= 1) {
+                    p.wherePos = std::strcmp(pos, "-") ? pos : "";
+                    p.whereDist = *dist && std::strcmp(dist, "-") ? dist : "";
+                    dirty = true;
+                } else {
+                    reply = "error usage: where <position|-> <distance|-> | where off";
+                }
             } else if (Is(buf, "target", &rest)) {
                 char state[16] = "show";
                 double prog = 0;

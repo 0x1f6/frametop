@@ -6,8 +6,10 @@ A Kirigami (QML) app with a Python backend. It runs in the dev container:
     changes. Agreeing writes profile.json with a random contributor id.
   - Before you start: the checklist (objects, controller straps, lighting, sleeves, privacy,
     free space) and what will happen. Start hands it to the session runner (session.py).
-  - Session: the runner's live status, Start, Pause/Resume, Skip section and Stop (Space
-    pauses and Esc stops while the window has focus). The prompts appear in the headset.
+  - Session: the runner's live status with the step's pose picture and where-to diagram, Next,
+    Pause/Resume, Redo, Skip section and Stop (Space: Next, P, R, S and Esc while the window has
+    focus). The prompts appear in the headset. Each step waits for Next unless "Advance by
+    itself" was ticked.
   - Review: sessions, their takes, and a viewer for one frame set at a time, where ranges,
     takes and sessions can be deleted (takes.py).
   - Export: compress what's kept into exports/<session>/ at nice 19 (takes.py), with a warning
@@ -66,7 +68,7 @@ LIGHTING = [("dim", "Dim: one lamp only"), ("room", "Normal room light"), ("dayl
 SLEEVES = [("short", "Short sleeves or bare arms"), ("long", "Long sleeves"), ("", "Rather not say")]
 HANDEDNESS = [("", "Rather not say"), ("right", "Right-handed"), ("left", "Left-handed"),
               ("both", "Both (ambidextrous)")]
-ACTIVE_STATES = ("starting", "intro", "running", "paused", "between")
+ACTIVE_STATES = ("starting", "intro", "ready", "countdown", "running", "paused", "between")
 # Shown side by side in the viewer at this height; thumbnails are smaller.
 SET_HEIGHT = 480
 THUMB_HEIGHT = 96
@@ -210,7 +212,7 @@ class Backend(QObject):
     def __init__(self, store, session_options=None, hub_dry_run=False):
         super().__init__()
         self.store = store
-        self._session_options = session_options or {}  # test hooks for Session: dry_run, speed
+        self._session_options = session_options or {}  # test hooks for Session: dry_run, speed, poses_dir
         self._hub_dry_run = hub_dry_run
         self._login = {"state": "dry" if hub_dry_run else "unknown"}
         self._login_busy = False
@@ -384,8 +386,21 @@ class Backend(QObject):
     def sessionId(self):
         return self._session_id
 
-    @Slot("QVariantMap", str, result=bool)
-    def startSession(self, checklist, lighting):
+    @Slot("QVariantMap", bool, result=str)
+    def planText(self, checklist, auto):
+        """How long a session with these answers takes (session.plan_summary)."""
+        mod = self._runner()
+        if not mod:
+            return ""
+        try:
+            script = mod.load_script(SCRIPT_PATH)
+            plan, _ = mod.build_plan(script, dict(checklist))
+            return mod.plan_summary(script, plan, auto=auto)
+        except Exception as e:
+            return f"Couldn't read the script: {e}"
+
+    @Slot("QVariantMap", str, bool, result=bool)
+    def startSession(self, checklist, lighting, auto):
         if self.sessionActive:
             return False
         mod = self._runner()
@@ -400,7 +415,7 @@ class Backend(QObject):
         checklist["own_objects"] = [o.strip() for o in checklist.get("own_objects", []) if str(o).strip()]
         try:
             self._session = mod.Session(self.store.base, self.store.profile(), checklist, lighting, SCRIPT_PATH,
-                                        on_status=lambda s: self._statusArrived.emit(dict(s)),
+                                        on_status=lambda s: self._statusArrived.emit(dict(s)), auto=auto,
                                         **self._session_options)
         except Exception as e:
             self.message.emit(f"Couldn't set up the session: {e}", True)
@@ -433,6 +448,16 @@ class Backend(QObject):
             getattr(self._session, name)()
         except Exception as e:
             self.message.emit(f"{name}: {e}", True)
+
+    @Slot()
+    def nextStep(self):
+        if self.sessionActive and self._status.get("waiting"):
+            self._control("next_step")
+
+    @Slot()
+    def redo(self):
+        if self.sessionActive and self._status.get("can_redo"):
+            self._control("redo")
 
     @Slot()
     def togglePause(self):
@@ -897,6 +922,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="test: sessions start no processes and print the panel's commands")
     ap.add_argument("--speed", type=float, default=1.0, help="test, with --dry-run: run sessions this much faster")
+    ap.add_argument("--poses", help="test: the pose pictures' folder (default hands/rec/poses)")
     ap.add_argument("--hub-dry-run", action="store_true",
                     help="test: Upload checks the export and says what it would send, with no network calls")
     a, qt_args = ap.parse_known_args()
@@ -910,7 +936,10 @@ def main():
     store = takes.Store(a.base)
     engine = QQmlApplicationEngine()
     engine.addImageProvider("frames", FrameProvider(store))
-    backend = Backend(store, {"dry_run": True, "speed": a.speed} if a.dry_run else {}, hub_dry_run=a.hub_dry_run)
+    options = {"dry_run": True, "speed": a.speed} if a.dry_run else {}
+    if a.poses:
+        options["poses_dir"] = a.poses
+    backend = Backend(store, options, hub_dry_run=a.hub_dry_run)
     app.aboutToQuit.connect(backend.shutdown)
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("startPage", a.page)
