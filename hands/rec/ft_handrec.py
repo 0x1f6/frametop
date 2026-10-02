@@ -8,8 +8,8 @@ A Kirigami (QML) app with a Python backend. It runs in the dev container:
     free space) and what will happen. Start hands it to the session runner (session.py).
   - Session: the runner's live status with the step's pose picture and where-to diagram, Next,
     Pause/Resume, Redo, Skip section and Stop (Space: Next, P, R, S and Esc while the window has
-    focus). The prompts appear in the headset. Each step waits for Next unless "Advance by
-    itself" was ticked.
+    focus; the button on the headset's right side is Next, pause and resume). The prompts appear
+    in the headset. Each step waits for Next unless "Advance by itself" was ticked.
   - Review: sessions, their takes, and a viewer for one frame set at a time, where ranges,
     takes and sessions can be deleted (takes.py).
   - Export: compress what's kept into exports/<session>/ at nice 19 (takes.py), with a warning
@@ -212,7 +212,7 @@ class Backend(QObject):
     def __init__(self, store, session_options=None, hub_dry_run=False):
         super().__init__()
         self.store = store
-        self._session_options = session_options or {}  # test hooks for Session: dry_run, speed, poses_dir
+        self._session_options = session_options or {}  # Session options: dry_run, speed, poses_dir (tests), button
         self._hub_dry_run = hub_dry_run
         self._login = {"state": "dry" if hub_dry_run else "unknown"}
         self._login_busy = False
@@ -923,6 +923,8 @@ def main():
                     help="test: sessions start no processes and print the panel's commands")
     ap.add_argument("--speed", type=float, default=1.0, help="test, with --dry-run: run sessions this much faster")
     ap.add_argument("--poses", help="test: the pose pictures' folder (default hands/rec/poses)")
+    ap.add_argument("--no-headset-button", action="store_true",
+                    help="sessions don't read the headset's button (Next, pause, resume)")
     ap.add_argument("--hub-dry-run", action="store_true",
                     help="test: Upload checks the export and says what it would send, with no network calls")
     a, qt_args = ap.parse_known_args()
@@ -939,6 +941,8 @@ def main():
     options = {"dry_run": True, "speed": a.speed} if a.dry_run else {}
     if a.poses:
         options["poses_dir"] = a.poses
+    if a.no_headset_button:
+        options["button"] = False
     backend = Backend(store, options, hub_dry_run=a.hub_dry_run)
     app.aboutToQuit.connect(backend.shutdown)
     engine.rootContext().setContextProperty("backend", backend)

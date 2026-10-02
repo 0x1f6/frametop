@@ -717,6 +717,18 @@ def project(cam, W, ss, p):
     return ((q[0] - cam["center"][0]) / s + W * ss / 2, (cam["center"][1] - q[1]) / s + W * ss / 2)
 
 
+def draw_labels(img, labels, cam, W, ss):
+    """Short text labels at world points, light with a dark edge (Pillow's built-in font)."""
+    dr = ImageDraw.Draw(img)
+    sc = ss * W / 512
+    font = ImageFont.load_default(size=int(round(42 * sc)))
+    for lb in labels:
+        x, y = project(cam, W, ss, lb["at"])
+        dr.text((x, y), lb["text"], font=font, anchor=lb.get("anchor", "mm"), fill=(232, 235, 240, 255),
+                stroke_width=int(round(4 * sc)), stroke_fill=ACCENT_DARK + (255,))
+    return img
+
+
 def draw_arrows(arrows, cam, W, ss):
     img = Image.new("RGBA", (W * ss, W * ss), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
@@ -801,6 +813,9 @@ def fit(spec, W):
         for p in a["pts"]:
             q = cam["R"] @ V(*p)
             pts.append((q[0], q[1]))
+    for lb in spec.get("labels", []):  # rough text extent: about 2 cm per side
+        q = cam["R"] @ V(*lb["at"])
+        pts += [(q[0] - lb.get("half", 3.0), q[1] - 1.5), (q[0] + lb.get("half", 3.0), q[1] + 1.5)]
     pts = np.array(pts)
     x0, y0 = pts.min(0)
     x1, y1 = pts.max(0)
@@ -828,8 +843,10 @@ def render_pose(spec, W=512, ss=2):
         else:
             lrgb, la = ink(buf, ss * W / 512)
         rgb, a = over(rgb, a, lrgb, la)
-    if spec.get("arrows"):
-        arr = np.asarray(draw_arrows(spec["arrows"], cam, W, ss), float) / 255
+    if spec.get("arrows") or spec.get("labels"):
+        im = draw_arrows(spec.get("arrows", []), cam, W, ss)
+        im = draw_labels(im, spec.get("labels", []), cam, W, ss)
+        arr = np.asarray(im, float) / 255
         aa = arr[..., 3]
         rgb, a = over(rgb, a, arr[..., :3] * aa[..., None], aa)
     # downsample (premultiplied box filter)
@@ -950,6 +967,27 @@ def stick_top(hand):
 def with_ctrl(hand):
     """Controller objects placed in a hand's frame."""
     return ctrl_parts(hand.M, hand.t)
+
+
+def ctrl_open_parts(hand):
+    """The controller on an open hand, held on by its strap (hand local, then moved with the hand):
+    the body lies against the palm from the heel up to the base of the thumb, the head sits
+    by the thumb, the strap crosses the back of the hand, and the fingers stay free."""
+    a, b = V(-1.7, 1.4, 3.5), V(1.9, 7.4, 3.4)
+    ax = unit(b - a)
+    grip = Cone(a, b, 1.45, 1.6)
+    head_c = b + ax * 1.7 + V(0.8, 0.0, 0.5)
+    head = Ell(head_c, orient(ax, (0.3, 0, 1)), (2.3, 1.9, 1.9))
+    up = unit((0.3, 0.3, 1.0))
+    sb = head_c + up * 1.75
+    stick = U([Cone(sb - up * 0.4, sb + up * 0.6, 0.36, 0.36),
+               Cyl(sb + up * 0.75, orient(up, (1, 0, 0)), 0.78, 0.2, 0.12)])
+    band = Box((0.0, 4.4, -2.2), orient(ax, (0, 0, 1)), (0.95, 3.8, 0.1), 0.18)
+    ends = [Cone((-1.7, 0.9, -2.15), (-3.9, 1.3, 0.2), 0.3, 0.3), Cone((-3.9, 1.3, 0.2), (-2.0, 1.4, 2.6), 0.3, 0.3),
+            Cone((1.7, 7.9, -2.15), (3.9, 7.6, 0.2), 0.3, 0.3), Cone((3.9, 7.6, 0.2), (2.2, 7.4, 2.6), 0.3, 0.3)]
+    M, t = hand.M, hand.t
+    return [Obj(U([grip, head], 0.9), (0.5, 0.54, 0.6), 1).xf(M, t), Obj(stick, (0.3, 0.32, 0.37), 2).xf(M, t),
+            Obj(U([band] + ends, 0.25), (0.36, 0.38, 0.43), 3).xf(M, t)]
 
 
 def keyboard(c=(0, 0, 0), nx=14, nz=5):
@@ -1085,14 +1123,36 @@ def spec_touch_stick_desk(f=(-1, -0.8, 0), p=(0, -1, -0.3)):
     return dict(cam=cam(25), layers=[L(*objs, rh)])
 
 
+def head_and_headset(R=np.eye(3)):
+    """The wearer's head with a headset on, facing -z (the head's local frame), as two objects."""
+    head = Ell((0, 0, 0), np.eye(3), (7.6, 10.2, 8.8))
+    nose = Cone((0, -1.5, -8.2), (0, -3.6, -9.6), 0.7, 0.9)
+    visor = Box((0, 2.4, -6.5), np.eye(3), (8.2, 2.6, 2.6), 1.4)
+    band = Torus((0, 3.0, 0.5), Rx(8), 8.0, 0.9)
+    z = V(0, 0, 0)
+    return [Obj(U([head, nose], 0.6), (0.5, 0.53, 0.58), 8).xf(R, z),
+            Obj(U([visor, band], 0.4), (0.36, 0.38, 0.43), 9).xf(R, z)]
+
+
+def push_hand(pose, z, controllers=False):
+    """A right hand pushed out in front of the face (forward is -z), palm out, arm reaching back."""
+    fwd = unit((0, 0.42, -1))                      # the forearm points forward and a little up
+    R = orient(fwd, unit(np.cross(fwd, (1, 0, 0))))  # palm down along the arm
+    h = Hand(dict(pose, wrist=(-66, 0)), R, (3.0, -17.0, z), arm=15)  # wrist bent back: fingers up
+    return [h] + (ctrl_open_parts(h) if controllers else [])
+
+
 def push_spec(controllers=False):
-    R = BACK
-    main = H(RELAX if not controllers else CTRL_GRIP, R, (0, 0, 0))
-    ghost = H(RELAX if not controllers else CTRL_GRIP, R, (0, 0, -16))
-    lm = [main] + (with_ctrl(main) if controllers else [])
-    lg = [ghost] + (with_ctrl(ghost) if controllers else [])
-    return dict(cam=cam(18, 50), layers=[L(*lg, ghost=0.45), L(*lm)],
-                arrows=[dict(pts=seg((-4.5, 21, -1), (-4.5, 21, -15)), heads="both")])
+    pose = FLAT  # open hand, palm out; with controllers the strap holds the controller on
+    near, far = -21.0, -44.0
+    eye = V(0, 2.4, -10.5)
+    tip_y = 0.0
+    return dict(cam=cam(4, 65), scale=0.11,
+                layers=[L(*push_hand(pose, far, controllers), ghost=0.45),
+                        L(*head_and_headset(), *push_hand(pose, near, controllers))],
+                arrows=[dict(pts=seg(eye + V(0, tip_y, -1.0), V(0, eye[1] + tip_y, far - 7.0)), heads="both")],
+                labels=[dict(at=(0, eye[1] + tip_y + 4.2, near - 1.0), text="near", half=4.0),
+                        dict(at=(0, eye[1] + tip_y + 4.2, far - 2.0), text="arm out", half=7.0)])
 
 
 def ghost_pair(main_pose, ghost_pose, R, cam_, arrows, ghost_alpha=0.45, **kw):
@@ -1237,8 +1297,9 @@ POSES = {
     "mouse": ("Hand on the mouse, move and click", False, spec_mouse),
     "switch": ("Switch between keyboard and mouse", True, spec_switch),
     "hold": ("Pick it up, use it, put it down", True, spec_hold),
-    "push": ("Palms out, push out and back", False, lambda: push_spec(False)),
-    "push-controller": ("Controller on, push out and back", False, lambda: push_spec(True)),
+    "push": ("Push straight out, away from the headset, and back", True, lambda: push_spec(False)),
+    "push-controller": ("Controllers on: push straight out from the headset, and back", True,
+                        lambda: push_spec(True)),
     "touch-stick": ("Touch the thumbstick with your other index", True, spec_touch_stick),
     "touch-stick-desk": ("Touch the thumbstick of the controller on the desk", True, spec_touch_stick_desk),
     "no-hands": ("Hands down, out of view", False, spec_no_hands),

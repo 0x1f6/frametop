@@ -3,7 +3,7 @@
  "intro_s": 4,
  "between_s": 3,
  "welcome": {"title": "Hand recorder", "seconds": 7,
-  "text": "Follow the steps on this panel. Each one shows what to do with your hands, and where. A bar shows the time left."},
+  "text": "Follow the steps on this panel. Each one shows what to do with your hands, and where. A bar shows the time left.|The button on the right side of the headset goes on when a step waits for you, and pauses while recording."},
  "done": {"title": "All done", "seconds": 6,
   "text": "Thank you! You can take off the headset.|Review your recordings in the Hand recorder window."},
  "stopped": {"title": "Stopped", "seconds": 4,
@@ -118,15 +118,15 @@
 
   {"id": "controller-push", "title": "Depth with controllers", "kind": "bar", "requires": ["controllers"],
    "before": {"text": "Put on both controllers and tighten the straps. Take your time.", "seconds": 25},
-   "intro": "Follow the marker on the bar with both hands: out as it moves right, back as it moves left.",
+   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. The marker on the bar shows how far: right is arm out, left is at your chest.",
    "defaults": {"hands": "both", "pose": "open", "picture": "push-controller", "controller": true, "controllers": ["left", "right"]},
-   "near_m": 0.2, "far_m": 0.6, "period_s": 6, "lead_s": 3, "reps": 5,
+   "near_m": 0.2, "far_m": 0.6, "near_label": "At your chest", "far_label": "Arm out", "period_s": 6, "lead_s": 3, "reps": 5,
    "heights": [
-    {"id": "chest", "text": "Chest height: hands open, palms out like a stop sign. Push out and back with the marker."},
-    {"id": "desk", "text": "Now at desk height, palms out. Push out and back with the marker."},
-    {"id": "eye", "text": "Now at eye level, palms out. Push out and back with the marker."},
-    {"id": "left", "text": "Now off to your left side. Push out and back with the marker.", "reps": 2},
-    {"id": "right", "text": "Now off to your right side. Push out and back with the marker.", "reps": 2}
+    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the marker."},
+    {"id": "desk", "text": "Now at desk height, palms out. Push straight out, away from you, then pull back toward you. Follow the marker."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the marker."},
+    {"id": "left", "text": "Now hold both hands off to your left. From there, push straight out and pull back toward you, not sideways. Follow the marker.", "reps": 2},
+    {"id": "right", "text": "Now hold both hands off to your right. From there, push straight out and pull back toward you, not sideways. Follow the marker.", "reps": 2}
    ],
    "prompts": [
     {"text": "Slowly turn your wrists: palms out, palms toward you, and back.", "seconds": 10, "pose": "turn-in-out", "distance": "mid"},
@@ -154,15 +154,15 @@
 
   {"id": "bare-push", "title": "Depth, bare hands", "kind": "bar", "requires": [],
    "before": {"when": "controllers", "text": "Take the controllers off and put them out of view.", "seconds": 15},
-   "intro": "Follow the marker on the bar with both hands: out as it moves right, back as it moves left.",
+   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. The marker on the bar shows how far: right is arm out, left is at your chest.",
    "defaults": {"hands": "both", "pose": "open", "picture": "push"},
-   "near_m": 0.2, "far_m": 0.6, "period_s": 6, "lead_s": 3, "reps": 4,
+   "near_m": 0.2, "far_m": 0.6, "near_label": "At your chest", "far_label": "Arm out", "period_s": 6, "lead_s": 3, "reps": 4,
    "heights": [
-    {"id": "chest", "text": "Chest height: hands open, palms out like a stop sign. Push out and back with the marker."},
-    {"id": "desk", "text": "Now at desk height, palms out. Push out and back with the marker."},
-    {"id": "eye", "text": "Now at eye level, palms out. Push out and back with the marker."},
-    {"id": "left", "text": "Now off to your left side. Push out and back with the marker.", "reps": 2},
-    {"id": "right", "text": "Now off to your right side. Push out and back with the marker.", "reps": 2}
+    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the marker."},
+    {"id": "desk", "text": "Now at desk height, palms out. Push straight out, away from you, then pull back toward you. Follow the marker."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the marker."},
+    {"id": "left", "text": "Now hold both hands off to your left. From there, push straight out and pull back toward you, not sideways. Follow the marker.", "reps": 2},
+    {"id": "right", "text": "Now hold both hands off to your right. From there, push straight out and pull back toward you, not sideways. Follow the marker.", "reps": 2}
    ],
    "prompts": [
     {"text": "Slowly turn your wrists: palms out, palms toward you, and back.", "seconds": 10, "pose": "turn-in-out", "distance": "mid"},

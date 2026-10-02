@@ -10,8 +10,10 @@ import os
 import shutil
 import sys
 import tempfile
+import struct
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -32,7 +34,9 @@ SCRIPT = {
                      {"text": "Open.", "seconds": 4, "hands": "both", "pose": "open"}]}]}
 
 
-class SessionTest(unittest.TestCase):
+class SessionBase(unittest.TestCase):
+    """Dry-run sessions of SCRIPT, steered from the test."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="handrec-session-test-")
         self.script = os.path.join(self.tmp, "script.json")
@@ -67,6 +71,9 @@ class SessionTest(unittest.TestCase):
         with open(os.path.join(s.session_dir, "takes", "01-poses", "prompts.jsonl")) as f:
             return [json.loads(line) for line in f]
 
+
+
+class SessionTest(SessionBase):
     def test_step_flow(self):
         s = self.session(next_after=0.0)
         s.start()
@@ -195,6 +202,192 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(session.plan_seconds(SCRIPT, plan, auto=False), 2 * session.COUNTDOWN_S + 8)
         self.assertEqual(session.plan_seconds(SCRIPT, plan, auto=True), 1 + 1 + 8)
         self.assertIn("2 steps", session.plan_summary(SCRIPT, plan))
+
+
+# /proc/bus/input/devices as the Frame has it (2026-10-02), trimmed, plus a USB mouse.
+DEVICES = """I: Bus=0019 Vendor=0001 Product=0001 Version=0100
+N: Name="gpio-keys"
+P: Phys=gpio-keys/input0
+S: Sysfs=/devices/platform/gpio-keys/input/input3
+U: Uniq=
+H: Handlers=kbd kbd event3 qcom_pon_combo_timer_listener 
+B: PROP=0
+B: EV=3
+B: KEY=100000000000 0 0 0 0 200000000 0 0 0 0 0
+
+I: Bus=0006 Vendor=4d44 Product=0001 Version=0001
+N: Name="frametop virtual mouse"
+P: Phys=
+S: Sysfs=/devices/virtual/input/input4
+U: Uniq=
+H: Handlers=event4 qcom_pon_combo_timer_listener 
+B: PROP=0
+B: EV=7
+B: KEY=ffffff 0 0 0 0
+B: REL=ffff
+
+I: Bus=0003 Vendor=0001 Product=0001 Version=0001
+N: Name="frame-voice keyboard"
+P: Phys=py-evdev-uinput
+S: Sysfs=/devices/virtual/input/input7
+U: Uniq=
+H: Handlers=kbd sysrq kbd event7 qcom_pon_combo_timer_listener 
+B: PROP=0
+B: EV=200003
+B: KEY=1ffffffffffffff ffffffffffffffff ffffffffffffffff fffffffffffffffe
+
+I: Bus=0005 Vendor=214e Product=0035 Version=0001
+N: Name="Z3 Keyboard"
+P: Phys=90:82:c3:5f:4a:a7
+S: Sysfs=/devices/virtual/misc/uhid/0005:214E:0035.0005/input/input27
+U: Uniq=da:ef:2f:d2:be:e2
+H: Handlers=kbd sysrq kbd event9 qcom_pon_combo_timer_listener 
+B: PROP=0
+B: EV=10001f
+B: KEY=300000000000 33eff 0 0 483ffff17aff32d bfd4444600000000 1 130ff38b17c007 ffff7bfad9415fff feb2ffdfffefffff fffffffffffffffe
+B: REL=1040
+B: MSC=10
+"""
+BT_MOUSE = """
+I: Bus=0005 Vendor=214e Product=0035 Version=0001
+N: Name="Z3 Mouse"
+P: Phys=90:82:c3:5f:4a:a7
+S: Sysfs=/devices/virtual/misc/uhid/0005:214E:0035.0005/input/input26
+U: Uniq=da:ef:2f:d2:be:e2
+H: Handlers=event8 qcom_pon_combo_timer_listener 
+B: PROP=0
+B: EV=17
+B: KEY=ffff0000 0 0 0 0
+B: REL=1943
+B: MSC=10
+"""
+USB_MOUSE = """
+I: Bus=0003 Vendor=046d Product=c077 Version=0111
+N: Name="Logitech USB Optical Mouse"
+P: Phys=usb-xhci-hcd.1.auto-1/input0
+S: Sysfs=/devices/platform/soc@0/a600000.usb/xhci-hcd.1.auto/usb1/1-1/1-1:1.0/0003:046D:C077.0001/input/input40
+U: Uniq=
+H: Handlers=mouse0 event13
+B: PROP=0
+B: EV=17
+B: KEY=70000 0 0 0 0
+B: REL=903
+B: MSC=10
+"""
+
+
+def event(etype, code, value):
+    return session.INPUT_EVENT.pack(1, 2, etype, code, value)
+
+
+PRESS = event(session.EV_KEY, session.KEY_SELECT, 1) + event(0, 0, 0)
+RELEASE = event(session.EV_KEY, session.KEY_SELECT, 0) + event(0, 0, 0)
+
+
+class InputTest(unittest.TestCase):
+    def test_devices(self):
+        devs = session.parse_input_devices(DEVICES)
+        self.assertEqual([d["name"] for d in devs], ["gpio-keys", "frametop virtual mouse", "frame-voice keyboard",
+                                                     "Z3 Keyboard"])
+        self.assertEqual(session.find_button(devs), "/dev/input/event3")
+        self.assertFalse(any(session.real_mouse(d) for d in devs))   # the virtual mouse, keyboards with wheels
+        for extra, name in ((BT_MOUSE, "Z3 Mouse"), (USB_MOUSE, "Logitech USB Optical Mouse")):
+            mice = [d["name"] for d in session.parse_input_devices(DEVICES + extra) if session.real_mouse(d)]
+            self.assertEqual(mice, [name])
+        # another gpio-keys without KEY_SELECT isn't the button
+        self.assertIsNone(session.find_button(session.parse_input_devices(DEVICES.replace("200000000", "0"))))
+
+    def test_presses(self):
+        data = (PRESS + event(session.EV_KEY, session.KEY_SELECT, 2) * 3   # autorepeat: not presses
+                + RELEASE + event(session.EV_KEY, 115, 1) + PRESS)        # another key
+        self.assertEqual(session.button_presses(data), (2, b""))
+        n, rest = session.button_presses(PRESS + PRESS[:10])
+        self.assertEqual((n, rest), (1, PRESS[:10]))   # half an event waits for the rest
+        self.assertEqual(session.button_presses(rest + PRESS[10:])[0], 1)
+
+    def test_reader_fifo(self):
+        tmp = tempfile.mkdtemp(prefix="handrec-button-test-")
+        try:
+            fifo = os.path.join(tmp, "button")
+            os.mkfifo(fifo)
+            presses = []
+            reader = session.ButtonReader(fifo, lambda: presses.append(time.monotonic()), debounce_s=0.3).start()
+            with open(fifo, "wb", buffering=0) as w:
+                w.write(PRESS + RELEASE)
+                w.write(PRESS[:7])                       # a press split across writes, a bounce
+                time.sleep(0.05)
+                w.write(PRESS[7:] + RELEASE)
+                time.sleep(0.4)
+                w.write(PRESS + RELEASE)
+                time.sleep(0.2)
+            with open(fifo, "wb", buffering=0) as w:     # the writer comes back: read again
+                time.sleep(0.4)
+                w.write(PRESS)
+                time.sleep(0.3)
+            reader.stop()
+            self.assertEqual(len(presses), 3)
+            self.assertTrue(reader.ok)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_device(self):
+        logs = []
+        reader = session.ButtonReader("/nonexistent/event99", lambda: None, log=logs.append).start()
+        time.sleep(0.1)
+        reader.stop()
+        self.assertFalse(reader.ok)
+        self.assertIn("can't open", logs[0])
+
+
+class ButtonSessionTest(SessionBase):
+    """A dry run steered with a simulated headset button (a FIFO), with no mouse, then one."""
+
+    def test_button(self):
+        fifo = os.path.join(self.tmp, "button")
+        os.mkfifo(fifo)
+        procfile = os.path.join(self.tmp, "devices")
+        with open(procfile, "w") as f:
+            f.write(DEVICES)
+        writer = os.open(fifo, os.O_RDWR)   # kept open, so the reader never sees the end
+        press = lambda: os.write(writer, PRESS + RELEASE)
+        try:
+            with mock.patch.object(session, "BUTTON_DEBOUNCE_S", 0.0):
+                s = self.session(speed=4, button_device=fifo)
+                s.input_devices = procfile
+                s.start()
+                st = self.waiting(s, "starting")
+                self.assertEqual((st["button"], st["mouse"], st["ready_text"]), (True, False, session.READY_BUTTON))
+                self.assertIn("panel: action " + session.READY_BUTTON, self.panel)
+                self.assertIn("panel: keys " + session.KEYS_STEP_BUTTON, self.panel)
+                press()
+                self.waiting(s, "intro")
+                press()
+                self.waiting(s, "ready", "Fist.")
+                press()                                       # Next
+                self.wait_for(s, lambda st: st["state"] == "running", "the hold")
+                press()                                       # pause
+                self.wait_for(s, lambda st: st["state"] == "paused", "paused")
+                with open(procfile, "a") as f:                # a mouse arrives
+                    f.write(BT_MOUSE)
+                press()                                       # resume
+                st = self.waiting(s, "ready", "Open.")
+                self.assertEqual((st["mouse"], st["ready_text"]), (True, session.READY_BUTTON_MOUSE))
+                press()
+                s.join(20)
+            self.assertEqual(s.state, "done")
+            names = [e["event"] for e in self.events(s)]
+            self.assertEqual(names, ["take", "ready", "prompt", "pause", "resume", "wait", "ready", "prompt", "wait",
+                                     "end"])
+        finally:
+            os.close(writer)
+
+    def test_no_button(self):
+        s = self.session(next_after=0.0, button=False, button_device="/nonexistent")
+        s.start()
+        s.join(20)
+        self.assertEqual(s.state, "done")
+        self.assertIn("panel: action " + session.READY_TEXT, self.panel)
+        self.assertIn("panel: keys " + session.KEYS_STEP, self.panel)
 
 
 class ManyPartsTest(unittest.TestCase):

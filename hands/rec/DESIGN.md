@@ -28,12 +28,14 @@ Every part runs in the dev container, as ft-hands and Input Settings do. The hos
 - **A recording ft-hands** runs once per recording part: `ft-hands --record-only --record DIR --record-for SECONDS --record-hz 10 --status 0`. It runs as a plain child process of the session, ended with SIGTERM when the part ends. SIGTERM ends ft-hands' loop, and `Recorder` writes out its queue when it's destroyed. In step mode (below) a part is one step's countdown and hold, so a take has one part per step (about 40 in the hand poses); in auto mode a take is one part, plus one more after each pause. `--record-for` is only a safety net.
   - Why a process per part rather than one kept alive and paused: measured in the dev container with `ft-ringplay`'s ring (2026-10-02), `ft-hands --record-only` writes its first set 16-27 ms after it starts and ends 4-6 ms after SIGTERM, so a new part costs nothing the 3 s countdown doesn't cover. Every reader already takes parts in order (`takes.py`, `validate.py` through the export's single stream, the labeller's `fhl_io.py`, numbering `sets-10.bin` after `sets-9.bin`), ft-hands needs no new control, and nothing is written while a step waits. Before the hold starts the session checks that the part has written a set (`Recorder.has_data`, up to 3 s more), so the hold is recorded from its first frame.
 - **ft-handpanel** runs as a child process with `--watch-stdin`. It shows the panel and logs poses during each take.
+- **The headset button's reader** is a thread of the session (`ButtonReader`, below), not a process.
 
 Test hooks:
 - `--ring PATH` goes to both ft-hands (`ft-ringplay` publishes a recording there, so the whole flow runs without the headset).
 - `--no-start` uses only what's already running.
 - `--dry-run` runs no processes and only prints the panel commands, with timing sped up by `--speed X`.
 - `--next-after S` presses Next by itself after S seconds of waiting (real time), so a step-mode session runs unattended. Lines on stdin steer it too: `n` or an empty line is Next, `p` pause or resume, `r` redo, `s` skip the section, `q` stop.
+- `--no-headset-button` leaves the headset's button alone (`ft-handrec --no-headset-button` too). `--button-device PATH` reads it from PATH instead, an event device or a FIFO of `input_event` structs, also in a dry run: a simulated button for tests.
 - `--auto` runs the timed flow; `--poses DIR` takes the pose pictures from DIR; `--plan` prints the sections, their steps and length.
 
 ## Files
@@ -212,7 +214,7 @@ A pose with no entry, or whose file is missing, shows no picture: the text alone
 
 The first in-headset session (2026-10-02) went too fast: each prompt advanced after 4-8 s, before there was time to read it and find the hand shape. So by default every step waits:
 
-1. **Ready.** The panel shows the step: section title, "step N of M", the instruction, the pose picture, the where-to diagram, and "Ready? Press Space or click Next". The hand chips show which hands are seen, with no warnings yet. It waits as long as it takes, and nothing records.
+1. **Ready.** The panel shows the step: section title, "step N of M", the instruction, the pose picture, the where-to diagram, and the Next hint ("Ready? Press the button on the right side of the headset", or with a mouse also Space and Next: see Controls). The hand chips show which hands are seen, with no warnings yet. It waits as long as it takes, and nothing records.
 2. **Countdown.** Next starts a new recording part and a "ready" event, and the panel counts 3, 2, 1 (big), recorded so the hold is captured from its first frame. In the push sections the bar sits at near meanwhile.
 3. **Hold.** The `prompt` event, the section's word ("Hold" or "Go") and the time-left bar for the prompt's seconds (or the bar's sweeps, or the targets). Then a `wait` event and the part stops.
 
@@ -230,7 +232,7 @@ The sections, in this order (see the plan):
 5. desk work (typing, mouse)
 6. objects (one prompt per ticked object, own objects included)
 7. touch the dot
-8. controller depth, straps (push out and back at 3 heights and to each side, wrist turns, open and close)
+8. controller depth, straps (push out and back at 3 heights and to each side, wrist turns, open and close). "Out and back" is straight away from the headset and back toward it: the first in-headset session took the left-right bar for sideways. The texts say so, the bar's ends read "At your chest" and "Arm out" (`near_label`, `far_label`, sent as `bar ... At your chest|Arm out`), and the picture is a side view.
 9. bridge (one controller on, the bare fingertip touches the marked point on it at near, mid and far, then swap; then a controller on the desk, touched from several angles)
 10. bare repeat of section 8, controllers off
 11. no hands (10 s)
@@ -245,7 +247,12 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
 
 ### Controls
 
-- The window has Start, a big Next (while a step waits), Pause/Resume, Redo step, Skip section and Stop. While it has focus: Space is Next, P pauses or resumes, R redoes, S skips the section, Esc stops. The panel's bottom line and the window list them. The window also shows the step's picture, diagram, countdown and "Hold".
+- The window has Start, a big Next (while a step waits; its hint is the panel's), Pause/Resume, Redo step, Skip section and Stop. While it has focus: Space is Next, P pauses or resumes, R redoes, S skips the section, Esc stops. The panel's bottom line and the window list them. The window also shows the step's picture, diagram, countdown and "Hold".
+- **The headset's button.** The Frame has a click button on its right side, for use without controllers: `KEY_SELECT` (353) on the evdev device `gpio-keys`. While a step waits (the welcome, a section's intro, a step's ready screen) a press is Next; during a countdown or hold (and auto mode's timed screens) it pauses; while paused it resumes. The session finds the device in `/proc/bus/input/devices` by name and its KEY bitmap (`event3` on the maintainer's Frame) and reads `input_event` structs with plain `struct` (no python-evdev), from a thread. Only key-downs count (value 1: releases and autorepeat, value 2, don't), and presses closer than 0.3 s count once.
+  - It's read, never grabbed (`EVIOCGRAB`). Frametop's input relay (`input/input-relay.py`), ft-powerd, SteamVR and gamescope read the same device, and the relay remaps its volume keys (the experimental branch's `docs/hazards.md`). A grab would take the volume keys from the relay.
+  - `steamos` is in the `input` group, so it needs no sudo. The dev container sees the host's `/dev/input` and `/proc/bus/input/devices`, and the group carries over (checked 2026-10-02), so it works from the window there and from `session.py` on the host. If the device is missing or can't be opened, the session logs it, keeps trying every 5 s, and the hints don't mention the button.
+  - **Not known yet (needs the headset):** what SteamVR and gamescope do with the same press. They read it too, so it may also click whatever is under the head or gaze pointer in VR, or open something. Check on the first session; if it does, the fix is on their side or a different button, not a grab.
+- **The Next hint follows what's there.** No mouse connected: "Ready? Press the button on the right side of the headset" (the window's Next can't be clicked, and Space needs the window focused). A mouse: "Ready? Press Space, click Next, or press the headset button". No button: "Ready? Press Space or click Next". The panel's bottom line leads with "Headset button: next, pause". A mouse is a device in `/proc/bus/input/devices` with EV_REL, REL_X and REL_Y that isn't made in software: uinput devices (Frametop's virtual mouse, frame-voice's keyboard) sit under `/devices/virtual/input` or on the virtual bus (6), and are left out; Bluetooth mice come through uhid, under `/devices/virtual/misc/uhid`, and count. It's looked at again at each step, so a mouse plugged in mid-session counts from the next step.
 - **R (redo).** During a step's countdown or hold: that step starts again from its ready screen. At a step's ready screen: the step before it (in this section) goes again. Either way a `redo` event marks the range of the try being redone, so its labels are skipped; the sets stay, to delete in review if wanted.
 - A pause stops the take's recording and starts it again on resume as the next part of the same take (`sets-2.bin`, and so on). takes.py reads all parts in order. A pause while a step waits only shows "Paused"; a Next pressed while paused doesn't count.
 

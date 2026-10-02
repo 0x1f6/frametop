@@ -156,13 +156,13 @@
   },
   "push": {
     "file": "push.png",
-    "two_hands": false,
-    "caption": "Palms out, push out and back"
+    "two_hands": true,
+    "caption": "Push straight out, away from the headset, and back"
   },
   "push-controller": {
     "file": "push-controller.png",
-    "two_hands": false,
-    "caption": "Controller on, push out and back"
+    "two_hands": true,
+    "caption": "Controllers on: push straight out from the headset, and back"
   },
   "touch-stick": {
     "file": "touch-stick.png",

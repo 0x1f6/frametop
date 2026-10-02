@@ -27,6 +27,7 @@ import math
 import mmap
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -61,8 +62,14 @@ COUNTDOWN_S = 3          # step mode: the 3-2-1 before each step, recorded
 FIRST_SET_S = 3.0        # step mode: how long the hold may wait for its recording's first set
 RESUME_HINT = "Paused. Resume: P in the Hand recorder window"
 READY_TEXT = "Ready? Press Space or click Next"
+# With the headset's button: it leads when no mouse is connected (the window's Next can't be clicked).
+READY_BUTTON = "Ready? Press the button on the right side of the headset"
+READY_BUTTON_MOUSE = "Ready? Press Space, click Next, or press the headset button"
 KEYS_STEP = "Hand recorder window:  Space next  \u00b7  P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
 KEYS_AUTO = "Hand recorder window:  P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
+KEYS_STEP_BUTTON = ("Headset button: next, pause  \u00b7  Window: Space next  \u00b7  P pause  \u00b7  R redo  "
+                    "\u00b7  S skip  \u00b7  Esc stop")
+KEYS_AUTO_BUTTON = "Headset button: pause  \u00b7  Window: P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
 
 
 def mono_ns():
@@ -508,6 +515,174 @@ class Recorder:
 
 
 # ------------------------------------------------------------------------------------------
+# The headset's button, and mice (/proc/bus/input/devices, linux/input.h)
+#
+# The Frame's click button on its right side is KEY_SELECT on the "gpio-keys" device. It's read
+# as any other reader does, never grabbed (EVIOCGRAB): Frametop's input relay, ft-powerd, SteamVR
+# and gamescope read the same device, and the relay remaps its volume keys.
+
+INPUT_DEVICES = "/proc/bus/input/devices"
+INPUT_EVENT = struct.Struct("@llHHi")   # struct input_event: a timeval, type, code, value (24 bytes on 64-bit)
+EV_KEY, EV_REL = 0x01, 0x02
+REL_X, REL_Y = 0x00, 0x01
+KEY_SELECT = 353
+BUTTON_DEVICE = "gpio-keys"
+BUTTON_DEBOUNCE_S = 0.3   # presses closer than this count once
+
+
+def parse_input_devices(text):
+    """/proc/bus/input/devices as [{"name", "phys", "sysfs", "bus", "handlers": [...], "bits": {"EV": int, ...}}]."""
+    out, dev = [], None
+    for line in text.splitlines() + [""]:
+        line = line.strip()
+        if not line:
+            if dev:
+                out.append(dev)
+            dev = None
+            continue
+        if dev is None:
+            dev = {"name": "", "phys": "", "sysfs": "", "bus": 0, "handlers": [], "bits": {}}
+        tag, _, rest = line.partition(": ")
+        if tag == "I":
+            m = re.search(r"Bus=([0-9a-fA-F]+)", rest)
+            dev["bus"] = int(m.group(1), 16) if m else 0
+        elif tag == "N":
+            dev["name"] = rest.partition("=")[2].strip('"')
+        elif tag == "P":
+            dev["phys"] = rest.partition("=")[2]
+        elif tag == "S":
+            dev["sysfs"] = rest.partition("=")[2]
+        elif tag == "H":
+            dev["handlers"] = rest.partition("=")[2].split()
+        elif tag == "B":
+            key, _, words = rest.partition("=")
+            value = 0
+            for w in words.split():   # the highest long first
+                try:
+                    value = (value << 64) | int(w, 16)
+                except ValueError:
+                    value = 0
+                    break
+            dev["bits"][key] = value
+    return out
+
+
+def _event_node(dev):
+    for h in dev["handlers"]:
+        if re.fullmatch(r"event\d+", h):
+            return "/dev/input/" + h
+    return None
+
+
+def find_button(devices):
+    """The headset button's event device: "gpio-keys" with KEY_SELECT, or None."""
+    for dev in devices:
+        if dev["name"] == BUTTON_DEVICE and dev["bits"].get("KEY", 0) >> KEY_SELECT & 1:
+            return _event_node(dev)
+    return None
+
+
+def real_mouse(dev):
+    """A pointing device a person holds: relative X and Y, not made in software. uinput devices
+    (Frametop's virtual mouse, frame-voice's keyboard) sit under /devices/virtual/input or on the
+    virtual bus (6); Bluetooth mice come through uhid, also under /devices/virtual, so those count."""
+    bits = dev["bits"]
+    if not (bits.get("EV", 0) >> EV_REL & 1) or (bits.get("REL", 0) & 3) != 3:   # REL_X and REL_Y
+        return False
+    sysfs = dev["sysfs"]
+    if dev["bus"] == 0x06 or "virtual" in dev["name"].lower() or "uinput" in dev["phys"]:
+        return False
+    return not sysfs.startswith("/devices/virtual/") or sysfs.startswith("/devices/virtual/misc/uhid/")
+
+
+def read_input_devices(path=INPUT_DEVICES):
+    try:
+        with open(path) as f:
+            return parse_input_devices(f.read())
+    except OSError:
+        return []
+
+
+def mouse_connected(path=INPUT_DEVICES):
+    return any(real_mouse(d) for d in read_input_devices(path))
+
+
+def button_presses(data):
+    """KEY_SELECT key-downs in a run of input_event structs (value 1; releases and autorepeat
+    are left out). Returns (how many, the bytes left over after the last whole event)."""
+    n, usable = 0, len(data) - len(data) % INPUT_EVENT.size
+    for off in range(0, usable, INPUT_EVENT.size):
+        _, _, etype, code, value = INPUT_EVENT.unpack_from(data, off)
+        if etype == EV_KEY and code == KEY_SELECT and value == 1:
+            n += 1
+    return n, data[usable:]
+
+
+class ButtonReader:
+    """Reads the headset button on a thread and calls on_press() per press, debounced. path:
+    an event device or, for testing, a FIFO carrying input_event structs. It's opened read-only
+    and shared; if it can't be opened (no device, no permission, /dev/input not reachable in a
+    container) it says so in the log and tries again now and then."""
+
+    def __init__(self, path, on_press, log=None, debounce_s=BUTTON_DEBOUNCE_S):
+        self.path, self.on_press, self.log = path, on_press, log or (lambda s: None)
+        self.debounce_s = debounce_s
+        self.ok = False      # opened at least once
+        self._stop = threading.Event()
+        self._last = -1e9
+        self._thread = threading.Thread(target=self._run, name="handrec-button", daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(2)
+
+    def _press(self, n):
+        now = time.monotonic()
+        if n and now - self._last >= self.debounce_s:
+            self._last = now
+            self.on_press()
+
+    def _run(self):
+        failed = False
+        while not self._stop.is_set():
+            try:
+                fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError as e:
+                if not failed:
+                    self.log("headset button: can't open %s (%s): the window's keys still work" % (self.path, e.strerror))
+                failed = True
+                self._stop.wait(5)
+                continue
+            if failed or not self.ok:
+                self.log("headset button: reading %s" % self.path)
+            self.ok, failed = True, False
+            rest = b""
+            try:
+                while not self._stop.is_set():
+                    r, _, _ = select.select([fd], [], [], 0.2)
+                    if not r:
+                        continue
+                    try:
+                        data = os.read(fd, INPUT_EVENT.size * 64)
+                    except BlockingIOError:
+                        continue
+                    if not data:   # a FIFO's writer left: open it again
+                        self._stop.wait(0.2)
+                        break
+                    n, rest = button_presses(rest + data)
+                    self._press(n)
+            except OSError as e:   # the device went away
+                self.log("headset button: %s: %s" % (self.path, e.strerror))
+                self._stop.wait(2)
+            finally:
+                os.close(fd)
+
+
+# ------------------------------------------------------------------------------------------
 # The pose pictures (poses/poses.json: {"<pose>": {"file": "<name>.png", "two_hands", "caption"}})
 
 def load_poses(poses_dir):
@@ -754,11 +929,13 @@ class Session:
     auto=False is step mode: each step waits for next_step(), then a recorded countdown, then
     the hold; nothing is recorded while it waits. auto=True: the timed flow, each prompt
     advancing by itself, one recording per take. next_after (a test hook): press Next by itself
-    after that many seconds of waiting. poses_dir: the pose pictures (poses/)."""
+    after that many seconds of waiting. poses_dir: the pose pictures (poses/). button: read the
+    headset's button (not in a dry run unless button_device, a test hook, names the device or
+    a FIFO of input_event structs)."""
 
     def __init__(self, base_dir, profile, checklist, lighting_choice, script_path, *, ring=None,
                  start_processes=True, dry_run=False, speed=1.0, on_status=None, hands_dir=None, panel_bin=None,
-                 auto=False, next_after=None, poses_dir=None):
+                 auto=False, next_after=None, poses_dir=None, button=True, button_device=None):
         self.base_dir = os.path.abspath(os.path.expanduser(base_dir or BASE_DIR))
         self.profile = dict(profile or {})
         self.checklist = dict(checklist or {})
@@ -773,6 +950,9 @@ class Session:
         self.panel_bin = panel_bin or PANEL_BIN
         self.auto = bool(auto)
         self.next_after = next_after
+        self.button, self.button_device = bool(button), button_device
+        self.input_devices = INPUT_DEVICES   # where mice are looked for (a test hook)
+        self._button = None                  # the ButtonReader
         self.print = print   # where dry-run panel commands go (the CLI's stdout)
         self.script = load_script(self.script_path)
         self.plan, self.skipped = build_plan(self.script, self.checklist)
@@ -790,7 +970,8 @@ class Session:
                         "section_index": 0, "section_count": len(self.plan), "step_index": 0, "step_count": 0,
                         "prompt": "", "seconds_left": 0.0, "note": "", "hands": {"left": None, "right": None},
                         "take": None, "error": "", "waiting": False, "countdown": 0, "big": "", "can_redo": False,
-                        "image": "", "image_mode": "", "caption": "", "position": "", "distance": ""}
+                        "image": "", "image_mode": "", "caption": "", "position": "", "distance": "",
+                        "ready_text": READY_TEXT, "button": False, "mouse": True}
         self._last_emit = 0.0
         self._log_file = None
         self._panel = None
@@ -821,6 +1002,22 @@ class Session:
         with self._lock:
             self._want[key] = value
         self._wake.set()
+
+    def button_press(self):
+        """The headset's button: Next while a step waits, pause during a countdown or hold
+        (and auto mode's timed screens), resume while paused."""
+        with self._lock:
+            paused = self._want["pause"]
+        state = self._status["state"]
+        if paused:
+            self.resume()
+        elif self._waiting:
+            self.next_step()
+        elif state in ("countdown", "running", "intro", "between"):
+            self.pause()
+        else:
+            return
+        self._log("headset button (%s)" % ("resume" if paused else "next" if self._waiting else "pause"))
 
     def next_step(self):
         """Step mode: start the step that's waiting (its countdown)."""
@@ -960,13 +1157,28 @@ class Session:
         self._panel = Panel(dry=self.dry_run, log=self._log, out=self.print)
         if not self.dry_run:
             self._start_panel()
+        self._start_button()
         self._panel.cmd("show")
         self._panel.cmd("paused off")
         for key, c in (("note", "note "), ("countdown", "countdown off"), ("hands", "hands off off"),
                        ("bar", "bar off"), ("target", "target off"), ("image", "image off"), ("where", "where off"),
-                       ("big", "big "), ("action", "action "), ("rec", "rec off"),
-                       ("keys", "keys " + (KEYS_AUTO if self.auto else KEYS_STEP))):
+                       ("big", "big "), ("action", "action "), ("rec", "rec off")):
             self._panel.set(key, c)
+        self._hints(action=False)
+
+    def _start_button(self):
+        """The headset button's reader, unless turned off (a dry run has none unless a test
+        device is given). Without the device the session goes on: the window's keys work."""
+        if not self.button or (self.dry_run and not self.button_device):
+            return
+        path = self.button_device or find_button(read_input_devices())
+        if not path:
+            self._log("headset button: no %s device with KEY_SELECT in %s" % (BUTTON_DEVICE, INPUT_DEVICES))
+            return
+        self._button = ButtonReader(path, self.button_press, log=self._log, debounce_s=BUTTON_DEBOUNCE_S).start()
+        end = time.monotonic() + 0.5   # opened in a moment, or it isn't reachable
+        while not self._button.ok and time.monotonic() < end:
+            time.sleep(0.01)
 
     def _write_calibration(self):
         src = host_path("/persist/xrservice.json")
@@ -1116,6 +1328,9 @@ class Session:
             self._save_session()
         self._log("%s%s" % (state, ": " + error if error else ""))
         self._stop_units()
+        if self._button:
+            self._button.stop()
+            self._button = None
         if self._panel:
             screen = {"done": self.script.get("done") or {}, "stopped": self.script.get("stopped") or {},
                       "error": {"title": "Something went wrong", "text": "See the Hand recorder window.",
@@ -1340,13 +1555,25 @@ class Session:
                         if pos or dist else "where off")
         self._status.update(image=path, image_mode=mode, caption=caption, position=pos, distance=dist)
 
+    def _hints(self, action=True):
+        """The Next hint (with action) and the key line for what's there now: the headset button
+        leads when no mouse is connected. Looked at again for each step, so a mouse plugged in counts."""
+        button = bool(self._button and self._button.ok)
+        mouse = mouse_connected(self.input_devices)
+        text = (READY_BUTTON_MOUSE if mouse else READY_BUTTON) if button else READY_TEXT
+        keys = (KEYS_AUTO_BUTTON if self.auto else KEYS_STEP_BUTTON) if button else (KEYS_AUTO if self.auto else KEYS_STEP)
+        if action:
+            self._panel.set("action", "action " + text)
+        self._panel.set("keys", "keys " + keys)
+        self._status.update(ready_text=text, button=button, mouse=mouse)
+
     def _await_next(self):
         """Step mode: wait for Next (or the next_after test hook), handling the controls and the
         hands chips. Nothing records meanwhile."""
         with self._lock:
             self._want["next"] = False   # one pressed during the hold doesn't skip this
         self._waiting = True
-        self._panel.set("action", "action " + READY_TEXT)
+        self._hints()
         self._emit(waiting=True, seconds_left=0.0)
         t0 = time.monotonic()
         try:
@@ -1606,7 +1833,7 @@ class Session:
         self._start_recording()
         tick = None
         if st["kind"] == "bar":   # the bar at near, where the sweep starts
-            labels = "%s %s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
+            labels = "%s|%s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
             near, far = float(s.get("near_m", 0.2)), float(s.get("far_m", 0.6))
 
             def tick(dt):
@@ -1729,7 +1956,7 @@ class Session:
         """One height of the push out and back: the target sweeps near to far and back."""
         near, far = float(s.get("near_m", 0.2)), float(s.get("far_m", 0.6))
         period, lead = float(s.get("period_s", 6)), st["lead"]
-        labels = "%s %s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
+        labels = "%s|%s" % (s.get("near_label", "Near"), s.get("far_label", "Far"))
         p = st["p"]
         self._begin_prompt(s, p, where)
         state = {"t": 0.0, "sent": 0.0}
@@ -1771,6 +1998,10 @@ def main():
     ap.add_argument("--next-after", type=float, metavar="S",
                     help="test: press Next by itself after S seconds of waiting (real time)")
     ap.add_argument("--poses", help="the pose pictures' folder, with poses.json (default hands/rec/poses)")
+    ap.add_argument("--no-headset-button", action="store_true",
+                    help="don't read the headset's button (gpio-keys KEY_SELECT: Next, pause, resume)")
+    ap.add_argument("--button-device", metavar="PATH",
+                    help="test: read the button from this event device or FIFO of input_event structs (also in a dry run)")
     a = ap.parse_args()
 
     known = ("pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small")
@@ -1817,7 +2048,8 @@ def main():
 
     s = Session(base, profile, checklist, a.lighting, a.script, ring=a.ring, start_processes=not a.no_start,
                 dry_run=a.dry_run, speed=a.speed, on_status=on_status, hands_dir=a.hands_dir, panel_bin=a.panel,
-                auto=a.auto, next_after=a.next_after, poses_dir=a.poses)
+                auto=a.auto, next_after=a.next_after, poses_dir=a.poses, button=not a.no_headset_button,
+                button_device=a.button_device)
     est = plan_seconds(s.script, s.plan, auto=a.auto)
     worst = plan_seconds(s.script, s.plan, worst=True, auto=a.auto)
     print("%d sections, %s mode: about %.1f min%s (at most %.1f)%s" % (

@@ -13,16 +13,18 @@ Every image shows a right hand as the wearer sees it from their own eyes. "Palm 
 
 - **Left-hand prompts:** the panel mirrors the image horizontally.
 - **"Both" prompts:** the panel shows two copies, one of them mirrored.
-- **`two_hands: true`:** the image already shows the whole scene: both hands, or one hand with an object, as in `hold`. Show it once, without mirroring or copying. This applies to `cross`, `overlap`, `near-face`, `typing`, `lift`, `switch`, `hold`, `touch-stick` and `touch-stick-desk`.
+- **`two_hands: true`:** the image already shows the whole scene: both hands, or one hand with an object, as in `hold`. Show it once, without mirroring or copying. This applies to `cross`, `overlap`, `near-face`, `typing`, `lift`, `switch`, `hold`, `push`, `push-controller`, `touch-stick` and `touch-stick-desk`.
 - **`touch-stick`:** shows the left hand holding the controller while the right index touches its thumbstick. For prompts where the right hand holds the controller (`controllers: ["right"]`), mirror it.
 
-Motion poses show the start pose, a faint blue "ghost" of the end pose, and orange arrows. Objects (keyboard, mouse, bottle, bar, controller, screen, head and headset) are plain grey shapes.
+`push` and `push-controller` are side views: the wearer's head with a headset on, one arm out in front with the palm out, a ghost of the hand further out, and a straight double arrow from the headset outward, labelled "near" and "arm out". The labels use Pillow's built-in font.
+
+Other motion poses show the start pose, a faint blue "ghost" of the end pose, and orange arrows. Objects (keyboard, mouse, bottle, bar, controller, screen, head and headset) are plain grey shapes.
 
 Besides the pose ids in `script.json`, these extra ids exist for prompts that need a different picture:
 
 | id | for |
 | --- | --- |
-| `push` | the bar sections: palms out, push out and back |
+| `push` | the bar sections: push straight out from the headset and back, palms out |
 | `push-controller` | the same with controllers on |
 | `touch-stick-desk` | touching the thumbstick of a controller lying on the desk |
 | `no-hands` | the no-hands section: hands down, out of view |

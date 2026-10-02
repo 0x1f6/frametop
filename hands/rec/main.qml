@@ -387,9 +387,11 @@ Kirigami.ApplicationWindow {
                           + "of the hand pose, where to hold your hands, and what to do. The sections: hand poses, "
                           + "gestures, typing and the mouse, your objects, touching a dot, and moves with the "
                           + "controllers on and off. Each section is recorded as one take.\n\n"
-                          + "Each step waits until you're ready: press Space or click Next in this window. A 3-2-1 "
+                          + "Each step waits until you're ready: press the button on the right side of the headset, "
+                          + "or Space or Next in this window. A 3-2-1 "
                           + "countdown follows, then hold the pose until the bar runs out. Nothing is recorded while "
-                          + "a step waits. P pauses, R records the last step again, S skips a section and Esc stops.\n\n"
+                          + "a step waits. The headset button also pauses and resumes a recording. In this window P "
+                          + "pauses, R records the last step again, S skips a section and Esc stops.\n\n"
                           + "Nothing leaves the headset. Afterwards you watch the takes in Review, delete anything "
                           + "you don't want to share, and only then export."
                 }
@@ -710,7 +712,8 @@ Kirigami.ApplicationWindow {
                         Controls.Label {
                             visible: sessionView.waiting && sessionView.state !== "paused"
                             opacity: 0.7
-                            text: "Ready? Press Space or click Next. A 3-2-1 countdown starts the recording."
+                            text: (sessionView.st.ready_text || "Ready? Press Space or click Next")
+                                  + ". A 3-2-1 countdown starts the recording."
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
                         }
@@ -743,7 +746,10 @@ Kirigami.ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     opacity: 0.7
-                    text: "The instructions appear in the headset. While this window has focus: "
+                    text: "The instructions appear in the headset. "
+                          + (sessionView.st.button ? "The button on the right side of the headset: "
+                             + (sessionView.stepMode ? "next, " : "") + "pause or resume. " : "")
+                          + "While this window has focus: "
                           + (sessionView.stepMode ? "Space: next · " : "")
                           + "P: pause or resume · R: record the last step again · S: skip section · Esc: stop. "
                           + "Stopping keeps what's recorded so far."
