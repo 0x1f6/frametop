@@ -828,7 +828,7 @@ class Session:
             ring.close()
         except (OSError, ValueError):
             pass
-        removed = self._write_calibration()
+        removed = self._write_calibration() + self._write_device()
         self._session_json = {
             "schema": 1, "tool": "ft-handrec " + _git_describe(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "contributor": self.profile.get("contributor", ""),
@@ -862,6 +862,26 @@ class Session:
             clean, removed = strip_calibration(json.load(f))
         write_json(os.path.join(self.session_dir, "calibration.json"), clean)
         return removed
+
+    def _write_device(self):
+        """device.json: the rig's pose in the CAD frame from /persist/device_config.json, only
+        cv.cad_from_cal (Cam0 in CAD) and head (the head in CAD), in the shape the labeller reads
+        (frame-hands train/label, as its cut.py writes it). The rest of that file names the unit
+        (serial number, EDID). Returns what was removed, as "device.json:<path>"."""
+        src = host_path("/persist/device_config.json")
+        if not src:
+            self._log("no /persist/device_config.json: no device.json")
+            return []
+        try:
+            with open(src) as f:
+                dev = json.load(f)
+            picked = {"cv": {"cad_from_cal": dev["cv"]["cad_from_cal"]}, "head": dev["head"]}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self._log("device_config.json unreadable (%s): no device.json" % e)
+            return []
+        clean, removed = strip_calibration(picked)
+        write_json(os.path.join(self.session_dir, "device.json"), clean)
+        return ["device.json:" + r for r in removed]
 
     def _save_session(self):
         if self._session_json is not None:

@@ -37,9 +37,10 @@ Test hooks:
 ```
 ~/.local/share/frametop/hands/contrib/
   profile.json                  consent and contributor id (below)
-  sessions/<YYYYMMDD-HHMMSS>/
+  sessions/<YYYYMMDD-HHMMSS>/   (a second session started in the same second gets -2, and so on)
     session.json                the session: checklist answers, lighting, versions, takes
     calibration.json            /persist/xrservice.json with identifying fields removed (below)
+    device.json                 the rig's pose in the CAD frame from /persist/device_config.json (below)
     takes/<NN>-<section>/
       sets.bin                  ft-hands' recording (FHSET01, hands/track/record.h), 10 sets/s
       prompts.jsonl             what the person was asked to do, when (below)
@@ -74,6 +75,17 @@ No name, email, or account. The contributor id is random, so several sessions fr
 ### calibration.json
 
 This is a copy of `/persist/xrservice.json` (`/run/host/persist/` in the container). Keep the cameras' intrinsics and extrinsics, and drop anything that identifies the unit: keys containing `serial`, `sn`, `uuid`, `mac` or `id`, or values that look like serial numbers. List what was removed in `session.json` (`"calibration_removed": [...]`), so a reviewer can check it.
+
+### device.json
+
+The head frame needs the rig's pose in the CAD frame, from `/persist/device_config.json`. Only two of its keys are kept, `cv.cad_from_cal` (Cam0 in the CAD frame) and `head` (the head in CAD), in the shape the labeller in frame-hands `train/label` reads, as its `cut.py` writes it:
+
+```json
+{"cv": {"cad_from_cal": {"method": "FrontAndUpperCamPositions", "plus_x": [x, y, z], "plus_z": [x, y, z], "position": [x, y, z]}},
+ "head": {"plus_x": [x, y, z], "plus_z": [x, y, z], "position": [x, y, z]}}
+```
+
+The rest of that file identifies the unit (serial number, display EDID) and is never copied. The two kept keys go through `strip_calibration` as well, and anything it removes is listed in `calibration_removed` as `device.json:<path>`. Sessions recorded before device.json existed have none: they still validate, with a warning, and the labeller falls back to another unit's pose.
 
 ### prompts.jsonl
 
@@ -185,13 +197,40 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
 
 - **Review.** Each session lists its takes: title, duration, status, a thumbnail (the first set's `slam_left`). A viewer shows one frame set (all cameras side by side, 8-bit grey) at a time with a slider. It can mark a range and delete it. Deleted ranges go into `take.json`, and export leaves them out; the files keep everything until export. A whole take or session can be deleted (files removed, after a confirmation).
 - **Export.** It writes `exports/<session>/`:
-  - `manifest.json`: profile fields except `optional.notes` unless kept, session.json, takes, schema, tool version, the consent version.
-  - `calibration.json`.
+  - `manifest.json`: profile fields except `optional.notes` unless kept, session.json (without its `uploads` records), takes, schema, tool version, the consent version.
+  - `calibration.json` and `device.json`, when the session has them.
   - Per take: `prompts.jsonl`, `poses.jsonl`, `take.json`, and `sets.bin.zst` (sets in deleted ranges removed, then zstd -10 with 2 threads).
   - `SHA256SUMS`.
 
   Compression runs at nice 19. Before starting, the window warns if the headset is worn, judged the way `frame-job` does: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` reads over 0 (SteamVR turns the panel off 5 s after the headset comes off). CPU work while in VR causes stutter. The proximity sensor is no use here: it read 9-43 with the headset sitting unworn.
-- **Upload.** The Upload page shows `UPLOAD.md` with the export's path and size filled in, plus the copyable command.
+- **Upload.** The Upload page uploads an export from the window. It also keeps the manual way as a fallback: `UPLOAD.md` with the export's path and size filled in, plus the copyable command (`validate.py`, then `hf upload ... --create-pr`).
+  - **`hands/rec/validate.py`** (standard library) checks an export. The window runs it before an upload, and the maintainer runs it on each submission (`validate.py DIR [--json]`, exit status 1 on errors). It checks:
+    - `SHA256SUMS`: every file listed and matching.
+    - An allow-list: `manifest.json`, `calibration.json`, `device.json` and `SHA256SUMS` at the top, and `prompts.jsonl`, `poses.jsonl`, `take.json` and `sets.bin.zst` in `takes/<NN>-<section>/`. Anything else is an error, and so is a symlink.
+    - The manifest's schema, keys and types, and that it matches the files.
+    - The consent version is present and the contributor confirmed being an adult. The contributor id is a uuid4.
+    - `calibration.json` has nothing that `session.py`'s `strip_calibration` would still remove.
+    - `device.json` holds only `cv.cad_from_cal` and `head`, each `plus_x`, `plus_z` and `position` as 3 numbers (plus `cad_from_cal`'s `method`). Without it: a warning.
+    - Each `sets.bin.zst` decompresses to its end, so a truncated one fails, and every set's FHSET01 header is sane: camera names, sizes, record length. Set counts and raw bytes match the manifest. Pixels aren't decoded.
+    - Every jsonl line parses.
+    - The total size: a warning over 15 GB, an error over 40 GB.
+
+    Warnings cover notes kept in the export, a home folder path in the manifest, and missing `poses.jsonl` files.
+
+    It runs on Linux and on Windows (the maintainer's PC) with Python 3.12 or later. It decompresses with Python 3.14's `compression.zstd`, else the `zstandard` package, else the `zstd` program, and handles several zstd frames in a row.
+  - **`hands/rec/hub.py`** does the upload. It runs as a child process of the window (Cancel ends it), or from the command line (`hub.py [--base DIR] whoami | upload SESSION [--dry-run] [--again] [--json]`). It uses `huggingface_hub` (`python3-huggingface-hub` in the dev container) with the token `hf auth login` saved, and never handles a token itself. An upload goes through these steps:
+    1. Validate, and stop on errors.
+    2. Stop if the same export was uploaded before (same `SHA256SUMS`), unless asked again.
+    3. Stop while the texts are drafts, unless `FT_HANDREC_ALLOW_UPLOAD=1`.
+    4. `whoami`: a read-only token is refused.
+    5. `auth_check` on the dataset: a gated dataset whose terms aren't accepted gives "accept the dataset's terms first", with the link.
+    6. `upload_folder(repo_id=HF_DATASET, repo_type="dataset", folder_path=EXPORT, path_in_repo="contributions/<contributor>/<session>", create_pr=True, commit_message=..., commit_description=...)`. The description summarizes the manifest: takes, minutes, sets, lighting, objects, controllers, the consent and tool versions, the size, and validate's warnings.
+    7. Add `{"repo", "pr_url", "uploaded", "export_sha"}` to `uploads` in `session.json`. `export_sha` is the SHA256 of `SHA256SUMS`. The file keeps its modification time, so the export doesn't count as out of date.
+
+    Errors get a plain explanation: not logged in, a token Hugging Face rejects (401), a token that can't open a pull request (403), terms not accepted, dataset not found, network errors. `--dry-run` does everything except the network calls and the record, and lists what it would upload.
+  - **The page** shows the login (`whoami`, with "Check again"). If nobody is logged in, it explains how to run `distrobox enter dev -- hf auth login` in Konsole with a write token: the token goes only into that terminal. The page then has Upload and Cancel, the phase with a progress bar (a share while the export is checked, a sweep while it's sent, as `huggingface_hub` reports no progress), and the pull request's link when it's done. If this export was uploaded before, the page says so, and uploading it again asks first. A stale export can't be uploaded.
+  - **While the texts are drafts**, Upload stays off unless `FT_HANDREC_ALLOW_UPLOAD=1`, so the maintainer can rehearse against a private test repo. `FT_HANDREC_DATASET` overrides `HF_DATASET`. `ft-handrec --hub-dry-run` makes Upload a dry run: no network, so it isn't held back by the drafts.
+  - **Rehearsal: `hands/rec/rehearse.sh [--repo ID]`** runs it all without the headset, in the dev container, in one `frame-job --local` scope when frame-job is installed. `ft-ringplay` plays 30 s of a recording into a ring in `/run/user/UID`. A tracking ft-hands that's already running is used, or one is started on that ring. `ft-handpanel --no-vr` stands in for the panel. `session.py --no-start` records a two-section test script, about 11 s and about 200 MB once exported. Then `takes.py` exports, `validate.py` checks, and `hub.py` uploads: a dry run by default, or for real to `--repo ID` with `FT_HANDREC_ALLOW_UPLOAD=1`. It prints a summary, deletes its temporary folders (camera images of a room) and stops everything it started, Ctrl+C included. The `--no-vr` panel logs no poses, so `poses.jsonl` is missing there (a warning).
 
 ## Licensing and consent (texts in `CONSENT.md`)
 
@@ -200,4 +239,4 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
 - Contributors confirm they're 18 or older.
 - The text explains what's recorded and that nothing uploads automatically, how review works, how to withdraw (by contributor id), and that a withdrawal is purged from the repo's history.
 - The texts need a legal review before the dataset launches. Until then they carry a "draft" banner, and the Upload page says contributions aren't open yet.
-- The dataset repo: `HF_DATASET` in `ft_handrec.py`, a placeholder (`DeeJanuz/frametop-hands`) until the maintainer decides.
+- The dataset repo: `HF_DATASET` in `hub.py`, `DeeJanuz/frametop-hands` (private until launch).

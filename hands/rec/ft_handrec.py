@@ -12,16 +12,23 @@ A Kirigami (QML) app with a Python backend. It runs in the dev container:
     takes and sessions can be deleted (takes.py).
   - Export: compress what's kept into exports/<session>/ at nice 19 (takes.py), with a warning
     when the headset is worn.
-  - Upload: UPLOAD.md with the export filled in and the upload command to copy.
+  - Upload: the Hugging Face login status, and Upload: hub.py checks the export (validate.py)
+    and uploads it as a pull request, in a child process (Cancel ends it). UPLOAD.md explains
+    the steps, with the export filled in, and the command to copy for a terminal upload.
 Everything lives under ~/.local/share/frametop/hands/contrib (--base). Nothing is uploaded
-from here. Launch with hands/rec/ft-handrec (host wrapper).
+unless the person presses Upload; while CONSENT.md or UPLOAD.md is a draft, Upload stays off
+unless FT_HANDREC_ALLOW_UPLOAD=1 (the maintainer's rehearsal against a test repo, picked with
+FT_HANDREC_DATASET). --hub-dry-run does everything but the network calls.
+Launch with hands/rec/ft-handrec (host wrapper).
 """
 import argparse
 import datetime
+import json
 import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 import uuid
@@ -34,12 +41,17 @@ from PySide6.QtQuickControls2 import QQuickStyle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import hub  # noqa: E402
 import takes  # noqa: E402  (next to this file)
 
-# The dataset contributions go to: a placeholder until the maintainer decides (DESIGN.md).
-HF_DATASET = "DeeJanuz/frametop-hands"
-CONSENT_PATH = os.path.join(HERE, "CONSENT.md")
-UPLOAD_PATH = os.path.join(HERE, "UPLOAD.md")
+# The dataset contributions go to (hub.py; FT_HANDREC_DATASET overrides it, for tests).
+HF_DATASET = hub.HF_DATASET
+CONSENT_PATH = hub.CONSENT_PATH
+UPLOAD_PATH = hub.UPLOAD_PATH
+HUB_PATH = os.path.join(HERE, "hub.py")
+VALIDATE_PATH = os.path.join(HERE, "validate.py")
+# What `hf auth login` needs: run in a terminal, where the token is typed (never in this window).
+LOGIN_COMMAND = "distrobox enter dev -- hf auth login"
 SCRIPT_PATH = os.path.join(HERE, "script.json")
 # The headset counts as worn while vrcompositor runs and a display panel is lit: SteamVR turns
 # the panels off 5 s after the headset comes off (frame-job's check; the proximity sensor's
@@ -72,10 +84,6 @@ def consent_version():
     """The "Version: ..." line of CONSENT.md: a new one asks everyone to agree again."""
     m = re.search(r"^Version:\s*(\S+)", read_text(CONSENT_PATH), re.M)
     return m.group(1) if m else "unknown"
-
-
-def is_draft(path):
-    return "DRAFT" in read_text(path).split("\n", 1)[0]
 
 
 def process_running(name):
@@ -111,11 +119,13 @@ def gigabytes(n):
 
 
 def session_label(sid):
-    """20261002-101500 -> 2026-10-02 10:15."""
+    """20261002-101500 -> 2026-10-02 10:15; 20261002-101500-2 -> 2026-10-02 10:15 (2)."""
+    stamp, _, n = sid[:15], sid[15:16], sid[16:]
     try:
-        return datetime.datetime.strptime(sid, "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M")
+        label = datetime.datetime.strptime(stamp, "%Y%m%d-%H%M%S").strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return sid
+    return f"{label} ({n})" if n else label
 
 
 def grey_image(cam):
@@ -191,11 +201,23 @@ class Backend(QObject):
     _lightingArrived = Signal(str)
     _exportProgress = Signal(float, str)
     _exportFinished = Signal(str, str)  # path, error ("" when it worked; "cancelled")
+    loginChanged = Signal()
+    uploadChanged = Signal()
+    _loginArrived = Signal(dict)
+    _uploadLine = Signal(dict)
+    _uploadFinished = Signal(dict)
 
-    def __init__(self, store, session_options=None):
+    def __init__(self, store, session_options=None, hub_dry_run=False):
         super().__init__()
         self.store = store
         self._session_options = session_options or {}  # test hooks for Session: dry_run, speed
+        self._hub_dry_run = hub_dry_run
+        self._login = {"state": "dry" if hub_dry_run else "unknown"}
+        self._login_busy = False
+        self._upload_proc = None
+        self._upload_thread = None
+        self._upload_cancelled = False
+        self._upload = {}
         os.makedirs(store.base, mode=0o700, exist_ok=True)
         self._session_mod = None
         self._session_error = ""
@@ -212,6 +234,9 @@ class Backend(QObject):
         self._lightingArrived.connect(self._on_lighting)
         self._exportProgress.connect(self._on_export_progress)
         self._exportFinished.connect(self._on_export_finished)
+        self._loginArrived.connect(self._on_login)
+        self._uploadLine.connect(self._on_upload_line)
+        self._uploadFinished.connect(self._on_upload_finished)
         self.disk_timer = QTimer(interval=30000, timeout=self.diskChanged.emit)
         self.disk_timer.start()
 
@@ -246,7 +271,7 @@ class Backend(QObject):
 
     @Property(bool, constant=True)
     def textsDraft(self):
-        return is_draft(CONSENT_PATH) or is_draft(UPLOAD_PATH)
+        return hub.texts_draft()
 
     @Property(bool, notify=profileChanged)
     def needsConsent(self):
@@ -439,6 +464,9 @@ class Backend(QObject):
         if self._export_cancel:
             self._export_cancel.set()  # and wait, so export can remove its half-written copy
             self._export_thread.join(15)
+        if self._upload_proc:
+            self.cancelUpload()
+            self._upload_thread.join(10)
 
     # --- review
     @Property("QVariantList", notify=sessionsChanged)
@@ -633,8 +661,197 @@ class Backend(QObject):
     # --- upload
     @Property(str, constant=True)
     def dataset(self):
-        return HF_DATASET
+        try:
+            return hub.dataset_id()
+        except hub.HubError:
+            return os.environ.get(hub.DATASET_ENV, HF_DATASET)
 
+    @Property(str, constant=True)
+    def datasetUrl(self):
+        return hub.dataset_url(self.dataset)
+
+    @Property(bool, constant=True)
+    def hubDryRun(self):
+        return self._hub_dry_run
+
+    @Property(bool, constant=True)
+    def uploadAllowed(self):
+        """Real uploads may start: the texts aren't drafts, or FT_HANDREC_ALLOW_UPLOAD=1."""
+        return hub.upload_allowed()
+
+    @Property(bool, constant=True)
+    def allowUploadSet(self):
+        return os.environ.get(hub.ALLOW_ENV) == "1"
+
+    @Property(str, constant=True)
+    def loginCommand(self):
+        return LOGIN_COMMAND
+
+    def _hub_argv(self, *args):
+        return [sys.executable, HUB_PATH, "--base", self.store.base, *args]
+
+    # The login: hub.py whoami in a child process (it asks huggingface.co)
+    @Property("QVariantMap", notify=loginChanged)
+    def login(self):
+        """{"state": unknown|checking|ok|none|read|error|missing|dry, "name", "role", "text", "link"}."""
+        return self._login
+
+    @Slot()
+    def checkLogin(self):
+        if self._hub_dry_run or self._login_busy:
+            return
+        self._login_busy = True
+        self._login = {"state": "checking", "text": "Checking your Hugging Face login"}
+        self.loginChanged.emit()
+        argv = self._hub_argv("whoami", "--json")
+
+        def run():
+            try:
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+                result = self._last_json(r.stdout) or {"error": {"kind": "hub", "text": (r.stderr.strip().splitlines()
+                                                                                          or ["hub.py failed"])[-1]}}
+            except (OSError, subprocess.TimeoutExpired) as e:
+                result = {"error": {"kind": "network", "text": f"The login check didn't finish: {e}"}}
+            self._loginArrived.emit(result)
+        self._thread(run)
+
+    @staticmethod
+    def _last_json(text):
+        for line in reversed(text.strip().splitlines()):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        return None
+
+    def _on_login(self, result):
+        self._login_busy = False
+        if "done" in result:
+            who = result["done"]
+            role = who.get("role", "")
+            if role == "read":
+                self._login = {"state": "read", "name": who.get("name", ""), "role": role, "link": hub.TOKENS_URL,
+                               "text": f"Logged in as {who.get('name', '')}, but with a read-only token: uploads "
+                                       "need a token with the Write role. Log in again with one."}
+            else:
+                self._login = {"state": "ok", "name": who.get("name", ""), "role": role,
+                               "text": f"Logged in as {who.get('name', '')}"}
+        else:
+            e = result.get("error") or {}
+            state = {"login": "none", "missing": "missing"}.get(e.get("kind"), "error")
+            self._login = {"state": state, "text": e.get("text", "The login check failed"), "link": e.get("link", "")}
+        self.loginChanged.emit()
+
+    # The upload: hub.py upload --json in a child process; its lines say how it goes
+    @Property(bool, notify=uploadChanged)
+    def uploading(self):
+        return self._upload_proc is not None
+
+    @Property("QVariantMap", notify=uploadChanged)
+    def upload(self):
+        """{"session", "phase", "text", "fraction" (-1: unknown), "log", "result": {...}, "error": {...}}."""
+        return self._upload
+
+    @Slot(str, result="QVariantMap")
+    def uploadInfo(self, session):
+        """{"previous": the last upload of this same export or {}, "uploads": how many in all}."""
+        try:
+            export = self.store.export_dir(session)
+            before = hub.previous_upload(self.store, session, hub.export_sha(export))
+            count = len(hub.uploads(self.store, session))
+        except (OSError, ValueError):
+            return {"previous": {}, "uploads": 0}
+        return {"previous": before or {}, "uploads": count}
+
+    @Slot(str, bool)
+    def startUpload(self, session, again):
+        if self.uploading or self.exporting or self._active_guard(session):
+            return
+        if not self._hub_dry_run and not hub.upload_allowed():
+            self.message.emit("Contributions aren't open yet", True)
+            return
+        argv = self._hub_argv("upload", session, "--json")
+        if self._hub_dry_run:
+            argv.append("--dry-run")
+        if again:
+            argv.append("--again")
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, bufsize=1)
+        except OSError as e:
+            self.message.emit(f"Couldn't start the upload: {e}", True)
+            return
+        self._upload_proc = proc
+        self._upload_cancelled = False
+        self._upload = {"session": session, "phase": "check", "text": "Starting", "fraction": 0.0, "log": "",
+                        "result": {}, "error": {}}
+        self.uploadChanged.emit()
+
+        def run():
+            last = {}
+            for line in proc.stdout:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    if "done" in obj or "error" in obj:
+                        last = obj
+                    else:
+                        self._uploadLine.emit(obj)
+            err = proc.stderr.read()
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+            if not last:
+                tail = (err.strip().splitlines() or [f"exit status {proc.returncode}"])[-1]
+                last = {"error": {"kind": "cancelled" if self._upload_cancelled else "hub",
+                                  "text": "Cancelled" if self._upload_cancelled else f"The upload stopped: {tail}"}}
+            self._uploadFinished.emit(last)
+        self._upload_thread = self._thread(run)
+
+    @Slot()
+    def cancelUpload(self):
+        if self._upload_proc and self._upload_proc.poll() is None:
+            self._upload_cancelled = True
+            self._upload_proc.terminate()
+            self._upload = dict(self._upload, text="Cancelling")
+            self.uploadChanged.emit()
+
+    def _on_upload_line(self, obj):
+        up = dict(self._upload)
+        if "log" in obj:
+            up["log"] = (up.get("log", "") + obj["log"] + "\n")[-20000:]
+        if "phase" in obj:
+            f = obj.get("fraction")
+            up.update(phase=obj["phase"], text=obj.get("text", ""), fraction=-1.0 if f is None else float(f))
+        self._upload = up
+        self.uploadChanged.emit()
+
+    def _on_upload_finished(self, last):
+        self._upload_proc = None
+        up = dict(self._upload)
+        if "done" in last:
+            result = last["done"]
+            up.update(result=result, error={}, phase="done", fraction=1.0,
+                      text="Dry run: nothing was uploaded" if result.get("dry_run") else "Uploaded")
+            if not result.get("dry_run"):
+                self.message.emit("Uploaded: the pull request is open", False)
+        else:
+            e = last.get("error") or {}
+            cancelled = e.get("kind") == "cancelled"
+            up.update(error=e, result={}, phase="failed", fraction=0.0,
+                      text=("Cancelled. If it had got as far as opening the pull request, check the dataset's "
+                            "Community tab: an incomplete one can be closed there.") if cancelled else e.get("text", ""))
+            if not cancelled:
+                self.message.emit("Upload failed", True)
+        self._upload = up
+        self.uploadChanged.emit()
+        self.sessionsChanged.emit()
+
+    # The manual way, for a terminal (UPLOAD.md)
     @Slot(str, result=str)
     def uploadCommand(self, session):
         try:
@@ -642,9 +859,11 @@ class Backend(QObject):
         except ValueError:
             return ""
         contributor = self.contributor or "CONTRIBUTOR"
-        return " ".join(["huggingface-cli", "upload", HF_DATASET, shlex.quote(path),
-                         f"contributions/{contributor}/{session}", "--repo-type", "dataset", "--create-pr",
-                         "--commit-message", shlex.quote(f"Hands: session {session} from {contributor}")])
+        check = " ".join(["python3", shlex.quote(VALIDATE_PATH), shlex.quote(path)])
+        upload = " ".join(["hf", "upload", self.dataset, shlex.quote(path), f"contributions/{contributor}/{session}",
+                           "--repo-type", "dataset", "--create-pr",
+                           "--commit-message", shlex.quote(f"Hands: session {session} from {contributor}")])
+        return check + " && " + upload
 
     @Slot(str, result=str)
     def uploadText(self, session):
@@ -654,8 +873,8 @@ class Backend(QObject):
         except ValueError:
             return ""
         values = {"EXPORT_PATH": path, "EXPORT_SIZE": takes.human_bytes(takes.tree_bytes(path)),
-                  "CONTRIBUTOR": self.contributor or "CONTRIBUTOR", "SESSION": session, "DATASET": HF_DATASET,
-                  "COMMAND": self.uploadCommand(session)}
+                  "CONTRIBUTOR": self.contributor or "CONTRIBUTOR", "SESSION": session, "DATASET": self.dataset,
+                  "COMMAND": self.uploadCommand(session), "LOGIN": LOGIN_COMMAND}
         text = read_text(UPLOAD_PATH) or "UPLOAD.md is missing."
         return re.sub(r"@([A-Z_]+)@", lambda m: values.get(m.group(1), m.group(0)), text)
 
@@ -678,6 +897,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="test: sessions start no processes and print the panel's commands")
     ap.add_argument("--speed", type=float, default=1.0, help="test, with --dry-run: run sessions this much faster")
+    ap.add_argument("--hub-dry-run", action="store_true",
+                    help="test: Upload checks the export and says what it would send, with no network calls")
     a, qt_args = ap.parse_known_args()
     app = QGuiApplication([sys.argv[0]] + qt_args)
     app.setApplicationName("ft-handrec")
@@ -689,7 +910,7 @@ def main():
     store = takes.Store(a.base)
     engine = QQmlApplicationEngine()
     engine.addImageProvider("frames", FrameProvider(store))
-    backend = Backend(store, {"dry_run": True, "speed": a.speed} if a.dry_run else {})
+    backend = Backend(store, {"dry_run": True, "speed": a.speed} if a.dry_run else {}, hub_dry_run=a.hub_dry_run)
     app.aboutToQuit.connect(backend.shutdown)
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("startPage", a.page)

@@ -8,7 +8,7 @@ Your export is ready:
 - Size: @EXPORT_SIZE@
 - Contributor id: `@CONTRIBUTOR@`
 
-Uploads go to the Hugging Face dataset [@DATASET@](https://huggingface.co/datasets/@DATASET@). You do it yourself, from your own account; the hand recorder never uploads anything. The upload opens a pull request, so nothing is published until the maintainer has looked at it.
+Uploads go to the Hugging Face dataset [@DATASET@](https://huggingface.co/datasets/@DATASET@), from your own Hugging Face account. Nothing is uploaded until you press Upload (or run the command below). The upload opens a pull request, so nothing is published until the maintainer has looked at it.
 
 ## 1. Make a Hugging Face account
 
@@ -16,37 +16,41 @@ Sign up at <https://huggingface.co/join>, if you don't have an account. Your use
 
 ## 2. Accept the dataset's terms
 
-Open <https://huggingface.co/datasets/@DATASET@>, read the terms and accept them. They're the same as the consent you agreed to in the hand recorder.
+Open <https://huggingface.co/datasets/@DATASET@>, read the terms and accept them. They're the same as the consent you agreed to in the hand recorder. Until you've accepted them, the upload stops with "accept the dataset's terms first".
 
 ## 3. Create a write token
 
 Go to <https://huggingface.co/settings/tokens>, press "Create new token", choose "Write" and give it a name like "frametop-hands". Copy the token.
 
-The token lets anyone who has it change things in your account. Paste it only into your own terminal in the next step: never into a chat, a website, an issue or this window.
+The token lets anyone who has it change things in your account. Paste it only into your own terminal in the next step: never into a chat, a website, an issue or this window. The hand recorder never asks for it.
 
-## 4. Install the Hugging Face tools
+## 4. Log in, in a terminal
 
-Open a terminal (Konsole) and enter the dev container, then install `huggingface_hub` and log in:
+Open a terminal (Konsole) and run:
 
 ```
-distrobox enter dev
-pip install --user huggingface_hub
-huggingface-cli login
+@LOGIN@
 ```
 
-`huggingface-cli login` asks for the token: paste it there. If it asks whether to add the token as a git credential, answer no.
+It asks for the token: paste it there (it doesn't show as you paste) and press Enter. The token is saved in your home folder, in `~/.cache/huggingface/token`, where the hand recorder's upload finds it. Then press "Check again" on this page: it should say you're logged in.
+
+If the page says `huggingface_hub` isn't installed, update the dev container first: run `setup/dev-container.sh` from the Frametop folder.
 
 ## 5. Upload
 
-In the same terminal, run:
+Press **Upload** on this page. It first checks the export (that every file is complete and matches its checksum, and that nothing identifying is left in), then uploads it to `contributions/@CONTRIBUTOR@/@SESSION@` in the dataset and opens a pull request. Large uploads take a while, and Cancel stops it. When it's done, the page shows your pull request's link.
+
+If it fails partway, press Upload again: files already sent usually aren't sent twice. If a pull request was opened anyway, that's fine: the maintainer closes the incomplete one.
+
+Keep the headset on its charger or plugged in while it uploads.
+
+### Or upload from a terminal
+
+If the Upload button doesn't work for you, run this in the dev container (`distrobox enter dev`) after step 4. It checks the export the same way, then uploads it:
 
 ```
 @COMMAND@
 ```
-
-It uploads the export folder to `contributions/@CONTRIBUTOR@/@SESSION@` in the dataset and opens a pull request. Large uploads take a while. If it fails partway, run the same command again: parts already sent usually aren't sent twice. That can open a second pull request, which is fine: the maintainer closes the incomplete one.
-
-Keep the headset on its charger or plugged in while it uploads.
 
 ## 6. The maintainer reviews it
 

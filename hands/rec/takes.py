@@ -33,7 +33,7 @@ HDR = struct.Struct("<8sII")       # fh_set_hdr_t: magic, ncams, bytes (the whol
 CAM = struct.Struct("<16sIIQQ")    # fh_set_cam_t: name, width, height, capture_ns, dqbuf_ns
 MAX_CAMS = 16                      # SetReader's limit
 PART_RE = re.compile(r"^sets(?:-(\d+))?\.bin$")
-SESSION_RE = re.compile(r"^\d{8}-\d{6}$")
+SESSION_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")   # session.py adds -2, -3 to a second one in a second
 EXPORT_SCHEMA = 1
 # zstd as DESIGN.md has it: level 10, two threads, at the lowest CPU priority (CPU work while
 # someone is in VR makes the headset stutter).
@@ -415,6 +415,7 @@ class Store:
     def _export(self, session, src, work, zstd, report, cancelled, keep_notes):
         profile = self.profile()
         meta = read_json(os.path.join(src, "session.json"))
+        meta.pop("uploads", None)   # earlier uploads' records (hub.py) aren't part of the contribution
         takes = self.takes(session)
         total = sum(t["bytes"] for t in takes) or 1
         done = 0
@@ -447,8 +448,9 @@ class Store:
             take_entries.append(entry)
         if cancelled():
             raise Cancelled()
-        if os.path.isfile(os.path.join(src, "calibration.json")):
-            shutil.copyfile(os.path.join(src, "calibration.json"), os.path.join(work, "calibration.json"))
+        for name in ("calibration.json", "device.json"):
+            if os.path.isfile(os.path.join(src, name)):
+                shutil.copyfile(os.path.join(src, name), os.path.join(work, name))
         shown_profile = json.loads(json.dumps(profile))
         if not keep_notes and isinstance(shown_profile.get("optional"), dict):
             shown_profile["optional"].pop("notes", None)
@@ -491,6 +493,8 @@ class Store:
                 proc.kill()
                 proc.wait()
                 raise
+            finally:
+                proc.stderr.close()
         return raw
 
 
