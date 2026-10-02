@@ -25,6 +25,7 @@ struct ft_event {
     double x, y;      // FT_MOTION: buffer pixels from the top left
     uint32_t button;  // FT_BUTTON: linux BTN_*
     bool pressed;
+    bool controller;  // FT_BUTTON: from a hand controller's laser (not the 3D mouse's)
     double dx, dy;    // FT_SCROLL: notches (positive dy: scroll down)
     uint32_t key;     // FT_KEY: linux KEY_* from our keyboard (pressed: down or up)
 };

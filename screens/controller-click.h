@@ -11,7 +11,8 @@ struct ft_controller_click {
     unsigned long suppressed, clicks, drags;
 };
 // Hold the desktop position at press time until movement exceeds a logical-pixel
-// radius. No timer, delayed button-down, or change to native mouse input.
+// radius. No timer or delayed button-down. Only a hand controller's press starts
+// it: the 3D mouse drives a laser too, and its short drags must stay drags.
 static inline bool ft_controller_click_filter(struct ft_controller_click *c,
                                               struct ft_event *e, double scale) {
     if (e->type == FT_BUTTON && e->button >= BTN_LEFT && e->button < BTN_LEFT+8) {
@@ -19,7 +20,7 @@ static inline bool ft_controller_click_filter(struct ft_controller_click *c,
         if (e->pressed) c->buttons |= bit; else c->buttons &= ~bit;
     }
     if (e->type == FT_BUTTON && e->pressed) {
-        if (e->button == BTN_LEFT && !c->held && c->threshold > 0) {
+        if (e->button == BTN_LEFT && e->controller && !c->held && c->threshold > 0) {
             c->held = true; c->dragging = false; c->screen = e->screen;
             c->x = e->x; c->y = e->y; c->radius = c->threshold * scale;
         } else if (e->button != BTN_LEFT) {

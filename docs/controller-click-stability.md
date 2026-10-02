@@ -6,10 +6,12 @@ zone delivers the click at the original position, even if the hand moved during
 release. Moving outside the zone begins a normal drag immediately; returning to
 the zone does not turn it back into a click. There is no hold-duration timer.
 
-This filters overlay pointer content events on desktop monitors only. Native mouse
-input, SteamVR UI, separate screen grab bars and floating-app title-bar carrying
-are unaffected. Multi-button gestures keep their existing behavior. A motion
-onto another desktop monitor starts a drag; cross-monitor motion is not stabilized.
+This filters overlay pointer content events on desktop monitors only, and only
+presses from hand controllers start it. The 3D mouse (whose laser comes from the
+`ft_pointer` virtual controller), SteamVR UI, separate screen grab bars and
+floating-app title-bar carrying are unaffected. Multi-button gestures keep their
+existing behavior. A motion onto another desktop monitor starts a drag;
+cross-monitor motion is not stabilized.
 
 CLI (runtime preferences, reset to 8 on desktop restart):
 

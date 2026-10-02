@@ -1741,6 +1741,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.type = FT_BUTTON;
                     e.button = LinuxButton(ev.data.mouse.button);
                     e.pressed = ev.eventType == vr::VREvent_MouseButtonDown;
+                    e.controller = IsHandController(ev.trackedDeviceIndex);
                     at();
                     if (!e.pressed && s.titleCarry) e.x = s.carryX, e.y = s.carryY, s.titleCarry = false;
                     if (e.pressed) {

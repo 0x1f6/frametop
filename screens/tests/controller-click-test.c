@@ -1,7 +1,7 @@
 #include <assert.h>
 #include "../controller-click.h"
 static struct ft_event event(enum ft_event_type t, bool down, double x, double y) {
-    return (struct ft_event){.type=t,.screen=0,.button=BTN_LEFT,.pressed=down,.x=x,.y=y};
+    return (struct ft_event){.type=t,.screen=0,.button=BTN_LEFT,.pressed=down,.controller=true,.x=x,.y=y};
 }
 int main(void) {
     struct ft_controller_click c={.threshold=8};
@@ -34,4 +34,9 @@ int main(void) {
     e=event(FT_BUTTON,true,100,100);ft_controller_click_filter(&c,&e,1);
     e=event(FT_BUTTON,true,100,100);e.button=BTN_RIGHT;ft_controller_click_filter(&c,&e,1);
     assert(!c.held);
+    // The 3D mouse's laser: a short drag stays a drag, and the release stays where it was.
+    e=event(FT_BUTTON,true,100,100);e.controller=false;assert(ft_controller_click_filter(&c,&e,1) && !c.held);
+    e=event(FT_MOTION,false,104,100);assert(ft_controller_click_filter(&c,&e,1));
+    e=event(FT_BUTTON,false,106,100);e.controller=false;
+    assert(ft_controller_click_filter(&c,&e,1) && e.x==106 && c.clicks==2 && c.suppressed==1);
 }
