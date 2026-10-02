@@ -1,0 +1,178 @@
+{
+ "version": 1,
+ "intro_s": 4,
+ "between_s": 3,
+ "welcome": {"title": "Hand recorder", "seconds": 7,
+  "text": "Follow the steps on this panel. Each one has a bar that shows its time left.|Pause: Space in the Hand recorder window."},
+ "done": {"title": "All done", "seconds": 6,
+  "text": "Thank you! You can take off the headset.|Review your recordings in the Hand recorder window."},
+ "stopped": {"title": "Stopped", "seconds": 4,
+  "text": "What was recorded so far is saved. Review it in the Hand recorder window."},
+ "objects": {"pencil": "pencil or pen", "phone": "phone", "cup": "cup", "keyboard": "keyboard",
+  "mouse": "mouse", "gamepad": "gamepad", "small": "small thing"},
+ "sections": [
+  {"id": "hand-size", "title": "Hand size", "requires": [],
+   "intro": "First, your hand size. Hold each pose still until the bar runs out.",
+   "defaults": {"hands": "both", "distance": "mid", "position": "centre"},
+   "prompts": [
+    {"text": "Both hands flat, palms toward you, about 40 cm away. Fingers together.", "seconds": 8, "pose": "flat"},
+    {"text": "Turn them around: backs of your hands toward you.", "seconds": 6, "pose": "flat-back"},
+    {"text": "Palms toward you again, fingers spread wide.", "seconds": 6, "pose": "spread"}
+   ]},
+
+  {"id": "static-poses", "title": "Hand poses", "requires": [],
+   "intro": "Now some poses. Close means a hand's length away. Far means your arm stretched out.",
+   "prompts": [
+    {"text": "Both hands: open and relaxed. Halfway out, in front of you.", "seconds": 5, "hands": "both", "pose": "open", "distance": "mid", "position": "centre"},
+    {"text": "Both hands: make fists. Close to you, off to your left.", "seconds": 5, "hands": "both", "pose": "fist", "distance": "near", "position": "left"},
+    {"text": "Both hands: point with your index fingers. Arms out, off to your right.", "seconds": 5, "hands": "both", "pose": "point", "distance": "far", "position": "right"},
+    {"text": "Both hands: pinch, thumb and index tips touching. Halfway out, up high.", "seconds": 5, "hands": "both", "pose": "pinch", "distance": "mid", "position": "up"},
+    {"text": "Both hands: make an OK sign. Close to you, down low.", "seconds": 5, "hands": "both", "pose": "ok", "distance": "near", "position": "down"},
+    {"text": "Both hands: thumbs up. Arms out, in front of you.", "seconds": 5, "hands": "both", "pose": "thumbs-up", "distance": "far", "position": "centre"},
+    {"text": "Both hands: spread your fingers wide. Halfway out, off to your left.", "seconds": 5, "hands": "both", "pose": "spread", "distance": "mid", "position": "left"},
+    {"text": "Both hands: curl your fingers like claws. Close to you, off to your right.", "seconds": 5, "hands": "both", "pose": "claw", "distance": "near", "position": "right"},
+
+    {"text": "Now your left hand only. Rest your right hand in your lap.", "seconds": 4, "hands": "left"},
+    {"text": "Left hand: open and relaxed. Close to you, off to your right.", "seconds": 5, "hands": "left", "pose": "open", "distance": "near", "position": "right"},
+    {"text": "Left hand: a fist. Arm out, up high.", "seconds": 5, "hands": "left", "pose": "fist", "distance": "far", "position": "up"},
+    {"text": "Left hand: point with your index finger. Halfway out, down low.", "seconds": 5, "hands": "left", "pose": "point", "distance": "mid", "position": "down"},
+    {"text": "Left hand: pinch. Close to you, in front of you.", "seconds": 5, "hands": "left", "pose": "pinch", "distance": "near", "position": "centre"},
+    {"text": "Left hand: an OK sign. Arm out, off to your left.", "seconds": 5, "hands": "left", "pose": "ok", "distance": "far", "position": "left"},
+    {"text": "Left hand: thumbs up. Halfway out, off to your right.", "seconds": 5, "hands": "left", "pose": "thumbs-up", "distance": "mid", "position": "right"},
+    {"text": "Left hand: spread your fingers wide. Close to you, up high.", "seconds": 5, "hands": "left", "pose": "spread", "distance": "near", "position": "up"},
+    {"text": "Left hand: curl your fingers like a claw. Arm out, down low.", "seconds": 5, "hands": "left", "pose": "claw", "distance": "far", "position": "down"},
+    {"text": "Left hand, halfway out: show one finger.", "seconds": 4, "hands": "left", "pose": "count-1", "distance": "mid", "position": "centre"},
+    {"text": "Two fingers.", "seconds": 4, "hands": "left", "pose": "count-2", "distance": "mid", "position": "centre"},
+    {"text": "Three fingers.", "seconds": 4, "hands": "left", "pose": "count-3", "distance": "mid", "position": "centre"},
+    {"text": "Four fingers.", "seconds": 4, "hands": "left", "pose": "count-4", "distance": "mid", "position": "centre"},
+    {"text": "Five fingers.", "seconds": 4, "hands": "left", "pose": "count-5", "distance": "mid", "position": "centre"},
+
+    {"text": "Now your right hand only. Rest your left hand in your lap.", "seconds": 4, "hands": "right"},
+    {"text": "Right hand: open and relaxed. Arm out, down low.", "seconds": 5, "hands": "right", "pose": "open", "distance": "far", "position": "down"},
+    {"text": "Right hand: a fist. Halfway out, in front of you.", "seconds": 5, "hands": "right", "pose": "fist", "distance": "mid", "position": "centre"},
+    {"text": "Right hand: point with your index finger. Close to you, off to your left.", "seconds": 5, "hands": "right", "pose": "point", "distance": "near", "position": "left"},
+    {"text": "Right hand: pinch. Arm out, off to your right.", "seconds": 5, "hands": "right", "pose": "pinch", "distance": "far", "position": "right"},
+    {"text": "Right hand: an OK sign. Halfway out, up high.", "seconds": 5, "hands": "right", "pose": "ok", "distance": "mid", "position": "up"},
+    {"text": "Right hand: thumbs up. Close to you, down low.", "seconds": 5, "hands": "right", "pose": "thumbs-up", "distance": "near", "position": "down"},
+    {"text": "Right hand: spread your fingers wide. Arm out, in front of you.", "seconds": 5, "hands": "right", "pose": "spread", "distance": "far", "position": "centre"},
+    {"text": "Right hand: curl your fingers like a claw. Halfway out, off to your left.", "seconds": 5, "hands": "right", "pose": "claw", "distance": "mid", "position": "left"},
+    {"text": "Right hand, halfway out: show one finger.", "seconds": 4, "hands": "right", "pose": "count-1", "distance": "mid", "position": "centre"},
+    {"text": "Two fingers.", "seconds": 4, "hands": "right", "pose": "count-2", "distance": "mid", "position": "centre"},
+    {"text": "Three fingers.", "seconds": 4, "hands": "right", "pose": "count-3", "distance": "mid", "position": "centre"},
+    {"text": "Four fingers.", "seconds": 4, "hands": "right", "pose": "count-4", "distance": "mid", "position": "centre"},
+    {"text": "Five fingers.", "seconds": 4, "hands": "right", "pose": "count-5", "distance": "mid", "position": "centre"}
+   ]},
+
+  {"id": "wrist-rotations", "title": "Wrist turns", "requires": [],
+   "intro": "Slow wrist turns. Keep your fingers relaxed.",
+   "defaults": {"pose": "open", "distance": "mid"},
+   "prompts": [
+    {"text": "Both hands open, palms toward you. Slowly turn them palms away, then back.", "seconds": 8, "hands": "both", "pose": "turn-in-out"},
+    {"text": "Left hand, fingers up. Slowly turn your wrist: palm in, palm out.", "seconds": 7, "hands": "left", "pose": "turn-in-out"},
+    {"text": "Right hand, fingers up. Slowly turn your wrist: palm in, palm out.", "seconds": 7, "hands": "right", "pose": "turn-in-out"},
+    {"text": "Both hands flat, palms down. Slowly turn them palms up, then down again.", "seconds": 8, "hands": "both", "pose": "turn-up-down"},
+    {"text": "Bend both wrists slowly up and down, then side to side.", "seconds": 8, "hands": "both", "pose": "bend"}
+   ]},
+
+  {"id": "gestures", "title": "Gestures", "requires": [],
+   "intro": "Now some movements. Go at a calm, normal pace.",
+   "defaults": {"hands": "both"},
+   "prompts": [
+    {"text": "Tap your thumb and index finger together a few times, both hands.", "seconds": 6, "pose": "pinch-tap"},
+    {"text": "Pinch, move your hand slowly to the side, then let go. Do it again.", "seconds": 8, "pose": "pinch-drag"},
+    {"text": "Close your hands as if grabbing a bar, then open them. A few times.", "seconds": 6, "pose": "grab"},
+    {"text": "Cross your hands in front of you, then uncross them. Slowly.", "seconds": 8, "pose": "cross"},
+    {"text": "Hold one hand over the other, palms toward you, and slide them around.", "seconds": 6, "pose": "overlap"},
+    {"text": "Bring your hands close to your face and move them around it. Don't touch the headset.", "seconds": 6, "pose": "near-face", "distance": "near"},
+    {"text": "Reach out to where a screen would be, about arm's length, and point at things on it.", "seconds": 6, "pose": "screen-point", "distance": "far"}
+   ]},
+
+  {"id": "desk-work", "title": "Desk work", "requires": [],
+   "intro": "Now your desk. Look down at your hands while you work.",
+   "defaults": {"hands": "both", "position": "down"},
+   "prompts": [
+    {"when": "objects:keyboard", "text": "Type on your keyboard the way you normally do. Any text is fine.", "seconds": 10, "pose": "typing", "object": "keyboard"},
+    {"when": "!objects:keyboard", "text": "Rest your hands on the desk and pretend to type.", "seconds": 10, "pose": "typing"},
+    {"when": "objects:keyboard", "text": "Lift your hands off the keyboard and put them back, a few times.", "seconds": 6, "pose": "lift", "object": "keyboard"},
+    {"when": "objects:mouse", "text": "Use your mouse: move it around and click a few times.", "seconds": 10, "hands": "right", "pose": "mouse", "object": "mouse"},
+    {"when": "!objects:mouse", "text": "Put one hand flat on the desk and slide it around, as if using a mouse.", "seconds": 8, "hands": "right", "pose": "mouse"},
+    {"when": "objects:keyboard", "text": "Switch between typing and the mouse a few times.", "seconds": 8, "pose": "switch", "object": "keyboard"}
+   ]},
+
+  {"id": "objects", "title": "Things you hold", "requires": ["objects"], "for_each": "object",
+   "skip_objects": ["keyboard", "mouse"],
+   "intro": "Now the things you set out. Use each one the way you normally would.",
+   "defaults": {"hands": "both"},
+   "prompts": [
+    {"text": "Pick up the {object}, use it for a moment, then put it down.", "seconds": 12, "pose": "hold", "object": "{object}"}
+   ]},
+
+  {"id": "touch", "title": "Touch the dot", "kind": "targets", "requires": [],
+   "intro": "A small dot will appear. Touch it with your index fingertip and hold still until it turns green.",
+   "defaults": {"hands": "any", "pose": "point"},
+   "hold_s": 1.0, "timeout_s": 8,
+   "text": "Touch the dot with your index fingertip and hold still.",
+   "targets": [[0.00, -0.15, -0.40], [-0.20, -0.10, -0.40], [0.20, -0.10, -0.40], [0.00, -0.05, -0.50],
+               [-0.15, -0.25, -0.35], [0.15, -0.25, -0.35], [0.00, -0.20, -0.25], [-0.25, -0.05, -0.50],
+               [0.25, -0.05, -0.50], [0.05, -0.10, -0.55]]},
+
+  {"id": "controller-push", "title": "Depth with controllers", "kind": "bar", "requires": ["controllers"],
+   "before": {"text": "Put on both controllers and tighten the straps.|Take your time: Space pauses.", "seconds": 25},
+   "intro": "Follow the marker on the bar with both hands: out as it moves right, back as it moves left.",
+   "defaults": {"hands": "both", "pose": "open", "controller": true, "controllers": ["left", "right"]},
+   "near_m": 0.2, "far_m": 0.6, "period_s": 6, "lead_s": 3, "reps": 5,
+   "heights": [
+    {"id": "chest", "text": "Chest height: hands open, palms out like a stop sign. Push out and back with the marker."},
+    {"id": "desk", "text": "Now at desk height, palms out. Push out and back with the marker."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push out and back with the marker."},
+    {"id": "left", "text": "Now off to your left side. Push out and back with the marker.", "reps": 2},
+    {"id": "right", "text": "Now off to your right side. Push out and back with the marker.", "reps": 2}
+   ],
+   "prompts": [
+    {"text": "Slowly turn your wrists: palms out, palms toward you, and back.", "seconds": 8, "pose": "turn-in-out", "distance": "mid"},
+    {"text": "Open and close your hands a few times.", "seconds": 6, "pose": "open-close", "distance": "mid"}
+   ]},
+
+  {"id": "bridge", "title": "Controller and fingertip", "requires": ["controllers"],
+   "intro": "Now one controller on and one hand bare. The thumbstick is the point to touch.",
+   "defaults": {"controller": true},
+   "prompts": [
+    {"text": "Keep the left controller on. Take the right one off and put it on the desk.", "seconds": 8, "hands": "both", "controllers": ["left"]},
+    {"text": "Left hand close to you. Touch the left thumbstick with your right index fingertip.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "near", "controllers": ["left"]},
+    {"text": "Keep touching it while you move your left hand halfway out.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "mid", "controllers": ["left"]},
+    {"text": "Keep touching it with your left arm stretched out.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "far", "controllers": ["left"]},
+    {"text": "Swap: put the right controller on, then take the left one off.", "seconds": 12, "hands": "both"},
+    {"text": "Right hand close to you. Touch the right thumbstick with your left index fingertip.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "near", "controllers": ["right"]},
+    {"text": "Keep touching it while you move your right hand halfway out.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "mid", "controllers": ["right"]},
+    {"text": "Keep touching it with your right arm stretched out.", "seconds": 6, "hands": "both", "pose": "touch-stick", "distance": "far", "controllers": ["right"]},
+    {"text": "Take off the right controller and put it on the desk in front of you.", "seconds": 8, "hands": "both"},
+    {"text": "Touch its thumbstick with your index fingertip, from the front.", "seconds": 5, "hands": "any", "pose": "touch-stick", "position": "down"},
+    {"text": "Now touch the thumbstick reaching from the left.", "seconds": 5, "hands": "any", "pose": "touch-stick", "position": "left"},
+    {"text": "Now from the right.", "seconds": 5, "hands": "any", "pose": "touch-stick", "position": "right"},
+    {"text": "Now from straight above, with your other hand.", "seconds": 5, "hands": "any", "pose": "touch-stick", "position": "up"}
+   ]},
+
+  {"id": "bare-push", "title": "Depth, bare hands", "kind": "bar", "requires": [],
+   "before": {"when": "controllers", "text": "Take the controllers off and put them out of view.", "seconds": 15},
+   "intro": "Follow the marker on the bar with both hands: out as it moves right, back as it moves left.",
+   "defaults": {"hands": "both", "pose": "open"},
+   "near_m": 0.2, "far_m": 0.6, "period_s": 6, "lead_s": 3, "reps": 4,
+   "heights": [
+    {"id": "chest", "text": "Chest height: hands open, palms out like a stop sign. Push out and back with the marker."},
+    {"id": "desk", "text": "Now at desk height, palms out. Push out and back with the marker."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push out and back with the marker."},
+    {"id": "left", "text": "Now off to your left side. Push out and back with the marker.", "reps": 2},
+    {"id": "right", "text": "Now off to your right side. Push out and back with the marker.", "reps": 2}
+   ],
+   "prompts": [
+    {"text": "Slowly turn your wrists: palms out, palms toward you, and back.", "seconds": 8, "pose": "turn-in-out", "distance": "mid"},
+    {"text": "Open and close your hands a few times.", "seconds": 6, "pose": "open-close", "distance": "mid"}
+   ]},
+
+  {"id": "no-hands", "title": "No hands", "requires": [],
+   "intro": "Last one: put your hands down, out of view.",
+   "prompts": [
+    {"text": "Keep your hands out of view and look slowly around the room.", "seconds": 10, "hands": "none"}
+   ]}
+ ]
+}
