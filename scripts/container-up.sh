@@ -6,7 +6,22 @@
 # `distrobox enter`.
 box=${FRAME_BOX:-dev}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-[ "$(podman container inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" = true ] && exit 0
+running() { [ "$(podman container inspect -f '{{.State.Running}}' "$box" 2>/dev/null)" = true ]; }
+running && exit 0
 podman container exists "$box" 2>/dev/null || exit 0  # not created yet: setup/dev-container.sh does that
-exec systemd-run --user --scope --quiet --collect --description="$box container (started for Frametop)" \
-  podman start "$box" >/dev/null
+since=$(date -u +%FT%T)
+systemd-run --user --scope --quiet --collect --description="$box container (started for Frametop)" \
+  podman start "$box" >/dev/null || exit
+
+# Every start runs distrobox-init in the container, and `distrobox enter` only waits for it
+# when it starts the container itself. The first start installs what distrobox needs and sets
+# up passwordless sudo, which takes a minute or more; until then sudo in the container asks
+# for a password (issue #9). Later starts take a few seconds.
+for i in $(seq 600); do
+  podman logs --since "$since" "$box" 2>&1 | grep -q '^container_setup_done' && exit 0
+  running || break
+  [ "$i" = 10 ] && echo "setting up the $box container (the first start takes a few minutes)" >&2
+  sleep 1
+done
+echo "the $box container didn't finish starting; see: podman logs $box" >&2
+exit 1

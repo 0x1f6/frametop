@@ -45,9 +45,9 @@ fi
 "$distrobox" enter dev -- bash -c '
 set -euo pipefail
 echo "installing ${#@} packages (already-installed ones are skipped)"
-sudo dnf install -y -q "$@" 2>&1 | { grep -vE "is already installed|^Nothing to do|^$" || true; }
+sudo -n dnf install -y -q "$@" 2>&1 | { grep -vE "is already installed|^Nothing to do|^$" || true; }
 # OpenVR programs built here (the pointer helper and probe) look for the runtime at /opt/steamvr.
-[ -e /opt/steamvr ] || sudo ln -s /run/host/opt/steamvr /opt/steamvr
+[ -e /opt/steamvr ] || sudo -n ln -s /run/host/opt/steamvr /opt/steamvr
 echo "dev container ready: $(. /etc/os-release; echo $PRETTY_NAME), glibc $(ldd --version | head -1 | grep -oE "[0-9.]+$")"
 ' dev "$@"
 EOF
