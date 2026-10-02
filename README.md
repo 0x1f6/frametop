@@ -27,7 +27,7 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 
    It asks which version you want: stable (the `main` branch, tested releases) or experimental (the `experimental` branch, the newest features, less tested). Then it clones the repo into `~/frametop` and runs `install.sh`. To choose without the question, add `-s -- --stable` or `-s -- --experimental` after `bash`. By hand, the same is `git clone https://github.com/DeeJanuz/frametop.git ~/frametop`, then `cd ~/frametop` and `./install.sh` (add `--branch experimental` to the clone for experimental).
 
-   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you three things along the way: whether to install gaze mode (experimental, yes by default) and the Bluetooth fixes, then whether to restart SteamVR. The Bluetooth fixes need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
+   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you four things along the way: whether to install gaze mode (experimental, yes by default), our own eye tracker for it (yes by default), and the Bluetooth fixes, then whether to restart SteamVR. The eye tracker and the Bluetooth fixes need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
@@ -93,7 +93,7 @@ A profile is a named setup: where the screens are, with their sizes and pins, wh
 
 ### Gaze mode (experimental)
 
-In gaze mode the pointer goes where you look, and the mouse or the keyboard does the last bit. The installer offers it (or run `gaze/run.sh install` later). Turn it on and calibrate it on the Gaze page of Frametop Input Settings.
+In gaze mode the pointer goes where you look, and the mouse or the keyboard does the last bit. The installer offers it (or run `gaze/run.sh install` later), and then our own eye tracker for it, which is more accurate than SteamVR's (or run `gaze/tracker/install.sh` later; it needs `sudo`). Gaze mode uses ours once it's installed, and SteamVR's until then. Turn it on and calibrate it on the Gaze page of Frametop Input Settings.
 
 | Do this | To get this |
 | --- | --- |

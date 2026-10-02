@@ -162,8 +162,12 @@ def key_bindings(rules):
     counts as its own)."""
     bound = rules.get("key_bindings")
     return dict(bound) if isinstance(bound, dict) else dict(DEFAULT_KEY_BINDINGS)
-# The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
+# The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias. GAZE_TRACKER
+# can also be auto (the default): ours when it's installed, else SteamVR's.
 GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker"}
+# Our tracker's frame grabber (gaze/tracker/install.sh), on the host: this runs in the dev
+# container, which has the host's /etc under /run/host.
+EYEGRAB = ("/etc/frametop/ft-eyegrab", "/run/host/etc/frametop/ft-eyegrab")
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [
@@ -961,9 +965,25 @@ class Backend(QObject):
 
     @Property(str, notify=gazeChanged)
     def gazeTracker(self):
-        """Whose eye tracking the gaze service uses: "steam" or "own" (GAZE_TRACKER)."""
-        v = read_conf().get("GAZE_TRACKER", "steam")
-        return v if v in GAZE_TRACKERS else "steam"
+        """Whose eye tracking the gaze service uses: "steam" or "own" (GAZE_TRACKER; auto is
+        ours when it's installed)."""
+        v = read_conf().get("GAZE_TRACKER", "auto")
+        if v in GAZE_TRACKERS:
+            return v
+        return "own" if self.gazeOwnInstalled else "steam"
+
+    @Property(bool, notify=gazeChanged)
+    def gazeTrackerAuto(self):
+        """GAZE_TRACKER is auto (or missing): ours once it's installed, without a choice here."""
+        return read_conf().get("GAZE_TRACKER", "auto") not in GAZE_TRACKERS
+
+    @Property(bool, notify=gazeChanged)
+    def gazeOwnInstalled(self):
+        """Is our own tracker installed? The gaze service says (it also checks ft-eyes' Python in
+        its checkout); without it, whether the frame grabber is."""
+        if "own_installed" in self._gaze:
+            return bool(self._gaze["own_installed"])
+        return any(os.path.exists(p) for p in EYEGRAB)
 
     @Property(str, notify=gazeChanged)
     def gazeEye(self):

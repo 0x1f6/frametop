@@ -37,7 +37,10 @@ works however far off the tracker is; a left click or Meta+J (the pointer helper
 "calaccept") takes it now. The full calibration's and five's dots wait for that click: you
 click when you're looking at the dot (the user asked for that: a steady gaze isn't always on
 the dot), and the gaze held still up to then is taken (ACCEPT_SPREAD). They wait as long as
-it takes, up to CLICK_IDLE. A right click or Meta+K ("calquit") closes the panel. The pointer hides meanwhile ("calpanel 1",
+it takes, up to CLICK_IDLE. A dot not taken says why in the panel's note line (reject_reason:
+gazecal.steady_samples' drop counts for SteamVR's tracker, ft-eyes' reply for ours), as does a
+click with nothing taken after ACCEPT_WAIT, and a failed calibration names its most common
+reason there and in the status. A right click or Meta+K ("calquit") closes the panel. The pointer hides meanwhile ("calpanel 1",
 renewed every second; the helper shows it again by itself when that stops).
 
 What a capture teaches:
@@ -121,6 +124,42 @@ def check_dots(kind, own):
     return out
 
 
+# Why SteamVR's samples for a look were dropped (gazecal.steady_samples' counts) -> (short, long):
+# short for the small panel, long for the calibration's. FIT_HINT goes after the ones the
+# headset's fit causes, in the calibration's panel.
+STEAM_REASONS = {"lost_left": ("left eye lost", "SteamVR lost your left eye"),
+                 "lost_right": ("right eye lost", "SteamVR lost your right eye"),
+                 "lost_both": ("both eyes lost", "SteamVR lost both eyes"),
+                 "blink": ("blinked", "you blinked"),
+                 "vergence": ("eyes disagreed", "SteamVR's two eyes disagreed")}
+FIT_HINT = "check the headset fit"
+ACCEPT_WAIT = 1.5      # seconds after a click with no capture before the panel says what it waits for
+
+
+def reject_reason(reply, why):
+    """Why a dot wasn't taken -> (short, long, fit): our tracker's reply (`reply`), or SteamVR's
+    drop counts (`why`, when `reply` is None). `fit`: the headset's fit is the likely cause."""
+    if reply is None:
+        if not why:
+            return "no reading", "SteamVR sent no reading for that look", False
+        key = max(why, key=why.get)
+        return *STEAM_REASONS[key], key.startswith("lost")
+    words = reply.removeprefix("fail ").split()
+    # ft-eyes: "fail the left eye was seen in only 3 frames", "fail the left eye moved (4.2 px)"
+    if len(words) >= 3 and words[0] == "the" and words[2] == "eye":
+        eye = words[1]
+        if "seen" in words:
+            return f"{eye} eye not seen", f"our tracker saw your {eye} eye in only {words[-2]} frames", True
+        if "moved" in words:
+            return f"{eye} eye moved", f"your {eye} eye moved while you looked", False
+    if not reply:
+        return "no answer", "our tracker didn't answer", False
+    if reply.startswith("our tracker isn't running"):
+        return "tracker not running", "our tracker isn't running", False
+    text = reply.removeprefix("fail ")
+    return text[:24], f"our tracker said: {text}", False
+
+
 def spread(points):
     """The median point and the spread around it (1.4826 x the median distance: a standard
     deviation that one stray sample can't move far)."""
@@ -174,6 +213,7 @@ class Checks:
         self.full_armed = True    # gaze mode on without a calibration opens the full one (need_full)
         self.full_blocked = None  # why it can't open now
         self.full_retry_at = 0.0
+        self.full_failed = None   # why the last calibration failed (too few dots), for problem()
         self.last_quick = 0.0
         self.sample_at = 0.0     # the tracker last sent anything
         self.seen_at = 0.0       # eyes last seen (SteamVR's tracker's variance for them, "unc")
@@ -327,6 +367,8 @@ class Checks:
         if self.full_blocked:
             return f"Not calibrated, and the calibration can't open: {self.full_blocked}"
         if not self.full_armed:
+            if self.full_failed:
+                return f"Not calibrated: the calibration failed (most dots: {self.full_failed}). Use Calibrate"
             return "Not calibrated: the calibration closed unfinished. Use Calibrate"
         return "Not calibrated: the calibration opens in the headset"
 
@@ -360,7 +402,7 @@ class Checks:
         now = time.monotonic()
         self.check = {"kind": kind, "reason": reason, "own": own, "dots": check_dots(kind, own), "i": 0,
                       "started": now, "shown": now, "run": [], "accept": False, "done_at": None, "tries": 0,
-                      "skipped": 0, "captured": 0, "points": {}}
+                      "skipped": 0, "captured": 0, "points": {}, "reasons": {}, "fit_reasons": set(), "note": ""}
         log(f"{kind} check: {reason}")
         if kind == "full":
             st = ask(SCREENS, "state", 0.5).split()
@@ -444,7 +486,7 @@ class Checks:
         self.to_panel(f"dot {yaw:.3f} {pitch:.3f} look")
         self.last_progress = None
         c["shown"] = time.monotonic()
-        c["run"], c["accept"], c["done_at"] = [], False, None
+        c["run"], c["accept"], c["done_at"], c["accept_at"] = [], False, None, None
 
     def on_sample(self, s):
         self.sample_at = time.monotonic()
@@ -470,6 +512,7 @@ class Checks:
         if "hy" not in src:
             return
         now = time.monotonic()
+        c["gaze_at"] = now
         if now < c["shown"] + CHECK_SETTLE:
             return
         g = (src["hy"], src["hp"])
@@ -530,7 +573,9 @@ class Checks:
             if ok:
                 svc.weights["own"].add(miss)
         else:
-            steady = steady_samples(samples)
+            why = {}
+            steady = steady_samples(samples, why=why)
+            rec["dropped"] = why
             reads = {}
             for name in ("action", "mmap1", "mmap2", "left", "right"):
                 pts = [(smp["src"][name]["hy"], smp["src"][name]["hp"]) for smp in steady
@@ -564,22 +609,40 @@ class Checks:
                 if svc.kind == "eyes":
                     svc.weights["steam"].add(miss)
                 svc.dirty = True
+        if not ok:
+            short, long, fit = reject_reason(rec.get("reply", "") if c["own"] else None, rec.get("dropped"))
+            rec["reason"] = long
+            c["reasons"][long] = c["reasons"].get(long, 0) + 1
+            if fit:
+                c["fit_reasons"].add(long)
         rec["accepted"] = ok
         self.log_check(rec)
         if not ok:
             c["tries"] += 1
-            log(f"{c['kind']} check dot {c['i'] + 1}: not taken ({rec.get('reply', '')})")
-            if c["tries"] >= 2 or c["kind"] != "full":
+            log(f"{c['kind']} check dot {c['i'] + 1}: not taken: {rec['reason']} ({rec.get('reply', '')})")
+            full = c["kind"] == "full"
+            if c["tries"] >= 2 or not full:
+                self.note(f"Dot skipped: {long}" + (f" ({FIT_HINT})" if fit else "") if full else f"Skipped: {short}")
                 self.skip()
             else:
+                self.note(f"Not taken: {long}. Look at the dot and click again")
                 self.to_panel(f"dot {yaw:.3f} {pitch:.3f} fail")
-                c["run"], c["accept"] = [], False
+                c["run"], c["accept"], c["accept_at"] = [], False, None
                 c["shown"] = time.monotonic()  # settle again, then retry
             return
         c["captured"] += 1
         c["tries"] = 0
+        self.note("")
         self.to_panel(f"dot {yaw:.3f} {pitch:.3f} done")
         c["done_at"] = time.monotonic() + DONE_PAUSE
+
+    def note(self, text):
+        """The panel's warning line, over the instructions (empty: none). It stays until the
+        next dot is taken, so a skipped dot's reason is still there at the one after it."""
+        c = self.check
+        if c.get("note") != text:
+            c["note"] = text
+            self.to_panel(f"note {text}".rstrip())
 
     def skip(self):
         c = self.check
@@ -609,12 +672,20 @@ class Checks:
             return
         n = len(c["dots"])
         if c["captured"] < n * 2 / 3:
-            log(f"calibration failed: only {c['captured']} of {n} dots; the old one stays")
+            reasons = c["reasons"]
+            main = max(reasons, key=reasons.get) if reasons else None
+            self.full_failed = main
+            log(f"calibration failed: only {c['captured']} of {n} dots; the old one stays"
+                + (f". Not taken: {', '.join(f'{r} ({k})' for r, k in reasons.items())}" if reasons else ""))
             self.to_panel(f"text Calibration failed: only {c['captured']} of {n} dots. Try again from Input Settings")
+            if main:
+                fit = main in c["fit_reasons"]
+                self.note(f"Most dots: {main}" + (". Check headset fit on the Gaze page" if fit else ""))
             self.to_panel("dot 0 0 off")
-            c["done_at"] = time.monotonic() + 3.0
+            c["done_at"] = time.monotonic() + (8.0 if main else 3.0)  # time to read why
             c["closing"] = True
             return
+        self.full_failed = None
         if c["own"]:
             reply = ask(EYES, "calib-fit", 10.0)
             log(f"calibration ({c['captured']} of {n} dots): our tracker says {reply or 'nothing'}")
@@ -684,6 +755,8 @@ class Checks:
             if self.check and self.check["kind"] == "fit":
                 self.check["fit"].toggle_guide(time.monotonic())
             elif self.check:
+                if not self.check["accept"]:
+                    self.check["accept_at"] = time.monotonic()
                 self.check["accept"] = True
             return "ok"
         if cmd == "calquit":
@@ -730,6 +803,13 @@ class Checks:
             return
         if c["done_at"]:
             return
+        if c["accept"] and c["accept_at"] and now - c["accept_at"] > ACCEPT_WAIT:
+            # Clicked, but no capture yet (see on_sample): say what it's waiting for.
+            full = c["kind"] == "full"
+            if now - c.get("gaze_at", 0.0) > 0.5:
+                self.note("Waiting: the eye tracker isn't sending a gaze" if full else "Waiting: no gaze")
+            else:
+                self.note("Waiting for your gaze to hold still on the dot" if full else "Hold your look still")
         if c["kind"] == "quick" and now - c["started"] > QUICK_TIMEOUT:
             self.close("ignored")
         elif c["kind"] != "quick" and now - c["shown"] > CLICK_IDLE:

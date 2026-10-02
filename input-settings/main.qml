@@ -967,15 +967,27 @@ Kirigami.ApplicationWindow {
                 RowLayout {
                     Kirigami.FormData.label: "Eye tracker:"
                     Controls.RadioButton {
+                        text: "Own tracker (recommended)"
+                        checked: backend.gazeTracker === "own"
+                        onToggled: if (checked) backend.setGazeTracker("own")
+                    }
+                    Controls.RadioButton {
                         text: "SteamVR"
                         checked: backend.gazeTracker === "steam"
                         onToggled: if (checked) backend.setGazeTracker("steam")
                     }
-                    Controls.RadioButton {
-                        text: "Own tracker"
-                        checked: backend.gazeTracker === "own"
-                        onToggled: if (checked) backend.setGazeTracker("own")
-                    }
+                }
+                Controls.Label {
+                    // Ours is the default once it's installed (GAZE_TRACKER=auto, gaze/ft-gazed).
+                    visible: backend.gazeTracker === "steam" && !backend.gazeOwnInstalled
+                    text: "Our own tracker is more accurate. Install it with gaze/tracker/install.sh in the "
+                          + "Frametop folder, in a terminal (asks for sudo)"
+                          + (backend.gazeTrackerAuto ? "; gaze then uses it, and you calibrate it once."
+                                                     : ", then pick Own tracker here and calibrate it once.")
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+                    wrapMode: Text.WordWrap
+                    opacity: 0.7
+                    font: Kirigami.Theme.smallFont
                 }
                 Controls.Label {
                     // The gaze service runs ours (gaze/tracker/ft-eyes); it needs the frame grabber

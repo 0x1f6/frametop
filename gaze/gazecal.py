@@ -640,31 +640,44 @@ def cross_validate(points, mode):
     return errs
 
 
-def steady_samples(samples, vergence_jump=1.5):
+def steady_samples(samples, vergence_jump=1.5, why=None):
     """The samples of one look at one spot where the tracker had both eyes: none in a blink
     (openness under half its median over the samples), none where it had lost an eye (its
     variance over EYE_LOST), and none where the angle between the eyes' directions (`lr`, the
     vergence) is more than `vergence_jump` degrees from its median over the samples. The
     vergence itself depends on distance (about 2.8 degrees for a screen 1.3 m away, a
     fraction of one far off), so only a jump away from what it was during this look means
-    the tracker lost an eye. Without the mmap there's nothing to judge by: all are kept."""
+    the tracker lost an eye. Without the mmap there's nothing to judge by: all are kept.
+    `why`, a dict, gets how many were dropped for each reason: "lost_left", "lost_right",
+    "lost_both", "blink" and "vergence" (each sample once, for the first that applies)."""
+    if why is None:
+        why = {}
     # Openness: a blink is a sharp drop from what it was during this look. Not a fixed
     # level: looking down, the upper lids come down with the eyes, and in bright light you
     # squint, so the reading can stay under 0.5 for the whole look while the tracker follows
     # the eyes fine (a calibration dot at the bottom of the bright round failed that way).
     opens = [min(o) for o in ((smp["src"].get("mmap1") or {}).get("open") for smp in samples) if o]
     floor = max(0.12, 0.5 * statistics.median(opens)) if len(opens) >= 5 else 0.12
-    opened = []
+    seen = []
     for smp in samples:
-        o = (smp["src"].get("mmap1") or {}).get("open")
-        if not o or min(o) >= floor:
-            opened.append(smp)
+        m1 = smp["src"].get("mmap1") or {}
+        o = m1.get("open")
+        lost = [u > EYE_LOST for u in m1.get("unc") or [0, 0]]
+        # A lost eye's openness reads 0 too, so a lost eye is named before a blink.
+        key = ("lost_both" if all(lost) else "lost_left" if lost[0] else "lost_right") if any(lost) else \
+            "blink" if o and min(o) < floor else None
+        if key:
+            why[key] = why.get(key, 0) + 1
+        else:
+            seen.append(smp)
 
     def vergence(smp):
         return (smp["src"].get("mmap1") or {}).get("lr", (smp["src"].get("mmap2") or {}).get("lr"))
-    opened = [smp for smp in opened if max((smp["src"].get("mmap1") or {}).get("unc") or [0]) <= EYE_LOST]
-    have = [v for v in map(vergence, opened) if v is not None]
+    have = [v for v in map(vergence, seen) if v is not None]
     if len(have) < 5:
-        return opened
+        return seen
     med = statistics.median(have)
-    return [smp for smp in opened if vergence(smp) is None or abs(vergence(smp) - med) <= vergence_jump]
+    kept = [smp for smp in seen if vergence(smp) is None or abs(vergence(smp) - med) <= vergence_jump]
+    if len(kept) < len(seen):
+        why["vergence"] = why.get("vergence", 0) + len(seen) - len(kept)
+    return kept
