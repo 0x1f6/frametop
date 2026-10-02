@@ -181,7 +181,7 @@ int main(int argc, char **argv) {
     PinchParams pinch_params;
     GripParams grip_params;
     bool gesture_log = false;   // what the pinch and grip detectors measure, 10 times a second
-    double record_for = 120;
+    double record_for = 120, record_hz = 0;   // record_hz: at most this many sets a second (0: all)
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const bool more = i + 1 < argc;
@@ -205,6 +205,7 @@ int main(int argc, char **argv) {
         else if (a == "--ring" && more) ring_path = argv[++i];
         else if (a == "--record" && more) record = argv[++i];
         else if (a == "--record-for" && more) record_for = std::atof(argv[++i]);
+        else if (a == "--record-hz" && more) record_hz = std::max(0.0, std::atof(argv[++i]));
         else if (a == "--keep-presence" && more) keep_presence = std::atof(argv[++i]);
         else if (a == "--cams" && more) cams_arg = argv[++i];
         else if (a == "--bright" && more) bright_arg = argv[++i];
@@ -222,14 +223,15 @@ int main(int argc, char **argv) {
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--no-gestures] (hands for the cutouts only: no pinches or grips)\n"
-                        "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
+                        "          [--record DIR] [--record-for S] [--record-hz N] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (ft-camd's, or ft-ringplay's)\n"
                         "          [--cams auto|mono|color|all] (auto) [--bright all|color] (all) [--bright-on L] (40) [--bright-off L] (25)\n"
                         "          [--color-left color_video0|color_video3] [--color-crop subtract|none]\n"
                         "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated] [--pinch-palm-down MAX] (1: off)\n"
                         "          [--grip-begin R] (1.2) [--grip-end R] (1.45) [--gesture-log]\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
-                        "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for ft-handreplay; SIGUSR1\n"
+                        "Recording saves every frame set (at most N a second with --record-hz) for S seconds (120) to DIR/sets.bin,\n"
+                        "for ft-handreplay; SIGUSR1\n"
                         "starts one in ~/.local/share/frametop/hands/rec-<time>. --record-only records without tracking, so it\n"
                         "can run beside a tracking ft-hands. With ft-camd --with-dark, recordings also get each\n"
                         "camera's newest dark frame, as <name>_dk; with --with-color, the color cameras' as color_video<N>.\n"
@@ -260,7 +262,7 @@ int main(int argc, char **argv) {
     Pinch pinch(pinch_params);
     Grip grip(grip_params);
     std::unique_ptr<Recorder> rec;
-    uint64_t rec_start = 0;
+    uint64_t rec_start = 0, rec_next_ns = 0;   // rec_next_ns: --record-hz's next set, capture clock
     auto start_recording = [&](const std::string &dir, std::string &e) {
         rec = std::make_unique<Recorder>();
         if (!rec->open(dir, e)) return rec.reset(), false;
@@ -490,7 +492,15 @@ int main(int argc, char **argv) {
                 if (!start_recording(dir + "/" + name, e)) std::fprintf(stderr, "%s\n", e.c_str());
             }
             if (rec) {   // about 80 MB/s; dark frames double that, color frames add 70 MB/s
-                if ((mono_ns() - rec_start) / 1e9 < record_for) {
+                const bool due = record_hz <= 0 || tmin >= rec_next_ns;   // --record-hz skips the sets between
+                if (due && record_hz > 0) rec_next_ns = tmin + uint64_t(1e9 / record_hz) - 5'000'000;
+                if ((mono_ns() - rec_start) / 1e9 >= record_for) {
+                    const size_t n = rec->written(), d = rec->dropped();
+                    rec.reset();   // writes out what's queued
+                    std::printf("recording done: %zu sets, %zu dropped\n", n, d);
+                    std::fflush(stdout);
+                    if (!track) break;
+                } else if (due) {
                     for (auto &[name, i] : dark) {   // the newest dark and color frames, as they are
                         fh_ring_slot_t meta;
                         const uint64_t n = ring.latest(i);
@@ -500,12 +510,6 @@ int main(int argc, char **argv) {
                                               meta.dqbuf_ns});
                     }
                     rec->add(frames);
-                } else {
-                    const size_t n = rec->written(), d = rec->dropped();
-                    rec.reset();   // writes out what's queued
-                    std::printf("recording done: %zu sets, %zu dropped\n", n, d);
-                    std::fflush(stdout);
-                    if (!track) break;
                 }
             }
             if (!track && rec && status > 0 && (mono_ns() - t_status) / 1e9 >= status) {
