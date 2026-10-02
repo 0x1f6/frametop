@@ -1,0 +1,946 @@
+// ft-handpanel: the hand recorder's headset panel (hands/rec/DESIGN.md). A SteamVR overlay
+// fixed to the headset that tells the person what to do with their hands while the cameras
+// record. It sits --distance ahead (1.2 m), centred UP_DEG above straight ahead, so the hands
+// stay clear below it, WIDTH_DEG across (4:3), dim and see-through like the gaze quick check.
+// It's drawn on the CPU and takes no input: the session runner (hands/rec/session.py) drives it.
+//
+// It also does the two jobs that need SteamVR's poses: the "touch the dot" target, a second
+// overlay (frametop.handpanel.target) fixed in the room, and the pose log, the head and the
+// controllers 250 times a second into poses.jsonl, which goes with each take.
+//
+// Control socket: abstract unix datagram "@ft_handpanel" (--socket NAME); a sender with an
+// address gets "ok ..." or "error ...". UTF-8; "|" starts a new line in text:
+//   show / hide                  the panel (a "show" makes it visible with its first picture;
+//                                the target is separate: "target off" hides it)
+//   title <text>                 the big line at the top (empty to clear)
+//   step <text>                  a small line at the top right, e.g. "Section 3 of 11"
+//   text <text>                  the instruction: large, wrapped to the panel's width, centred
+//   note <text>                  an orange warning line under the instruction (empty to clear)
+//   countdown <0..1> | off       a thin bar along the bottom: the share of the prompt's time left
+//   hands <left> <right>         the "Left hand" and "Right hand" chips: seen (green), lost
+//                                (orange) or off (hidden)
+//   bar <target 0..1> <current 0..1|-1> [<near label>|<far label>] / bar off
+//                                the near/far bar: a track with a ring at the target and a dot
+//                                at the hand's position (-1: not seen). The labels are split at
+//                                "|", or else at the first space (default "Near" and "Far")
+//   paused on|off                "Paused" over the picture
+//   target <x> <y> <z> [show|hold <0..1>|done] / target off
+//                                the touch target, about 2 cm across. The point is in the head
+//                                frame (metres, +x right, +y up, -z forward). The first command
+//                                with a new point places it in the room with the headset's pose
+//                                at that moment, facing the headset, and it stays there; the
+//                                same point again changes only the state. hold draws a ring
+//                                filling to the share given, done turns it green. "target off"
+//                                hides it and forgets the point. Reply: "ok <room x> <y> <z>"
+//                                (standing universe)
+//   poses start <path> / poses stop
+//                                log poses, appending to path (poses.jsonl, DESIGN.md) at
+//                                250 Hz until stopped. "poses stop" replies "ok <samples>"
+//   devices                      "ok hmd <r> left <r|-> right <r|->": ETrackingResult now
+//                                (- for no device in that role)
+//   head                         "ok <12 floats>": the headset's pose now (standing universe,
+//                                row-major 3x4)
+//   ping                         "ok shown" or "ok hidden"
+//
+// Each picture goes into the next of three shared buffers (linear DMA-BUFs SteamVR imported
+// once), and the overlay switches to it, as gaze/panel/ft-gazepanel.cpp does: SetOverlayRaw
+// flickered and lagged there, so it's only the fallback. The target has its own three small
+// buffers. Pictures are drawn only when a command changed something.
+//
+// The pose log runs on a thread of its own, so a slow picture or command never delays a
+// sample. OpenVR's client isn't documented as thread-safe, so both threads take g_vr around
+// every OpenVR call.
+//
+// Options: --watch-stdin (quit when stdin closes: the session runs it), --socket NAME,
+// --distance METRES, --no-vr. --no-vr is for testing without a headset: no SteamVR at all; each
+// picture's text goes to stdout instead (and with --dump DIR, the pictures to DIR/panel.pam
+// and DIR/target.pam), "poses start" writes nothing, "devices" and "head" reply with an error,
+// and "target" places the point as if the headset were at the room's origin.
+// Runs in the dev container (hands/rec/build.sh builds it into hands/rec/build).
+#include <openvr.h>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+#include <drm_fourcc.h>
+#include <fcntl.h>
+#include <gbm.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cmath>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+constexpr double kWidthDeg = 36;  // WIDTH_DEG: the panel's width (4:3)
+constexpr double kUpDeg = 12;     // UP_DEG: the panel's centre above straight ahead
+constexpr int kW = 1024, kH = 768;
+constexpr double kPxPerDeg = kW / kWidthDeg;
+constexpr int kTargetPx = 128;
+constexpr double kTargetM = 0.03;      // the target overlay's width: the dot and its ring
+constexpr double kTargetDotM = 0.02;   // the dot itself
+constexpr int64_t kPosePeriodNs = 4'000'000;  // 250 Hz
+std::atomic<bool> g_stop{false};
+std::mutex g_vr;  // around every OpenVR call: the main thread and the pose log's thread make them
+
+int64_t NowNs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+}
+
+// ---------------------------------------------------------------- text (as ft-gazepanel)
+
+stbtt_fontinfo g_font;
+std::vector<unsigned char> g_fontData;
+bool g_fontOk = false;
+struct Glyph {
+    std::vector<unsigned char> bitmap;
+    int w = 0, h = 0, xoff = 0, yoff = 0, advance = 0;
+};
+std::map<std::pair<uint32_t, int>, Glyph> g_glyphs;
+
+void LoadFont() {
+    std::string path;
+    if (FILE *p = popen("fc-match -f '%{file}' 'Noto Sans' 2>/dev/null", "r")) {
+        char buf[512];
+        if (std::fgets(buf, sizeof buf, p)) path = buf;
+        pclose(p);
+    }
+    if (path.empty()) path = "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf";
+    if (FILE *f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END);
+        g_fontData.resize(size_t(std::ftell(f)));
+        std::fseek(f, 0, SEEK_SET);
+        g_fontOk = std::fread(g_fontData.data(), 1, g_fontData.size(), f) == g_fontData.size() &&
+                   stbtt_InitFont(&g_font, g_fontData.data(), stbtt_GetFontOffsetForIndex(g_fontData.data(), 0));
+        std::fclose(f);
+    }
+    if (!g_fontOk) std::fprintf(stderr, "ft-handpanel: no font (%s); no text\n", path.c_str());
+}
+
+const Glyph &GetGlyph(uint32_t cp, int size) {
+    auto [it, fresh] = g_glyphs.try_emplace({cp, size});
+    Glyph &g = it->second;
+    if (fresh) {
+        const float scale = stbtt_ScaleForPixelHeight(&g_font, float(size));
+        unsigned char *b = stbtt_GetCodepointBitmap(&g_font, 0, scale, int(cp), &g.w, &g.h, &g.xoff, &g.yoff);
+        if (b) g.bitmap.assign(b, b + size_t(g.w) * g.h), stbtt_FreeBitmap(b, nullptr);
+        int adv, lsb;
+        stbtt_GetCodepointHMetrics(&g_font, int(cp), &adv, &lsb);
+        g.advance = int(std::lround(adv * scale));
+    }
+    return g;
+}
+
+std::vector<uint32_t> Codepoints(const std::string &s) {
+    std::vector<uint32_t> out;
+    for (const unsigned char *p = (const unsigned char *)s.c_str(); *p;) {
+        uint32_t c = *p++;
+        int more = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+        if (more) c &= 0x3Fu >> more;
+        for (; more && (*p & 0xC0) == 0x80; --more) c = c << 6 | (*p++ & 0x3F);
+        out.push_back(c);
+    }
+    return out;
+}
+
+int TextWidth(const std::string &s, int size) {
+    if (!g_fontOk) return 0;
+    int width = 0;
+    for (uint32_t cp : Codepoints(s)) width += GetGlyph(cp, size).advance;
+    return width;
+}
+
+// s as lines no wider than width: "|" starts a new line, and lines break between words. A
+// word wider than the panel gets a line of its own and runs over.
+std::vector<std::string> Wrap(const std::string &s, int size, int width) {
+    std::vector<std::string> out;
+    if (s.empty()) return out;
+    for (size_t at = 0; at <= s.size();) {
+        const size_t bar = std::min(s.find('|', at), s.size());
+        const std::string para = s.substr(at, bar - at);
+        std::string line;
+        for (size_t w = 0; w < para.size();) {
+            const size_t space = std::min(para.find(' ', w), para.size());
+            const std::string word = para.substr(w, space - w);
+            w = space + 1;
+            if (word.empty()) continue;
+            const std::string longer = line.empty() ? word : line + " " + word;
+            if (line.empty() || TextWidth(longer, size) <= width) {
+                line = longer;
+            } else {
+                out.push_back(line);
+                line = word;
+            }
+        }
+        out.push_back(line);
+        at = bar + 1;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------- the pictures
+
+struct Picture {
+    int w, h;
+    std::vector<uint8_t> px;  // R, G, B, A (straight alpha)
+};
+
+void Blend(Picture &p, int x, int y, double r, double g, double b, double a) {
+    if (x < 0 || y < 0 || x >= p.w || y >= p.h || a <= 0) return;
+    uint8_t *q = &p.px[(size_t(y) * p.w + x) * 4];
+    a = std::min(a, 1.0);
+    q[0] = uint8_t(std::lround(q[0] + (r * 255 - q[0]) * a));
+    q[1] = uint8_t(std::lround(q[1] + (g * 255 - q[1]) * a));
+    q[2] = uint8_t(std::lround(q[2] + (b * 255 - q[2]) * a));
+    q[3] = uint8_t(std::lround(q[3] + (255 - q[3]) * a));
+}
+
+// A filled disc, or (inner > 0) a ring from inner to outer radius, anti-aliased; with sweep < 1,
+// only that share of the ring, clockwise from the top.
+void Disc(Picture &p, double cx, double cy, double outer, double inner, double r, double g, double b, double a,
+          double sweep = 1) {
+    const int x0 = int(cx - outer - 1), x1 = int(cx + outer + 1), y0 = int(cy - outer - 1), y1 = int(cy + outer + 1);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            const double dx = x + 0.5 - cx, dy = y + 0.5 - cy, d = std::hypot(dx, dy);
+            double cover = std::clamp(outer - d + 0.5, 0.0, 1.0);
+            if (inner > 0) cover = std::min(cover, std::clamp(d - inner + 0.5, 0.0, 1.0));
+            if (sweep < 1) {
+                double ang = std::atan2(dx, -dy) / (2 * M_PI);  // 0 at the top, clockwise
+                if (ang < 0) ang += 1;
+                if (ang > sweep) continue;
+            }
+            Blend(p, x, y, r, g, b, a * cover);
+        }
+}
+
+void Rect(Picture &p, int x0, int y0, int x1, int y1, double r, double g, double b, double a) {
+    for (int y = std::max(y0, 0); y < std::min(y1, p.h); ++y)
+        for (int x = std::max(x0, 0); x < std::min(x1, p.w); ++x) Blend(p, x, y, r, g, b, a);
+}
+
+// A rectangle with rounded corners of radius rad, anti-aliased: the panel itself, the chips.
+void RoundRect(Picture &p, int x0, int y0, int x1, int y1, double rad, double r, double g, double b, double a) {
+    for (int y = std::max(y0, 0); y < std::min(y1, p.h); ++y)
+        for (int x = std::max(x0, 0); x < std::min(x1, p.w); ++x) {
+            const double dx = std::max({x0 + rad - x - 0.5, x + 0.5 - (x1 - rad), 0.0});
+            const double dy = std::max({y0 + rad - y - 0.5, y + 0.5 - (y1 - rad), 0.0});
+            Blend(p, x, y, r, g, b, a * std::clamp(rad - std::hypot(dx, dy) + 0.5, 0.0, 1.0));
+        }
+}
+
+enum Align { kLeft, kCentre, kRight };
+
+// Text vertically centred on cy; x is its left end, middle or right end.
+void Text(Picture &p, const std::string &s, int size, int x, int cy, double r, double g, double b, Align align = kCentre) {
+    if (!g_fontOk || s.empty()) return;
+    const auto cps = Codepoints(s);
+    int width = 0;
+    for (uint32_t cp : cps) width += GetGlyph(cp, size).advance;
+    int ascent, descent, gap;
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, float(size));
+    if (align == kCentre) x -= width / 2;
+    else if (align == kRight) x -= width;
+    const int baseline = cy + int(std::lround((ascent + descent) * scale / 2));
+    for (uint32_t cp : cps) {
+        const Glyph &gl = GetGlyph(cp, size);
+        for (int gy = 0; gy < gl.h; ++gy)
+            for (int gx = 0; gx < gl.w; ++gx)
+                Blend(p, x + gl.xoff + gx, baseline + gl.yoff + gy, r, g, b, gl.bitmap[size_t(gy) * gl.w + gx] / 255.0);
+        x += gl.advance;
+    }
+}
+
+void Text(Picture &p, const std::string &s, int size, int x, int cy, double lum, Align align = kCentre) {
+    Text(p, s, size, x, cy, lum, lum, lum, align);
+}
+
+struct Panel {
+    Picture pic{kW, kH, {}};
+    std::string title, step, text, note;
+    double countdown = -1;  // the share of the prompt's time left, or -1: off
+    std::string hands[2] = {"off", "off"};
+    bool barOn = false;
+    double barTarget = 0, barCurrent = -1;
+    std::string nearLabel = "Near", farLabel = "Far";
+    bool paused = false;
+    // What the last Draw laid out, for --no-vr's printout.
+    std::vector<std::string> lines, noteLines;
+    double textDeg = 0;
+};
+
+void Draw(Panel &p) {
+    // The dim rounded panel, see-through so it's clear of what's behind (the quick check's look,
+    // with the same corner radius in degrees). It never changes, so it's drawn once.
+    static Picture back{kW, kH, {}};
+    if (back.px.empty()) {
+        back.px.assign(size_t(kW) * kH * 4, 0);
+        RoundRect(back, 0, 0, kW, kH, kPxPerDeg * 1.9, 0.06, 0.06, 0.07, 0.82);
+    }
+    Picture &pic = p.pic;
+    pic.px = back.px;
+    const double ppd = kPxPerDeg, faint = 0.75;
+    const int margin = int(ppd * 1.6), width = kW - 2 * margin;
+
+    // The title and the step share the top line; a faint rule under them.
+    int top = margin;
+    if (!p.title.empty() || !p.step.empty()) {
+        const int titleSize = int(ppd * 1.6), stepSize = int(ppd * 0.9), cy = margin + titleSize / 2;
+        Text(pic, p.step, stepSize, kW - margin, cy, faint, kRight);
+        Text(pic, p.title, titleSize, margin, cy, 1.0, kLeft);
+        top = cy + int(titleSize * 0.85);
+        Rect(pic, margin, top, kW - margin, top + 2, 1, 1, 1, 0.15);
+        top += int(ppd * 0.8);
+    }
+
+    // From the bottom up: the countdown, the chips, the near/far bar. The instruction gets what's left.
+    int bottom = kH - margin;
+    if (p.countdown >= 0) {
+        const int y = kH - int(ppd * 0.9), th = std::max(4, int(ppd * 0.22));
+        Rect(pic, margin, y, kW - margin, y + th, 1, 1, 1, 0.15);
+        Rect(pic, margin, y, margin + int(std::lround(width * p.countdown)), y + th, 0.3, 0.85, 1.0, 0.95);
+        bottom = std::min(bottom, y - int(ppd * 0.6));
+    }
+    if (p.hands[0] != "off" || p.hands[1] != "off") {
+        const int ch = int(ppd * 1.25), size = int(ppd * 0.85), cy = bottom - ch / 2, gap = int(ppd * 0.6);
+        for (int k = 0; k < 2; ++k) {
+            if (p.hands[k] == "off") continue;
+            const char *label = k ? "Right hand" : "Left hand";
+            const int cw = TextWidth(label, size) + 2 * int(ppd * 0.8);
+            const int x0 = k ? kW / 2 + gap / 2 : kW / 2 - gap / 2 - cw;
+            if (p.hands[k] == "seen") RoundRect(pic, x0, cy - ch / 2, x0 + cw, cy + ch / 2, ch / 2.0, 0.2, 0.62, 0.32, 0.95);
+            else RoundRect(pic, x0, cy - ch / 2, x0 + cw, cy + ch / 2, ch / 2.0, 0.95, 0.5, 0.12, 0.95);
+            Text(pic, label, size, x0 + cw / 2, cy, 1.0);
+        }
+        bottom = cy - ch / 2 - int(ppd * 0.7);
+    }
+    if (p.barOn) {
+        // The ring is where the hand should be, the dot where it is: put the dot in the ring.
+        const int labelSize = int(ppd * 0.85), ly = bottom - labelSize / 2, ty = ly - int(ppd * 1.2);
+        const int x0 = margin + int(ppd), x1 = kW - margin - int(ppd), th = std::max(6, int(ppd * 0.3));
+        RoundRect(pic, x0, ty - th / 2, x1, ty + th / 2, th / 2.0, 1, 1, 1, 0.2);
+        Text(pic, p.nearLabel, labelSize, x0, ly, faint, kLeft);
+        Text(pic, p.farLabel, labelSize, x1, ly, faint, kRight);
+        const double ring = ppd * 0.65;
+        Disc(pic, x0 + (x1 - x0) * p.barTarget, ty, ring, ring - ppd * 0.14, 1, 1, 1, 0.95);
+        if (p.barCurrent >= 0) Disc(pic, x0 + (x1 - x0) * p.barCurrent, ty, ppd * 0.4, 0, 0.3, 0.85, 1.0, 0.95);
+        bottom = ty - int(ring) - int(ppd * 0.8);
+    }
+
+    // The instruction, then the note, centred together in the space between. A long instruction
+    // gets smaller, down to 1 degree a line, before it runs over.
+    const int noteSize = int(ppd * 1.1), noteLh = int(noteSize * 1.3), noteGap = int(ppd * 0.6);
+    p.noteLines = Wrap(p.note, noteSize, width);
+    int size = 0, lh = 0, block = 0;
+    for (p.textDeg = 1.4;; p.textDeg -= 0.1) {
+        size = int(ppd * p.textDeg), lh = int(size * 1.3);
+        p.lines = Wrap(p.text, size, width);
+        block = int(p.lines.size()) * lh + (p.noteLines.empty() ? 0 : noteGap + int(p.noteLines.size()) * noteLh);
+        if (block <= bottom - top || p.textDeg < 1.05) break;
+    }
+    int y = top + std::max(0, (bottom - top - block) / 2);
+    for (const std::string &line : p.lines) Text(pic, line, size, kW / 2, y + lh / 2, 1.0), y += lh;
+    if (!p.noteLines.empty()) y += p.lines.empty() ? 0 : noteGap;
+    for (const std::string &line : p.noteLines) Text(pic, line, noteSize, kW / 2, y + noteLh / 2, 1.0, 0.62, 0.3), y += noteLh;
+
+    if (p.paused) {
+        // The picture stays faintly behind, so it's clear what resumes; the word sits on a
+        // solid pill, so the text behind doesn't run through it.
+        const int size = int(ppd * 2.4), pw = TextWidth("Paused", size) + 2 * int(ppd * 1.2), ph = int(size * 1.6);
+        RoundRect(pic, 0, 0, kW, kH, kPxPerDeg * 1.9, 0.02, 0.02, 0.03, 0.75);
+        RoundRect(pic, (kW - pw) / 2, (kH - ph) / 2, (kW + pw) / 2, (kH + ph) / 2, ph / 2.0, 0.12, 0.12, 0.14, 1);
+        Text(pic, "Paused", size, kW / 2, kH / 2, 1.0);
+    }
+}
+
+struct Target {
+    Picture pic{kTargetPx, kTargetPx, {}};
+    bool on = false, placed = false;
+    double head[3] = {0, 0, 0}, room[3] = {0, 0, 0};
+    std::string state = "show";
+    double progress = 0;
+};
+
+// The dot: lit from the upper left, so it reads as a small ball, with a dark outline so it
+// shows against a bright room. hold adds a ring around it filling clockwise; done turns it green.
+void DrawTarget(Target &t) {
+    Picture &pic = t.pic;
+    pic.px.assign(size_t(pic.w) * pic.h * 4, 0);
+    const double c = pic.w / 2.0, rad = pic.w * kTargetDotM / kTargetM / 2, outline = pic.w * 0.025;
+    const bool done = t.state == "done";
+    const double cr = done ? 0.3 : 1.0, cg = done ? 0.9 : 1.0, cb = done ? 0.4 : 1.0;
+    const double lx = -0.45, ly = -0.55, lz = std::sqrt(1 - lx * lx - ly * ly);
+    Disc(pic, c, c, rad + outline, 0, 0.05, 0.05, 0.06, 0.95);
+    for (int y = 0; y < pic.h; ++y)
+        for (int x = 0; x < pic.w; ++x) {
+            const double dx = (x + 0.5 - c) / rad, dy = (y + 0.5 - c) / rad, d2 = dx * dx + dy * dy;
+            const double cover = std::clamp((1 - std::sqrt(d2)) * rad + 0.5, 0.0, 1.0);
+            if (cover <= 0) continue;
+            const double nz = std::sqrt(std::max(0.0, 1 - d2));
+            const double shade = 0.55 + 0.45 * std::max(0.0, dx * lx + dy * ly + nz * lz);
+            Blend(pic, x, y, cr * shade, cg * shade, cb * shade, cover);
+        }
+    if (t.state == "hold") {
+        const double r0 = rad + outline + pic.w * 0.05, r1 = r0 + pic.w * 0.07;
+        Disc(pic, c, c, r1 + outline, r0 - outline, 0.05, 0.05, 0.06, 0.6);
+        Disc(pic, c, c, r1, r0, 1, 1, 1, 0.3);
+        Disc(pic, c, c, r1, r0, 0.3, 0.85, 1.0, 1, std::clamp(t.progress, 0.0, 1.0));
+    }
+}
+
+// --no-vr: a picture as a PAM file (RGBA, straight alpha) for checking the layout by eye.
+void Dump(const Picture &pic, const std::string &path) {
+    if (FILE *f = std::fopen(path.c_str(), "wb")) {
+        std::fprintf(f, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", pic.w, pic.h);
+        std::fwrite(pic.px.data(), 1, pic.px.size(), f);
+        std::fclose(f);
+    }
+}
+
+// --no-vr: the state the pictures show, as text.
+void Print(const Panel &p, const Target &t, bool visible, int number) {
+    std::printf("--- picture %d: panel %s\n", number, visible ? "shown" : "hidden");
+    std::printf("title: %s\nstep: %s\n", p.title.c_str(), p.step.c_str());
+    std::printf("text: %zu line(s), %.1f deg\n", p.lines.size(), p.textDeg);
+    for (const std::string &line : p.lines) std::printf("  | %s\n", line.c_str());
+    std::printf("note: %zu line(s)\n", p.noteLines.size());
+    for (const std::string &line : p.noteLines) std::printf("  | %s\n", line.c_str());
+    if (p.countdown >= 0) std::printf("countdown: %.2f\n", p.countdown);
+    else std::printf("countdown: off\n");
+    std::printf("hands: left %s, right %s\n", p.hands[0].c_str(), p.hands[1].c_str());
+    if (p.barOn)
+        std::printf("bar: target %.2f, current %.2f, near \"%s\", far \"%s\"\n", p.barTarget, p.barCurrent,
+                    p.nearLabel.c_str(), p.farLabel.c_str());
+    else std::printf("bar: off\n");
+    std::printf("paused: %s\n", p.paused ? "on" : "off");
+    if (t.on)
+        std::printf("target: %s %.2f, head %.3f %.3f %.3f, room %.3f %.3f %.3f\n", t.state.c_str(), t.progress, t.head[0],
+                    t.head[1], t.head[2], t.room[0], t.room[1], t.room[2]);
+    else std::printf("target: off\n");
+    std::fflush(stdout);
+}
+
+// ---------------------------------------------------------------- the buffers (see the top)
+
+struct Buffer {
+    gbm_bo *bo = nullptr;
+    int fd = -1;
+    vr::SharedTextureHandle_t handle = 0;
+};
+
+struct Buffers {
+    int w = 0, h = 0;
+    int drm = -1;
+    gbm_device *gbm = nullptr;
+    Buffer b[3];
+    int next = 0;
+    bool ok = false;
+
+    bool Make(int width, int height) {
+        w = width, h = height;
+        drm = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+        if (drm >= 0) gbm = gbm_create_device(drm);
+        for (Buffer &x : b) {
+            // ABGR8888 is R, G, B, A in memory, like Picture::px.
+            if (gbm) x.bo = gbm_bo_create(gbm, w, h, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+            if (!x.bo || (x.fd = gbm_bo_get_fd(x.bo)) < 0) break;
+            vr::DmabufAttributes_t a{};
+            a.unWidth = w, a.unHeight = h;
+            a.unDepth = a.unMipLevels = a.unArrayLayers = a.unSampleCount = 1;
+            a.unFormat = DRM_FORMAT_ABGR8888;
+            a.ulModifier = DRM_FORMAT_MOD_LINEAR;
+            a.unPlaneCount = 1;
+            a.plane[0].unOffset = gbm_bo_get_offset(x.bo, 0);
+            a.plane[0].unStride = gbm_bo_get_stride(x.bo);
+            a.plane[0].nFd = x.fd;
+            if (!vr::VRIPCResourceManager()->ImportDmabuf(vr::VRApplication_Overlay, &a, &x.handle)) x.handle = 0;
+            if (!x.handle) break;
+        }
+        ok = b[2].handle != 0;
+        if (!ok) {
+            std::fprintf(stderr, "ft-handpanel: no shared buffers; falling back to SetOverlayRaw (it flickers)\n");
+            Drop();
+        }
+        return ok;
+    }
+
+    void Drop() {
+        for (Buffer &x : b) {
+            if (x.handle) vr::VRIPCResourceManager()->UnrefResource(x.handle);
+            if (x.fd >= 0) close(x.fd);
+            if (x.bo) gbm_bo_destroy(x.bo);
+            x = Buffer{};
+        }
+        if (gbm) gbm_device_destroy(gbm);
+        if (drm >= 0) close(drm);
+        gbm = nullptr, drm = -1, ok = false;
+    }
+
+    // A picture to the overlay: into the next buffer, premultiplied (the overlay's flag says
+    // so), then the overlay switches to it. The copy runs outside g_vr, so the pose log waits
+    // only for the two calls at the end.
+    void Present(vr::IVROverlay *ov, vr::VROverlayHandle_t oh, const Picture &p) {
+        vr::EVROverlayError e;
+        if (!ok) {
+            std::lock_guard<std::mutex> lk(g_vr);
+            e = ov->SetOverlayRaw(oh, const_cast<uint8_t *>(p.px.data()), uint32_t(p.w), uint32_t(p.h), 4);
+        } else {
+            Buffer &x = b[next];
+            next = (next + 1) % 3;
+            uint32_t stride = 0;
+            void *mapping = nullptr;
+            auto *dst = static_cast<uint8_t *>(gbm_bo_map(x.bo, 0, 0, p.w, p.h, GBM_BO_TRANSFER_WRITE, &stride, &mapping));
+            if (!dst) {
+                std::fprintf(stderr, "ft-handpanel: can't map a buffer\n");
+                return;
+            }
+            for (int y = 0; y < p.h; ++y) {
+                const uint8_t *src = &p.px[size_t(y) * p.w * 4];
+                uint8_t *row = dst + size_t(y) * stride;
+                for (int i = 0; i < p.w * 4; i += 4) {
+                    const unsigned a = src[i + 3];
+                    row[i] = uint8_t(src[i] * a / 255), row[i + 1] = uint8_t(src[i + 1] * a / 255);
+                    row[i + 2] = uint8_t(src[i + 2] * a / 255), row[i + 3] = uint8_t(a);
+                }
+            }
+            gbm_bo_unmap(x.bo, mapping);
+            const vr::VRTextureBounds_t bounds{0, 0, float(p.w) / w, float(p.h) / h};
+            vr::Texture_t tex = {&x.handle, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
+            std::lock_guard<std::mutex> lk(g_vr);
+            ov->SetOverlayTextureBounds(oh, &bounds);
+            e = ov->SetOverlayTexture(oh, &tex);
+        }
+        if (e != vr::VROverlayError_None)
+            std::fprintf(stderr, "ft-handpanel: the picture didn't go to SteamVR: %s\n", ov->GetOverlayErrorNameFromEnum(e));
+    }
+};
+
+// ---------------------------------------------------------------- the pose log (poses.jsonl)
+
+// Non-finite numbers aren't JSON; SteamVR shouldn't send any, but one would spoil the file.
+void PutFloat(FILE *f, float v) { std::fprintf(f, "%.6g", std::isfinite(v) ? double(v) : 0.0); }
+
+void PutDevice(FILE *f, const char *name, const vr::TrackedDevicePose_t *pose) {
+    if (!pose || !pose->bDeviceIsConnected) {
+        std::fprintf(f, "\"%s\": null", name);
+        return;
+    }
+    std::fprintf(f, "\"%s\": {\"m\": [", name);
+    for (int i = 0; i < 12; ++i) {
+        if (i) std::fputs(", ", f);
+        PutFloat(f, pose->mDeviceToAbsoluteTracking.m[i / 4][i % 4]);
+    }
+    std::fprintf(f, "], \"r\": %d, \"ok\": %s}", int(pose->eTrackingResult), pose->bPoseIsValid ? "true" : "false");
+}
+
+// The thread is the only one touching the file while it runs; Start and Stop, on the main
+// thread, open and close it around the thread's life.
+struct PoseLog {
+    FILE *f = nullptr;
+    std::thread th;
+    std::atomic<bool> run{false};
+    std::atomic<long> samples{0};
+
+    bool Start(const std::string &path) {
+        Stop();
+        if (!(f = std::fopen(path.c_str(), "ae"))) return false;
+        std::setvbuf(f, nullptr, _IOFBF, 1 << 16);
+        samples = 0, run = true;
+        th = std::thread([this] { Run(); });
+        return true;
+    }
+
+    long Stop() {
+        if (!f) return 0;
+        run = false;
+        if (th.joinable()) th.join();
+        if (std::fflush(f) != 0 || std::ferror(f)) std::fprintf(stderr, "ft-handpanel: writing the pose log failed\n");
+        std::fclose(f);
+        f = nullptr;
+        return samples;
+    }
+
+    void Run() {
+        auto *sys = vr::VRSystem();
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+        vr::TrackedDeviceIndex_t left = vr::k_unTrackedDeviceIndexInvalid, right = left;
+        int64_t next = NowNs(), lastFlush = next, lastRoles = next - 1'000'000'000;
+        while (run) {
+            int64_t before, after;
+            {
+                std::lock_guard<std::mutex> lk(g_vr);
+                // Roles change rarely (a controller turned on, hands swapped): four looks a second.
+                if (next - lastRoles >= 250'000'000) {
+                    left = sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+                    right = sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
+                    lastRoles = next;
+                }
+                before = NowNs();
+                sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, poses, vr::k_unMaxTrackedDeviceCount);
+                after = NowNs();
+            }
+            const int64_t t = before + (after - before) / 2;
+            std::fprintf(f, "{\"t\": %lld, ", (long long)t);
+            PutDevice(f, "hmd", &poses[vr::k_unTrackedDeviceIndex_Hmd]);
+            std::fputs(", ", f);
+            PutDevice(f, "left", left < vr::k_unMaxTrackedDeviceCount ? &poses[left] : nullptr);
+            std::fputs(", ", f);
+            PutDevice(f, "right", right < vr::k_unMaxTrackedDeviceCount ? &poses[right] : nullptr);
+            std::fputs("}\n", f);
+            ++samples;
+            if (t - lastFlush >= 1'000'000'000) std::fflush(f), lastFlush = t;
+            // On a fixed beat; after a stall (a suspended process, a slow OpenVR call), pick up
+            // from now rather than writing a burst of samples to catch up.
+            next += kPosePeriodNs;
+            const int64_t now = NowNs();
+            if (next < now - kPosePeriodNs) next = now;
+            const timespec ts{time_t(next / 1'000'000'000), long(next % 1'000'000'000)};
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+        }
+    }
+};
+
+// ---------------------------------------------------------------- placing the target
+
+// The headset's pose now, in the standing universe; false if SteamVR has none.
+bool HeadPose(vr::HmdMatrix34_t &m) {
+    vr::TrackedDevicePose_t pose{};
+    std::lock_guard<std::mutex> lk(g_vr);
+    vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &pose, 1);
+    m = pose.mDeviceToAbsoluteTracking;
+    return pose.bDeviceIsConnected && pose.bPoseIsValid;
+}
+
+// An overlay's transform at `at`, its face (+z) turned toward `eye`, upright in the room.
+vr::HmdMatrix34_t Facing(const double at[3], const double eye[3]) {
+    auto norm = [](double v[3]) {
+        const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (n < 1e-9) return false;
+        v[0] /= n, v[1] /= n, v[2] /= n;
+        return true;
+    };
+    double z[3] = {eye[0] - at[0], eye[1] - at[1], eye[2] - at[2]};
+    if (!norm(z)) z[0] = z[1] = 0, z[2] = 1;
+    double x[3] = {z[2], 0, -z[0]};  // up (0, 1, 0) x z
+    if (!norm(x)) x[0] = 1, x[1] = x[2] = 0;  // straight above or below: any upright x will do
+    const double y[3] = {z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]};
+    vr::HmdMatrix34_t m{};
+    for (int r = 0; r < 3; ++r)
+        m.m[r][0] = float(x[r]), m.m[r][1] = float(y[r]), m.m[r][2] = float(z[r]), m.m[r][3] = float(at[r]);
+    return m;
+}
+
+// The command word: buf starts with word, then a space or the end; rest is what follows.
+bool Is(const char *buf, const char *word, const char **rest = nullptr) {
+    const size_t n = std::strlen(word);
+    if (std::strncmp(buf, word, n) || (buf[n] && buf[n] != ' ')) return false;
+    if (rest) *rest = buf[n] ? buf + n + 1 : buf + n;
+    return true;
+}
+
+bool HandState(const std::string &s) { return s == "seen" || s == "lost" || s == "off"; }
+
+}  // namespace
+
+int main(int argc, char **argv) {
+    bool watchStdin = false, noVr = false;
+    std::string sockName = "ft_handpanel", dumpDir;
+    double distance = 1.2;
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--watch-stdin")) watchStdin = true;
+        else if (!std::strcmp(argv[i], "--no-vr")) noVr = true;
+        else if (!std::strcmp(argv[i], "--socket") && i + 1 < argc) sockName = argv[++i];
+        else if (!std::strcmp(argv[i], "--distance") && i + 1 < argc) distance = std::clamp(std::atof(argv[++i]), 0.5, 5.0);
+        else if (!std::strcmp(argv[i], "--dump") && i + 1 < argc) dumpDir = argv[++i];
+        else {
+            std::fprintf(stderr, "usage: %s [--watch-stdin] [--socket NAME] [--distance METRES] [--no-vr [--dump DIR]]\n",
+                         argv[0]);
+            return 2;
+        }
+    }
+    std::signal(SIGINT, [](int) { g_stop = true; });
+    std::signal(SIGTERM, [](int) { g_stop = true; });
+    if (watchStdin)
+        std::thread([] {
+            char c[256];
+            while (read(0, c, sizeof c) > 0) {
+            }
+            g_stop = true;
+        }).detach();
+
+    int sock = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::memcpy(addr.sun_path + 1, sockName.data(), std::min(sockName.size(), sizeof addr.sun_path - 2));
+    if (bind(sock, reinterpret_cast<sockaddr *>(&addr), socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sockName.size())) != 0) {
+        std::fprintf(stderr, "ft-handpanel: @%s is taken (another copy running?)\n", sockName.c_str());
+        return 1;
+    }
+
+    vr::IVROverlay *ov = nullptr;
+    vr::VROverlayHandle_t h = vr::k_ulOverlayHandleInvalid, th = vr::k_ulOverlayHandleInvalid;
+    Buffers buffers, targetBuffers;
+    if (!noVr) {
+        // As Frametop's other SteamVR clients: background first, so we never start vrserver.
+        vr::EVRInitError err = vr::VRInitError_None;
+        vr::VR_Init(&err, vr::VRApplication_Background);
+        if (err == vr::VRInitError_None) {
+            vr::VR_Shutdown();
+            vr::VR_Init(&err, vr::VRApplication_Overlay);
+        }
+        if (err != vr::VRInitError_None) {
+            std::fprintf(stderr, "ft-handpanel: SteamVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(err));
+            return 1;
+        }
+        ov = vr::VROverlay();
+        if (ov->CreateOverlay("frametop.handpanel", "Frametop hand recorder", &h) != vr::VROverlayError_None ||
+            ov->CreateOverlay("frametop.handpanel.target", "Frametop hand recorder target", &th) != vr::VROverlayError_None) {
+            std::fprintf(stderr, "ft-handpanel: can't create the overlays (another copy running?)\n");
+            return 1;
+        }
+        ov->SetOverlaySortOrder(h, 250);  // in front of Frametop's screens and the pointer's dot
+        ov->SetOverlaySortOrder(th, 250);
+        if (buffers.Make(kW, kH)) ov->SetOverlayFlag(h, vr::VROverlayFlags_IsPremultiplied, true);
+        if (targetBuffers.Make(kTargetPx, kTargetPx)) ov->SetOverlayFlag(th, vr::VROverlayFlags_IsPremultiplied, true);
+        // Fixed to the head: distance along a line UP_DEG above straight ahead, tilted back by
+        // as much so it faces the eyes square on.
+        const double up = kUpDeg * M_PI / 180;
+        vr::HmdMatrix34_t m{};
+        m.m[0][0] = 1;
+        m.m[1][1] = float(std::cos(up)), m.m[1][2] = float(-std::sin(up));
+        m.m[2][1] = float(std::sin(up)), m.m[2][2] = float(std::cos(up));
+        m.m[1][3] = float(distance * std::sin(up)), m.m[2][3] = float(-distance * std::cos(up));
+        ov->SetOverlayTransformTrackedDeviceRelative(h, vr::k_unTrackedDeviceIndex_Hmd, &m);
+        ov->SetOverlayWidthInMeters(h, float(2 * distance * std::tan(kWidthDeg * M_PI / 360)));
+        ov->SetOverlayWidthInMeters(th, float(kTargetM));
+    }
+    LoadFont();
+
+    Panel p;
+    Target t;
+    PoseLog poseLog;
+    bool visible = false, dirty = false, shown = false;  // shown: SteamVR shows it (after its first picture)
+    bool targetDirty = false, targetShown = false;
+    int pictures = 0;
+    std::fprintf(stderr, "ft-handpanel running: @%s, %.2f m%s\n", sockName.c_str(), distance, noVr ? ", no VR" : "");
+
+    while (!g_stop) {
+        pollfd pfd{sock, POLLIN, 0};
+        poll(&pfd, 1, 50);
+        char buf[4096];
+        sockaddr_un from{};
+        socklen_t fromLen = sizeof from;
+        ssize_t n;
+        while ((n = recvfrom(sock, buf, sizeof buf - 1, 0, reinterpret_cast<sockaddr *>(&from), &fromLen)) > 0) {
+            while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) --n;  // from echo or socat
+            buf[n] = 0;
+            std::string reply = "ok";
+            const char *rest = nullptr;
+            double a = 0, b = 0, c = 0;
+            int used = 0;
+            if (Is(buf, "show")) {
+                visible = dirty = true;  // shown with its first picture
+            } else if (Is(buf, "hide")) {
+                if (ov) {
+                    std::lock_guard<std::mutex> lk(g_vr);
+                    ov->HideOverlay(h);
+                }
+                if (noVr && visible) std::printf("--- panel hidden\n"), std::fflush(stdout);
+                visible = shown = false;
+            } else if (Is(buf, "title", &rest)) {
+                p.title = rest, dirty = true;
+            } else if (Is(buf, "step", &rest)) {
+                p.step = rest, dirty = true;
+            } else if (Is(buf, "text", &rest)) {
+                p.text = rest, dirty = true;
+            } else if (Is(buf, "note", &rest)) {
+                p.note = rest, dirty = true;
+            } else if (Is(buf, "countdown", &rest)) {
+                if (!std::strcmp(rest, "off")) p.countdown = -1, dirty = true;
+                else if (std::sscanf(rest, "%lf", &a) == 1) p.countdown = std::clamp(a, 0.0, 1.0), dirty = true;
+                else reply = "error usage: countdown <0..1>|off";
+            } else if (Is(buf, "hands", &rest)) {
+                char l[16] = "", r[16] = "";
+                if (std::sscanf(rest, "%15s %15s", l, r) == 2 && HandState(l) && HandState(r))
+                    p.hands[0] = l, p.hands[1] = r, dirty = true;
+                else reply = "error usage: hands seen|lost|off seen|lost|off";
+            } else if (Is(buf, "bar", &rest)) {
+                if (!std::strcmp(rest, "off")) {
+                    p.barOn = false, dirty = true;
+                } else if (std::sscanf(rest, "%lf %lf%n", &a, &b, &used) == 2) {
+                    p.barOn = true, p.barTarget = std::clamp(a, 0.0, 1.0), p.barCurrent = b < 0 ? -1 : std::min(b, 1.0);
+                    std::string labels = rest + used;
+                    labels.erase(0, std::min(labels.find_first_not_of(' '), labels.size()));
+                    if (!labels.empty()) {
+                        size_t cut = labels.find('|');
+                        if (cut == std::string::npos) cut = labels.find(' ');
+                        p.nearLabel = labels.substr(0, cut);
+                        p.farLabel = cut == std::string::npos ? "Far" : labels.substr(cut + 1);
+                    } else {
+                        p.nearLabel = "Near", p.farLabel = "Far";
+                    }
+                    dirty = true;
+                } else {
+                    reply = "error usage: bar <target 0..1> <current 0..1|-1> [near label] [far label] | bar off";
+                }
+            } else if (Is(buf, "paused", &rest)) {
+                if (!std::strcmp(rest, "on") || !std::strcmp(rest, "off")) p.paused = rest[1] == 'n', dirty = true;
+                else reply = "error usage: paused on|off";
+            } else if (Is(buf, "target", &rest)) {
+                char state[16] = "show";
+                double prog = 0;
+                const int got = std::sscanf(rest, "%lf %lf %lf %15s %lf", &a, &b, &c, state, &prog);
+                const std::string st = state;
+                if (!std::strcmp(rest, "off")) {
+                    if (ov && targetShown) {
+                        std::lock_guard<std::mutex> lk(g_vr);
+                        ov->HideOverlay(th);
+                    }
+                    if (noVr && t.on) targetDirty = true;
+                    t.on = t.placed = targetShown = false;
+                } else if (got < 3 || (st != "show" && st != "hold" && st != "done") || (st == "hold" && got < 5)) {
+                    reply = "error usage: target <x> <y> <z> [show|hold <0..1>|done] | target off";
+                } else {
+                    // A new point goes into the room where the head is now, and stays there.
+                    const bool same = t.placed && a == t.head[0] && b == t.head[1] && c == t.head[2];
+                    vr::HmdMatrix34_t m{};
+                    m.m[0][0] = m.m[1][1] = m.m[2][2] = 1;  // --no-vr: the head at the room's origin
+                    if (!same && !noVr && !HeadPose(m)) {
+                        reply = "error no head pose";
+                    } else {
+                        if (!same) {
+                            const double head[3] = {a, b, c}, eye[3] = {m.m[0][3], m.m[1][3], m.m[2][3]};
+                            for (int r = 0; r < 3; ++r) {
+                                t.head[r] = head[r];
+                                t.room[r] = m.m[r][0] * a + m.m[r][1] * b + m.m[r][2] * c + m.m[r][3];
+                            }
+                            if (ov) {
+                                const vr::HmdMatrix34_t at = Facing(t.room, eye);
+                                std::lock_guard<std::mutex> lk(g_vr);
+                                ov->SetOverlayTransformAbsolute(th, vr::TrackingUniverseStanding, &at);
+                            }
+                            t.placed = true;
+                        }
+                        t.on = true, t.state = st, t.progress = st == "hold" ? std::clamp(prog, 0.0, 1.0) : 0;
+                        targetDirty = true;
+                        char out[96];
+                        std::snprintf(out, sizeof out, "ok %.4f %.4f %.4f", t.room[0], t.room[1], t.room[2]);
+                        reply = out;
+                    }
+                }
+            } else if (Is(buf, "poses", &rest)) {
+                const char *path = nullptr;
+                if (Is(rest, "start", &path) && *path) {
+                    // --no-vr writes nothing: there are no poses.
+                    if (!noVr && !poseLog.Start(path)) reply = std::string("error can't open ") + path + ": " + std::strerror(errno);
+                } else if (Is(rest, "stop")) {
+                    reply = "ok " + std::to_string(poseLog.Stop());
+                } else {
+                    reply = "error usage: poses start <path> | poses stop";
+                }
+            } else if (Is(buf, "devices")) {
+                if (noVr) {
+                    reply = "error no VR (--no-vr)";
+                } else {
+                    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+                    vr::TrackedDeviceIndex_t idx[3] = {vr::k_unTrackedDeviceIndex_Hmd, 0, 0};
+                    {
+                        std::lock_guard<std::mutex> lk(g_vr);
+                        auto *sys = vr::VRSystem();
+                        idx[1] = sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+                        idx[2] = sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
+                        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, poses, vr::k_unMaxTrackedDeviceCount);
+                    }
+                    reply = "ok";
+                    const char *names[3] = {"hmd", "left", "right"};
+                    for (int k = 0; k < 3; ++k) {
+                        const bool there = idx[k] < vr::k_unMaxTrackedDeviceCount && poses[idx[k]].bDeviceIsConnected;
+                        reply += std::string(" ") + names[k] + " " + (there ? std::to_string(int(poses[idx[k]].eTrackingResult)) : "-");
+                    }
+                }
+            } else if (Is(buf, "head")) {
+                vr::HmdMatrix34_t m;
+                if (noVr) {
+                    reply = "error no VR (--no-vr)";
+                } else if (!HeadPose(m)) {
+                    reply = "error no head pose";
+                } else {
+                    char out[256];
+                    int len = std::snprintf(out, sizeof out, "ok");
+                    for (int i = 0; i < 12; ++i) len += std::snprintf(out + len, sizeof out - len, " %.6f", m.m[i / 4][i % 4]);
+                    reply = out;
+                }
+            } else if (Is(buf, "ping")) {
+                reply = visible ? "ok shown" : "ok hidden";
+            } else {
+                reply = "error unknown command";
+            }
+            if (fromLen > offsetof(sockaddr_un, sun_path))
+                sendto(sock, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr *>(&from), fromLen);
+            fromLen = sizeof from;
+        }
+        if (!noVr) {
+            std::lock_guard<std::mutex> lk(g_vr);
+            vr::VREvent_t ev;
+            while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev))
+                if (ev.eventType == vr::VREvent_Quit) {
+                    vr::VRSystem()->AcknowledgeQuit_Exiting();
+                    g_stop = true;
+                }
+        }
+        const bool panelNow = visible && dirty, targetNow = targetDirty;
+        if (panelNow) {
+            Draw(p);
+            if (ov) {
+                buffers.Present(ov, h, p.pic);
+                std::lock_guard<std::mutex> lk(g_vr);
+                if (!shown) ov->ShowOverlay(h), shown = true;
+            }
+            dirty = false;
+        }
+        if (targetNow) {
+            if (t.on) {
+                DrawTarget(t);
+                if (ov) {
+                    targetBuffers.Present(ov, th, t.pic);
+                    std::lock_guard<std::mutex> lk(g_vr);
+                    if (!targetShown) ov->ShowOverlay(th), targetShown = true;
+                }
+            }
+            targetDirty = false;
+        }
+        if (noVr && (panelNow || targetNow)) {
+            Print(p, t, visible, ++pictures);
+            if (!dumpDir.empty() && panelNow) Dump(p.pic, dumpDir + "/panel.pam");
+            if (!dumpDir.empty() && targetNow && t.on) Dump(t.pic, dumpDir + "/target.pam");
+        }
+    }
+    poseLog.Stop();
+    if (ov) {
+        ov->DestroyOverlay(h);
+        ov->DestroyOverlay(th);
+        buffers.Drop();
+        targetBuffers.Drop();
+        vr::VR_Shutdown();
+    }
+    return 0;
+}
