@@ -13,7 +13,15 @@ A take's recording is one or more FHSET01 files (hands/track/record.h): per set 
 Deleted ranges live in take.json ("deleted": [[from_ns, to_ns], ...], CLOCK_MONOTONIC, the
 clock of dqbuf_ns); the files keep every set until export leaves them out.
 
-usage: takes.py [--base DIR] list | takes SESSION | export SESSION
+Side cameras (sides.py): a part recorded before the live tracker decided which side camera is
+which may carry slam_left's and slam_right's names the wrong way round. TakeIndex renames them as
+it reads (session.json "sides" against take.json "parts"), so review and export see the right
+names, and export writes them so: an export's files are always named right, its take.json says
+"parts": {"sets.bin": {"names_swapped": <the session's swapped>}}, and its manifest has each
+take's "sides". `takes.py sides SESSION` shows the decision; --set swapped|named records one by
+hand (e.g. from tools/check_sides.py on a session no live tracker decided).
+
+usage: takes.py [--base DIR] list | takes SESSION | export SESSION | sides SESSION [--set swapped|named]
 """
 import argparse
 import datetime
@@ -24,7 +32,11 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import threading
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sides  # noqa: E402  (hands/rec/sides.py, next to this file)
 
 DEFAULT_BASE = os.path.expanduser("~/.local/share/frametop/hands/contrib")
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -136,7 +148,14 @@ class TakeIndex:
         self.parts = self._parts(take_dir)
         self.sets = []   # (part, offset, bytes, time_ns): time_ns is the cameras' earliest dqbuf_ns
         self.part_starts = []   # index of each part's first set
-        self.cams = []   # the first set's [{name, width, height}]
+        self.cams = []   # the first set's [{name, width, height}], side cameras named right
+        # per part: are its side cameras named the wrong way round (sides.py)? read_set and
+        # read_raw rename them.
+        session = read_json(os.path.join(os.path.dirname(os.path.dirname(take_dir)), "session.json"))
+        take = read_json(os.path.join(take_dir, "take.json"))
+        self.swapped = sides.session_sides(session).get("swapped")
+        self.names_swapped = [sides.part_names_swapped(take, os.path.basename(p)) for p in self.parts]
+        self.rename = [sides.needs_rename(self.swapped, n) for n in self.names_swapped]
         for p, path in enumerate(self.parts):
             self.part_starts.append(len(self.sets))
             self._index(p, path)
@@ -176,10 +195,17 @@ class TakeIndex:
                     break
                 fields = [CAM.unpack_from(cams, i * CAM.size) for i in range(ncams)]
                 if not self.cams:
-                    self.cams = [{"name": n.split(b"\0", 1)[0].decode(errors="replace"), "width": w, "height": h}
-                                 for n, w, h, _, _ in fields]
+                    self.cams = [{"name": self._name(p, n), "width": w, "height": h} for n, w, h, _, _ in fields]
                 self.sets.append((p, off, nbytes, min(c[4] for c in fields)))
                 off += nbytes
+
+    def _name(self, p, raw):
+        name = raw.split(b"\0", 1)[0].decode(errors="replace")
+        return sides.other_name(name) if self.rename[p] else name
+
+    def renamed_sets(self, keep=None):
+        """How many of the sets (all, or the indices in keep) read renamed."""
+        return sum(1 for i in (range(len(self.sets)) if keep is None else keep) if self.rename[self.sets[i][0]])
 
     def __len__(self):
         return len(self.sets)
@@ -211,7 +237,7 @@ class TakeIndex:
             px_off = off + HDR.size + CAM.size * ncams
             for k in range(ncams):
                 name, w, h, capture_ns, dqbuf_ns = CAM.unpack_from(heads, k * CAM.size)
-                name = name.split(b"\0", 1)[0].decode(errors="replace")
+                name = self._name(p, name)
                 if only is None or name == only:
                     f.seek(px_off)
                     out.append({"name": name, "width": w, "height": h, "capture_ns": capture_ns,
@@ -220,11 +246,12 @@ class TakeIndex:
             return out
 
     def read_raw(self, i):
-        """Set i's whole record, as it is in the file."""
+        """Set i's whole record, as it is in the file but with the side cameras named right."""
         p, off, nbytes, _ = self.sets[i]
         with open(self.parts[p], "rb") as f:
             f.seek(off)
-            return f.read(nbytes)
+            record = f.read(nbytes)
+        return sides.rename_record(record) if self.rename[p] else record
 
 
 _index_cache = {}
@@ -232,9 +259,11 @@ _index_lock = threading.Lock()
 
 
 def take_index(take_dir):
-    """A TakeIndex, cached until one of the take's recording files changes size or time."""
+    """A TakeIndex, cached until one of the take's recording files, its take.json or its
+    session.json (the side cameras' decision) changes size or time."""
     key_parts = []
-    for path in TakeIndex._parts(take_dir):
+    meta = [os.path.join(take_dir, "take.json"), os.path.join(os.path.dirname(os.path.dirname(take_dir)), "session.json")]
+    for path in TakeIndex._parts(take_dir) + meta:
         try:
             st = os.stat(path)
             key_parts.append((path, st.st_size, st.st_mtime_ns))
@@ -376,6 +405,29 @@ class Store:
             shutil.rmtree(path)
 
     # --- export
+    def sides(self, session, swapped=None):
+        """session.json's side camera decision (sides.py) plus each take's parts; with swapped
+        (True/False), record that by hand first ("decided_by": "manual"). No set is rewritten:
+        reading and export rename."""
+        path = os.path.join(self.session_dir(session), "session.json")
+        meta = read_json(path)
+        if not meta:
+            raise RuntimeError(f"no session {session}")
+        if swapped is not None:
+            old = sides.session_sides(meta)
+            new = {"swapped": bool(swapped), "decided_by": "manual",
+                   "decided_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds")}
+            if old.get("swapped") is not None:
+                new["replaced"] = old
+            meta["sides"] = new
+            write_json(path, meta)
+        out = {"sides": sides.session_sides(meta), "takes": {}}
+        for tid in self.take_ids(session):
+            index = take_index(self.take_dir(session, tid))
+            out["takes"][tid] = {os.path.basename(p): {"names_swapped": n, "renamed_when_read": r}
+                                 for p, n, r in zip(index.parts, index.names_swapped, index.rename)}
+        return out
+
     def export(self, session, progress=None, cancel=None, keep_notes=False, low_priority=True):
         """Write exports/<session>/ (DESIGN.md "Export"): manifest.json, calibration.json, per
         take prompts.jsonl, poses.jsonl, take.json and sets.bin.zst (sets in deleted ranges
@@ -426,15 +478,26 @@ class Store:
             tdir = self.take_dir(session, t["id"])
             out = os.path.join(work, "takes", t["id"])
             os.makedirs(out)
-            for name in ("prompts.jsonl", "poses.jsonl", "take.json"):
+            for name in ("prompts.jsonl", "poses.jsonl"):
                 if os.path.isfile(os.path.join(tdir, name)):
                     shutil.copyfile(os.path.join(tdir, name), os.path.join(out, name))
             index = take_index(tdir)
             ranges = t["ranges"]
             keep = [i for i in range(len(index)) if not in_ranges(index.time_ns(i), ranges)]
+            # one file, named right where the decision is known (sides.py): its names_swapped is
+            # then the session's swapped; unknown, it's the parts' own (None if they differ)
+            if index.swapped is not None:
+                names_swapped = bool(index.swapped)
+            else:
+                names_swapped = index.names_swapped[0] if len(set(index.names_swapped)) == 1 else None
+            take_meta = read_json(os.path.join(tdir, "take.json"))
+            if take_meta:
+                take_meta["parts"] = {"sets.bin": {"names_swapped": names_swapped}}
+                write_json(os.path.join(out, "take.json"), take_meta)
             entry = {"id": t["id"], "section": t["section"], "title": t["title"], "status": t["status"],
                      "sets": len(keep), "sets_deleted": len(index) - len(keep), "cameras": index.cams,
-                     "duration_s": round(t["duration_s"], 2), "file": None}
+                     "duration_s": round(t["duration_s"], 2), "file": None,
+                     "sides": {"names_swapped": names_swapped, "renamed_sets": index.renamed_sets(keep)}}
             done += index.bytes() - sum(index.sets[i][2] for i in keep)   # deleted sets count as done
             if keep:
                 entry["file"] = "takes/%s/sets.bin.zst" % t["id"]
@@ -523,6 +586,10 @@ def main():
     sub.add_parser("list")
     sub.add_parser("takes").add_argument("session")
     sub.add_parser("export").add_argument("session")
+    sp = sub.add_parser("sides", help="show (or record) which way round the side cameras were")
+    sp.add_argument("session")
+    sp.add_argument("--set", choices=("swapped", "named"),
+                    help="record the decision by hand (e.g. from tools/check_sides.py on a take)")
     a = ap.parse_args()
     store = Store(a.base)
     if a.cmd == "list":
@@ -533,6 +600,8 @@ def main():
         for t in store.takes(a.session):
             print(f"{t['id']}  {t['status']}  {t['sets']} sets ({t['deleted_sets']} deleted)  "
                   f"{t['duration_s']:.1f} s  {human_bytes(t['bytes'])}")
+    elif a.cmd == "sides":
+        print(json.dumps(store.sides(a.session, None if a.set is None else a.set == "swapped"), indent=1))
     else:
         path = store.export(a.session, progress=lambda f, text: print(f"\r{f * 100:5.1f}% {text:40.40}", end="",
                                                                        flush=True))

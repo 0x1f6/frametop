@@ -15,6 +15,8 @@ checks:
     every set's header is checked (camera names, sizes, record length) and counted against the
     manifest; the pixels themselves aren't looked at;
   - every .jsonl line parses, and take.json does;
+  - the side cameras (sides.py): the session's "sides" decision, and each take's files named
+    right by it (a warning when it wasn't decided: the maintainer's check tells then);
   - the total size.
 It runs on Linux and Windows, with Python 3.12 or later. It reports errors (don't upload or accept this) and warnings (look at it).
 
@@ -585,7 +587,35 @@ def check_manifest(m, report, root):
             report.error(f"manifest: take {tid}'s file is {f!r}")
         elif not isinstance(t.get("raw_bytes"), int):
             report.error(f"manifest: take {tid} has a file but no raw_bytes")
+    check_sides(m, entries, report)
     return entries
+
+
+def check_sides(m, entries, report):
+    """Which side camera is which (sides.py): session.sides.swapped is true, false or null, and
+    every take's files carry names_swapped equal to it (export renames them so)."""
+    session = m.get("session") if isinstance(m.get("session"), dict) else {}
+    s = session.get("sides")
+    if s is None:
+        report.warn("manifest: no session.sides (recorded before the side cameras were checked): "
+                    "the maintainer's check tells which way round they are")
+        return
+    if not isinstance(s, dict) or s.get("swapped") not in (True, False, None):
+        report.error("manifest: session.sides isn't {\"swapped\": true|false|null, ...}")
+        return
+    swapped = s["swapped"]
+    if swapped is None:
+        report.warn("the side cameras' naming wasn't decided while recording (no live tracker): "
+                    "the maintainer's check tells which way round they are")
+    for tid, t in entries.items():
+        ts = t.get("sides")
+        if ts is None:
+            continue
+        if not isinstance(ts, dict) or ts.get("names_swapped") not in (True, False, None):
+            report.error(f"manifest: take {tid}'s sides isn't {{\"names_swapped\": true|false|null, ...}}")
+        elif swapped is not None and ts["names_swapped"] != swapped:
+            report.error(f"take {tid}: its side cameras aren't named right (names_swapped "
+                         f"{ts['names_swapped']}, the session's swapped {swapped}): export it again")
 
 
 def summarize(m):

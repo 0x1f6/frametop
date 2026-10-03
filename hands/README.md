@@ -36,7 +36,7 @@ hands/run.sh uninstall
 
 Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides them), read when ft-camd and ft-hands start:
 
-- `HANDS_SWAP_SIDES=1`: the two side cameras' names are swapped (see ft-camd below). Check with `tools/check_sides.py --ring`.
+- `HANDS_SWAP_SIDES=auto` (the default): ft-hands tells from the hands which side camera is which, and corrects ft-camd's names when they're backwards (see "Which camera is which" below). `1` forces them exchanged and `0` forces ft-camd's names; ft-hands still checks and logs a warning if the hands disagree.
 - `HANDS_CPUS=5,6,7`: the CPUs the model threads run on (below).
 - `HANDS_CAMERAS` (`auto`), `HANDS_BRIGHT` (`all`), `HANDS_BRIGHT_ON` (40), `HANDS_BRIGHT_OFF` (25): which cameras ft-hands tracks with, as `--cams`, `--bright`, `--bright-on` and `--bright-off` (see ft-hands). `HANDS_CAMERAS=mono` also keeps ft-camd off the colour cameras.
 - `HANDS_COLOR_LEFT` (`color_video0`), `HANDS_COLOR_CROP` (`subtract`): how the colour module's calibration maps onto its images, as `--color-left` and `--color-crop`.
@@ -86,7 +86,14 @@ Options:
 
 It exits when XRService exits, or when a camera's buffers keep going stale, which means XRService has reallocated them. The service starts it again, and it attaches to the new buffers.
 
-**Which camera is which:** video9 is `slam_left`, video13 is `slam_right`, video6 is `upper_left` and video7 is `upper_right`. This was checked by rendering the same view from each camera with the factory calibration. But ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and after some XRService restarts it gets them backwards. Then every hand is seen by one camera only, at the wrong depth, and the hand holes land beside the hands. With the headset on, looking at a room with some texture, `tools/check_sides.py --ring` says whether the names are right (exit 0), swapped (exit 3), or it can't tell (exit 2). When they're swapped, set `HANDS_SWAP_SIDES=1`. The colour cameras are video3 (`arcimx616 0-0010`) and video0 (`0-001a`); which of them is `passthrough_left` in the module's calibration is for `tools/check_color.py` to settle, on a recording with texture in view.
+**Which camera is which:** video9 is `slam_left`, video13 is `slam_right`, video6 is `upper_left` and video7 is `upper_right`. This was checked by rendering the same view from each camera with the factory calibration. But ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and after some XRService restarts it gets them backwards. Then every hand is seen by one camera only, at the wrong depth, and the hand holes land beside the hands. ft-hands now catches this by itself (`track/sides.h`, `HANDS_SWAP_SIDES=auto`):
+- Whenever a hand's landmarks are found in two cameras at once (one of them a side camera), it intersects the rays through the 21 landmarks twice: once with the calibrations as named, once with the two side cameras exchanged. The same hand seen the right way meets within a few mm, in front of both cameras and as far away as its size says. The wrong way misses by centimetres or meets behind a camera.
+- With the names wrong, the tracker never gets such pairs on its own: it hands the hand over to where the wrong calibration puts it and finds nothing there. So 5 times a second while undecided, the check places a tracked hand in 3D under the other naming and runs the landmark model where that puts it in the other side camera.
+- It decides after 10 votes one way and none the other, or 20 with at most a fifth the other way, over at least 1 s. That takes about 1-2 s of hands in view. If the names are backwards, it exchanges them; the tracked views move with their images. Then it checks once more, more strictly.
+- The log says what it found (`side cameras: SWAPPED, now exchanged after 3.2 s (votes ...)`). So does `/run/user/UID/frametop-hands/sides.json`, which the hand recorder reads. Recordings get a `DIR/sides.json` (hands/rec/sides.py has the rules).
+- `--record-only` can't tell (it tracks nothing): it records ft-camd's names unless `--sides 0|1` says otherwise.
+
+`tools/check_sides.py --ring` is the independent check from the scene (ORB matches meeting under each naming): exit 0 as named, 3 swapped, 2 can't tell. `--pair upper` checks the upper pair the same way: in every recording so far (3 XRService starts, both side namings) the upper pair was named right. The colour cameras are video3 (`arcimx616 0-0010`) and video0 (`0-001a`); which of them is `passthrough_left` in the module's calibration is for `tools/check_color.py` to settle, on a recording with texture in view.
 
 ## ft-hands
 
@@ -102,7 +109,7 @@ Options:
 - `--threads N`: model threads, pinned to the `--cpus` list. Default 3.
 - `--cpus LIST`: CPUs for the model threads and the main loop. Default `5,6,7` (`HANDS_CPUS`). SteamOS starts user processes on CPUs 0-4, and XRService's head tracking runs on 2-3. With the headset on, a step took 8.4 ms on 5-7 against 13.2 ms on 2-4, and SteamVR's frame timing didn't change (2026-09-29, three rounds of the same replayed frames).
 - `--contrast MODE` or `PALM/HAND`: how crops are equalized before the models see them: `clahe[:CLIP]`, `none`, or `stretch` (1st-99th percentile). Default `clahe:2/none`. In the dim recording, CLAHE let the palm search find about 10% more hands, but it made the landmarks jitter more (published median 6.9 mm, against 6.0 mm with plain landmark crops).
-- `--swap-sides`: swap the two side cameras (`HANDS_SWAP_SIDES`, see ft-camd).
+- `--sides auto|0|1`: which side camera is which (`HANDS_SWAP_SIDES`, see "Which camera is which"); `--swap-sides` is `--sides 1`.
 - `--seconds N`: stop after N seconds.
 - `--status S`: how often to print status, in seconds.
 - `--models DIR`: where the models are.
@@ -197,7 +204,7 @@ hands/build/ft-handreplay ~/.local/share/frametop/hands/rec-20260929-120000 --co
 
 Python, with NumPy and OpenCV. `setup/dev-container.sh` doesn't install them, because Fedora's `python3-opencv` pulls in over a gigabyte; in the dev container, run `sudo dnf install python3-numpy python3-opencv` once. Off the Frame, `FRAME_JOB_DEVICE_ROOT` can point at a folder with copies of the headset's calibration files.
 
-- `tools/check_sides.py --ring` (or a recording): are the side cameras named right?
+- `tools/check_sides.py --ring` (or a recording, a sets file, `--pair upper`, `--calib DIR`, `--json`): are the side cameras named right, from the scene? ft-handreplay's `--sides file|0|1|auto` replays with DIR/sides.json's names (the default), as recorded, exchanged, or as auto decides, and reports what the side check found and when.
 - `tools/check_color.py REC`: how the colour module's calibration maps onto its images.
 - `tools/show_set.py REC`: a recording's frame sets as images.
 - `tools/watch_gestures.py [--distance]`: pinches and grips, live.
@@ -256,7 +263,7 @@ Guesses, not tested:
 
 ## Known issues
 
-- **The side cameras can come out swapped.** ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and some XRService restarts reverse it. For now it's caught by hand: `tools/check_sides.py --ring`, then `HANDS_SWAP_SIDES=1`. It needs a fix in ft-camd, or at least an automatic check when it starts.
+- **The side cameras can come out swapped.** ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and some XRService restarts reverse it. ft-hands corrects it from the hands (`HANDS_SWAP_SIDES=auto`, the default). Until it has seen about 1-2 s of hands in both namings' reach, the cutouts may sit beside the hands. ft-camd itself still can't tell.
 - **The colour cameras can't be used while the headset is worn.** The colour module then writes only a half-size image into the top-left quarter of its buffers, and ft-camd drops those frames. So the service runs the mono cameras only, and tracking in bright light, where the mono cameras see dark hands, doesn't get the colour pair's help.
 - **The colour calibration mapping isn't settled.** Which colour camera is `passthrough_left` (`HANDS_COLOR_LEFT`) and how the module's crop applies (`HANDS_COLOR_CROP`) still need `tools/check_color.py` on a recording with a lit, textured view.
 - **Depth when one camera loses the hand.** A hand seen in one camera drifts 10% per update toward the one-camera depth guess (`kMonoDepthGain`, 0.1, in `track/tracker.cpp`). In the 2026-09-30 replays that was worse than keeping the last distance (see "3D" above). A smaller gain, such as 0.02, is the next thing to try.

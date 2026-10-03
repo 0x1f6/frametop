@@ -68,7 +68,8 @@ def make_session(base, contributor=None, sid=None, device=True):
                       "rings": False, "watch": False, "notes": ""},
         "device": {"steamos": "3.8", "steamvr": "r25358740+28b72a4f-1", "cameras": [{"name": n, "width": w, "height": h}
                                                                  for n, w, h in CAMS]},
-        "calibration_removed": ["serial"], "takes": ["01-hand-size", "02-no-hands"], "status": "done"})
+        "calibration_removed": ["serial"], "takes": ["01-hand-size", "02-no-hands"], "status": "done",
+        "sides": {"swapped": False, "decided_by": "auto", "state": "confirmed"}})
     takes.write_json(os.path.join(sdir, "calibration.json"),
                      {"cameras": [{"name": "slam_left", "intrinsics": [1.0, 2.0, 3.0]}]})
     if device:

@@ -42,6 +42,9 @@ public:
     ~Recorder();
     bool open(const std::string &dir, std::string &err);
     void add(const std::vector<SetFrame> &frames);
+    // Sets taken (not dropped for a full queue): the next one's place in the file, unless a
+    // write fails.
+    size_t added() const { return added_; }
     size_t written() const { return written_; }
     size_t dropped() const { return dropped_; }
 
@@ -53,7 +56,7 @@ private:
     std::condition_variable wake_;
     std::deque<std::vector<uint8_t>> queue_;
     bool stop_ = false;
-    size_t written_ = 0, dropped_ = 0;
+    size_t written_ = 0, dropped_ = 0, added_ = 0;
 };
 
 // Reads a recording back one set at a time.

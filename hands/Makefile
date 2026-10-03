@@ -1,6 +1,7 @@
 # Hand tracking, built into build/ (hands/build.sh runs this in the dev container):
 #   make          ft-camd (camd/: runs on the host, so linked statically) and ft-hands (track/)
 #   make tools    ft-handreplay and ft-ringplay, for recordings
+#   make check    builds and runs the C++ unit tests (tests/sides_test.cpp)
 # The first build fetches ncnn (NCNN_TAG) and builds it into build/ncnn, which takes a few
 # minutes. NCNN=DIR uses an ncnn install already built instead.
 NCNN_TAG  = 20260526
@@ -11,7 +12,7 @@ CXXFLAGS += -std=c++17 -fopenmp -I$(NCNN)/include/ncnn
 LDLIBS    = $(NCNN)/lib/libncnn.a -ljsoncpp -fopenmp -lpthread
 
 CAMD  = camd/camd.c camd/tp.c camd/xrcams.c
-TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp
+TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp track/sides.cpp
 HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h
 
 all: build/ft-camd build/ft-hands
@@ -29,6 +30,13 @@ build/ft-handreplay: track/replay.cpp $(TRACK) $(HDR) $(NCNN)/lib/libncnn.a
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ track/replay.cpp $(TRACK) $(LDLIBS)
 
+build/sides-test: tests/sides_test.cpp $(TRACK) $(HDR) $(NCNN)/lib/libncnn.a
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ tests/sides_test.cpp $(TRACK) $(LDLIBS)
+
+check: build/sides-test
+	build/sides-test
+
 build/ft-ringplay: track/ringplay.cpp track/record.h camd/fhring.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ track/ringplay.cpp
@@ -44,6 +52,6 @@ build/ncnn/install/lib/libncnn.a:
 	cmake --build build/ncnn/build --target install > build/ncnn/build.log
 
 clean:
-	rm -f build/ft-camd build/ft-hands build/ft-handreplay build/ft-ringplay
+	rm -f build/ft-camd build/ft-hands build/ft-handreplay build/ft-ringplay build/sides-test
 
-.PHONY: all tools clean
+.PHONY: all tools check clean

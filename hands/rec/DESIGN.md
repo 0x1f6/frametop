@@ -26,8 +26,9 @@ Every part runs in the dev container, as ft-hands and Input Settings do. The hos
 
 - **ft-camd** publishes the camera ring. If it isn't running, the session starts it as the transient user unit `frametop-handrec-camd.service`, the way `hands/ft-cutouts` starts `frametop-cutouts-camd.service` (needs `hands/build/ft-camd` with capabilities: `hands/run.sh caps`). An ft-camd already running from ft-cutouts or ft-handsctl is used as it is.
 - **A tracking ft-hands** gives feedback through the hands file: which hands are seen, the palm's distance, the index tip. If none is running, the session starts `ft-hands --no-gestures --status 0` (unit `frametop-handrec-hands.service`). An ft-hands already running is used as it is.
-- **A recording ft-hands** runs once per recording part: `ft-hands --record-only --record DIR --record-for SECONDS --record-hz 10 --status 0`. It runs as a plain child process of the session, ended with SIGTERM when the part ends. SIGTERM ends ft-hands' loop, and `Recorder` writes out its queue when it's destroyed. In step mode (below) a part is one step's countdown and hold, so a take has one part per step (about 40 in the hand poses); in auto mode a take is one part, plus one more after each pause. `--record-for` is only a safety net.
+- **A recording ft-hands** runs once per recording part: `ft-hands --record-only --record DIR --record-for SECONDS --record-hz 10 --status 0 --sides auto|0|1` (below, "Side cameras"). It runs as a plain child process of the session, ended with SIGTERM when the part ends. SIGTERM ends ft-hands' loop, and `Recorder` writes out its queue when it's destroyed. In step mode (below) a part is one step's countdown and hold, so a take has one part per step (about 40 in the hand poses); in auto mode a take is one part, plus one more after each pause. `--record-for` is only a safety net.
   - Why a process per part rather than one kept alive and paused: measured in the dev container with `ft-ringplay`'s ring (2026-10-02), `ft-hands --record-only` writes its first set 16-27 ms after it starts and ends 4-6 ms after SIGTERM, so a new part costs nothing the 3 s countdown doesn't cover. Every reader already takes parts in order (`takes.py`, `validate.py` through the export's single stream, the labeller's `fhl_io.py`, numbering `sets-10.bin` after `sets-9.bin`), ft-hands needs no new control, and nothing is written while a step waits. Before the hold starts the session checks that the part has written a set (`Recorder.has_data`, up to 3 s more), so the hold is recorded from its first frame.
+- **Side cameras.** ft-camd can name the two side cameras the wrong way round (hands/README.md, "Which camera is which"). The tracking ft-hands decides from the hands within about 2 s of them being in view (`HANDS_SWAP_SIDES=auto`, hands/track/sides.h) and publishes that in `/run/user/UID/frametop-hands/sides.json`. The session reads it (`sides.py`, `read_live`) and stores it in session.json `"sides"`. Each later part is recorded named right (`--sides 1` or `0`). Parts recorded before the decision use ft-camd's names (`--sides auto`; a record-only ft-hands can't tell), and readers rename them (`sides.py`). Each part's `names_swapped` goes into take.json `"parts"`. Without a tracking ft-hands nothing decides: `"swapped": null`, the names stay as recorded, and the maintainer's check (`hub_review check`, check_sides on a few sets per take) tells. `takes.py sides SESSION --set swapped|named` records a decision by hand.
 - **ft-handpanel** runs as a child process with `--watch-stdin`. It shows the panel and logs poses during each take.
 - **The headset button's reader** is a thread of the session (`ButtonReader`, below), not a process.
 
@@ -55,7 +56,8 @@ Test hooks:
       prompts.jsonl             what the person was asked to do, when (below)
       poses.jsonl               head and controller poses from ft-handpanel (below)
       take.json                 {"section", "title", "started_ns", "ended_ns", "status": "complete"|"stopped"|"skipped",
-                                 "deleted": [[from_ns, to_ns], ...], "notes": ""}
+                                 "deleted": [[from_ns, to_ns], ...], "notes": "",
+                                 "parts": {"sets.bin": {"names_swapped": false}, "sets-2.bin": {...}}}
   exports/<session>/            what export writes (below)
 ```
 
@@ -80,8 +82,13 @@ No name, email, or account. The contributor id is random, so several sessions fr
  "device": {"steamos": "<VERSION_ID from /etc/os-release>", "steamvr": "<version if known>", "cameras": [{"name", "width", "height"}]},
  "mode": "step|auto", "quick": false, "shuffle": {"seed": 123, "sweeps": {"pose-sweeps": [{"id", "hands", "cues"}]}},
  "takes": ["01-hand-size", "..."],
- "camera": {"status": "ok|unknown|degraded", "reason": "..."}, "stop_reason": "..."}
+ "camera": {"status": "ok|unknown|degraded", "reason": "..."}, "stop_reason": "...",
+ "sides": {"swapped": true|false|null, "decided_by": "auto|config|option|manual", "state": "decided|confirmed|...",
+           "evidence": {"as_named": 0, "swapped": 10, "seconds": 1.8, "miss_mm": [-1, 4.2], "probes": 30, "found": 10},
+           "decided_at": "<ISO>", "decided_ns": 0}}
 ```
+
+`sides`: whether ft-camd's side camera names were backwards during the session (`swapped`), as the live tracker decided it (above, "Side cameras"); `null` while nobody knows. A part's names are right when its take.json `names_swapped` equals `swapped`. Parts without a `parts` entry were recorded with ft-camd's names. Sessions from before this have no `sides`.
 
 `camera` is the camera check's verdict at the start (no paths or log lines: those go to `session.log`). `stop_reason` is there when a session was stopped at the no-hands screen, with the check's result.
 
@@ -300,6 +307,7 @@ On 2026-10-02 a whole session showed "I can't see your hands": after the headset
   - `manifest.json`: profile fields except `optional.notes` unless kept, session.json (without its `uploads` records), takes, schema, tool version, the consent version.
   - `calibration.json` and `device.json`, when the session has them.
   - Per take: `prompts.jsonl`, `poses.jsonl`, `take.json`, and `sets.bin.zst` (sets in deleted ranges removed, then zstd -10 with 2 threads).
+  - The side cameras are named right in every exported set when the session's `sides.swapped` is known: parts that need it get slam_left and slam_right (and their `_dk`) exchanged in the set headers as they're compressed. The exported take.json says `"parts": {"sets.bin": {"names_swapped": <swapped>}}`, and the manifest's take entry `"sides": {"names_swapped", "renamed_sets"}`. Unknown, the names stay as recorded.
   - `SHA256SUMS`.
 
   Compression runs at nice 19. Before starting, the window warns if the headset is worn, judged the way `frame-job` does: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` reads over 0 (SteamVR turns the panel off 5 s after the headset comes off). CPU work while in VR causes stutter. The proximity sensor is no use here: it read 9-43 with the headset sitting unworn.
@@ -313,6 +321,7 @@ On 2026-10-02 a whole session showed "I can't see your hands": after the headset
     - `device.json` holds only `cv.cad_from_cal` and `head`, each `plus_x`, `plus_z` and `position` as 3 numbers (plus `cad_from_cal`'s `method`). Without it: a warning.
     - Each `sets.bin.zst` decompresses to its end, so a truncated one fails, and every set's FHSET01 header is sane: camera names, sizes, record length. Set counts and raw bytes match the manifest. Pixels aren't decoded.
     - Every jsonl line parses.
+    - `session.sides` is `{"swapped": true|false|null}`, and every take's `sides.names_swapped` equals it (else an error: export again). Without `sides`, or `null`: a warning (the maintainer's check tells).
     - The total size: a warning over 15 GB, an error over 40 GB.
 
     Warnings cover notes kept in the export, a home folder path in the manifest, and missing `poses.jsonl` files.

@@ -49,6 +49,8 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 HANDS = os.path.join(REPO, "hands")
 sys.path.insert(0, HANDS)
 import camcheck  # noqa: E402  (hands/camcheck.py: are all four mono cameras running?)
+sys.path.insert(0, HERE)
+import sides  # noqa: E402  (hands/rec/sides.py: which side camera is which)
 FT_HANDS = os.path.join(HANDS, "build", "ft-hands")
 FT_CAMD = os.path.join(HANDS, "build", "ft-camd")
 PANEL_BIN = os.path.join(HERE, "build", "ft-handpanel")
@@ -60,6 +62,7 @@ CAMD_UNIT = "frametop-handrec-camd.service"
 HANDS_UNIT = "frametop-handrec-hands.service"
 
 RECORD_HZ = 10
+SIDES_READ_S = 0.5       # how often the tracking ft-hands' side camera decision is read
 TICK_S = 0.05            # the session loop's step (real time)
 FRESH_S = 0.3            # the hands file counts as live if published this recently
 LOST_S = 1.5             # an asked-for hand lost this long gets a note
@@ -492,11 +495,16 @@ class Recorder:
     writes TAKE/sets.bin; part N (after a pause) records into TAKE/.part-N and is moved to
     TAKE/sets-N.bin when it ends (ft-hands never overwrites, and always writes DIR/sets.bin)."""
 
-    def __init__(self, take_dir, part, seconds, ring, log_file):
+    def __init__(self, take_dir, part, seconds, ring, log_file, swap=None):
+        """swap: the side cameras' decision (sides.py), passed on as --sides 1 or 0; None (not
+        known yet) records them as ft-camd names them (--sides auto, whatever the config says)."""
         self.take_dir, self.part = take_dir, part
         self.dir = take_dir if part == 1 else os.path.join(take_dir, ".part-%d" % part)
+        self.file = "sets.bin" if part == 1 else "sets-%d.bin" % part
+        self.names_swapped = bool(swap)
         argv = [FT_HANDS, "--record-only", "--record", self.dir, "--record-for", "%.0f" % max(seconds, 5),
-                "--record-hz", str(RECORD_HZ), "--status", "0"]
+                "--record-hz", str(RECORD_HZ), "--status", "0",
+                "--sides", "auto" if swap is None else "1" if swap else "0"]
         if ring:
             argv += ["--ring", ring]
         if not in_container():
@@ -515,7 +523,9 @@ class Recorder:
             return False
 
     def stop(self):
-        """End it (SIGTERM: ft-hands writes out its queue) and put the part in place."""
+        """End it (SIGTERM: ft-hands writes out its queue) and put the part in place. Afterwards
+        names_swapped is what ft-hands says it applied (its DIR/sides.json, which goes into
+        take.json's "parts" and is removed here)."""
         if self.proc.poll() is None:
             self.proc.send_signal(signal.SIGTERM)
             try:
@@ -523,6 +533,15 @@ class Recorder:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        side_file = os.path.join(self.dir, "sides.json")
+        try:
+            with open(side_file) as f:
+                runs = json.load(f).get("names_swapped") or []
+            if runs:
+                self.names_swapped = bool(runs[0][1])   # --record-only never changes it
+            os.remove(side_file)
+        except (OSError, ValueError, TypeError, IndexError):
+            pass
         if self.part > 1:
             src = os.path.join(self.dir, "sets.bin")
             if os.path.exists(src):
@@ -1130,6 +1149,8 @@ class Session:
         self._redo_ok = False      # R does something now
         self._step_t0 = None       # the step's first event (ready or prompt), for R
         self._fb = {}              # feedback timers
+        self._ring_path = None
+        self._sides_read = 0.0     # when the side camera decision was last read
 
     # --- controls (any thread)
     def start(self):
@@ -1287,6 +1308,7 @@ class Session:
 
     def _setup(self):
         ring_path = self.ring or os.path.join(self.hands_dir, "cam-ring")
+        self._ring_path = ring_path
         if not self.dry_run:
             if not os.access(FT_HANDS, os.X_OK):
                 raise _Fail("ft-hands isn't built: hands/build.sh")
@@ -1317,7 +1339,8 @@ class Session:
                        "skipped": self.skipped},
             "mode": "auto" if self.auto else "step", "quick": self.quick,
             "shuffle": {"seed": self.seed, "sweeps": plan_record(self.plan)},
-            "takes": [], "status": "recording"}
+            "takes": [], "status": "recording", "sides": {"swapped": None}}
+        self._read_sides(force=True)
         cam = self._status.get("camera")
         if cam:
             self._session_json["camera"] = {"status": cam.get("status"), "reason": cam.get("reason", "")}
@@ -1385,6 +1408,40 @@ class Session:
     def _save_session(self):
         if self._session_json is not None:
             write_json(os.path.join(self.session_dir, "session.json"), self._session_json)
+
+    def _read_sides(self, force=False):
+        """The tracking ft-hands' side camera decision (sides.py, read_live) into session.json's
+        "sides": {"swapped", "decided_by", "state", "evidence", "decided_at"}. Later recording
+        parts are named right (Recorder's swap); parts before it are renamed when read. Without
+        a tracking ft-hands it stays undecided ("swapped": null): export then leaves the names,
+        and the maintainer's check (hub_review check) tells."""
+        now = time.monotonic()
+        if self._session_json is None or (not force and now - self._sides_read < SIDES_READ_S):
+            return
+        self._sides_read = now
+        live = sides.read_live(os.path.join(self.hands_dir, "sides.json"), self._ring_path)
+        if not live or live.get("swapped") is None:
+            return
+        cur = self._session_json.get("sides") or {}
+        swapped = bool(live["swapped"])
+        if cur.get("swapped") is not None and bool(cur["swapped"]) == swapped:
+            if live.get("state") != cur.get("state"):   # e.g. decided -> confirmed
+                cur["state"] = live.get("state")
+                self._save_session()
+            return
+        new = {"swapped": swapped, "decided_by": live.get("decided_by"), "state": live.get("state"),
+               "evidence": live.get("evidence"), "decided_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "decided_ns": mono_ns()}
+        if cur.get("swapped") is not None:
+            new["reversed_from"] = cur
+        self._session_json["sides"] = new
+        self._save_session()
+        self._log("side cameras: %s (%s, %s)" % ("SWAPPED" if swapped else "as named", new["decided_by"],
+                                                  json.dumps(new["evidence"])))
+
+    def _sides_swapped(self):
+        """session.json's decision: True, False, or None (not known yet)."""
+        return (self._session_json or {}).get("sides", {}).get("swapped")
 
     def _ensure_ring(self, path):
         def alive():
@@ -1632,6 +1689,8 @@ class Session:
             fb["disk"] = now
             if shutil.disk_usage(self.session_dir).free < MIN_FREE:
                 raise _Fail("The disk is nearly full: the session stopped")
+        if not self.dry_run:
+            self._read_sides()
         live = self._hands_file.read() if self._read_hands else None
         self._live = live
         w = self._hold_watch
@@ -1890,7 +1949,8 @@ class Session:
         if not self.dry_run:
             # a safety net only: the session ends the recording itself
             remaining = section_seconds(t["section"], worst=True, auto=self.auto) / self.speed
-            self._recorder = Recorder(t["dir"], t["part"], remaining * 1.5 + 60, self.ring, self._log_file)
+            self._recorder = Recorder(t["dir"], t["part"], remaining * 1.5 + 60, self.ring, self._log_file,
+                                      swap=self._sides_swapped())
         self._recording = True
         self._panel.cmd("poses start " + os.path.join(t["dir"], "poses.jsonl"))
         self._panel.set("rec", "rec on")
@@ -1905,6 +1965,9 @@ class Session:
             rec, self._recorder = self._recorder, None
             code = rec.stop()
             self._log("recording part %d ended (%s)" % (rec.part, code))
+            if self._take:   # how this part's side cameras are named (sides.py)
+                self._take["json"].setdefault("parts", {})[rec.file] = {"names_swapped": rec.names_swapped}
+                write_json(os.path.join(self._take["dir"], "take.json"), self._take["json"])
 
     def _end_take(self, status):
         t = self._take
