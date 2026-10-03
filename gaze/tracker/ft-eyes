@@ -58,7 +58,12 @@ import time
 from collections import deque
 from pathlib import Path
 
-import numpy as np
+# One thread for numpy's BLAS and OpenMP, set before numpy loads: it would start one per core
+# (8 here) for small arrays that never need them. eyes_pupil keeps OpenCV to one as well.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import eyes_model  # noqa: E402

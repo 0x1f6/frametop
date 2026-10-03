@@ -63,7 +63,7 @@ Ground rules, for anyone changing it:
 - **Clean room.** Nothing of Valve's goes in: we don't decompile, disassemble, or patch the `eyetracking` binary or its network weights, and we don't copy their code or weights. Its public output (eye-server.mmap, read-only) is fair game as a baseline and as labels, and so are published papers and openly licensed pupil detectors (check each one's license: PuRe, PuReST, ElSe, and ExCuSe are non-commercial only).
 - **Root only reads.** ft-eyegrab never writes to, stops, or signals the `eyetracking` process, vrserver, or vrcompositor, never opens `/dev/adsp`, `/dev/cdsp`, or `/dev/spidev0.1`, and never writes to `/dev/shm/eye-server.mmap` (it also carries calibration clicks into SteamVR's tracker), `/opt`, or `/persist`.
 - **Eye images are biometric data.** Recordings live outside the repo, in `~/.local/share/frametop/eyes/captures` (0700), and `.gitignore` catches stray frame dumps. They go nowhere but the machine that runs your offline jobs.
-- **Mind the headset's budget.** Finding a pupil takes about 0.4 ms a frame while ft-eyes follows it, and 1.4-2.1 ms when it searches the whole frame. Replays, scoring, and training go to a PC.
+- **Mind the headset's budget.** Finding a pupil takes about 0.4 ms a frame while ft-eyes follows it, and 1.4-2.1 ms when it searches the whole frame. ft-eyes keeps OpenCV and numpy to one thread: their pools of one per core spun idle workers at about a quarter of a core, for frames this small. Replays, scoring, and training go to a PC.
 
 ## Headset fit
 
