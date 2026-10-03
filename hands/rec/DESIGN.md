@@ -17,6 +17,7 @@ The plan this belongs to is `~/Desktop/Projects/frame-hands/notes/hands-plan.md`
 | `hands/rec/ft-handrec` | The host launcher, like `input-settings/ft-input-settings`. |
 | `hands/rec/build.sh` | Builds `ft-handpanel` into `hands/rec/build/`, like `gaze/build.sh`. |
 | `hands/rec/CONSENT.md`, `hands/rec/UPLOAD.md` | The texts the window shows. |
+| `hands/rec/install.sh` | Installs the recorder on a Frame with Frametop: the dev container's packages, hands/build.sh, the panel, ft-camd's capabilities, and the menu entry (`uninstall` removes the entry). |
 | ft-hands `--record-hz N` (done) | Records at most N frame sets a second. The recorder uses 10. |
 | `hands/camcheck.py` (shared, standard library) | Are all four mono cameras running? The recorder runs it before a session and when a step sees no hands (below; `hands/README.md`, "Camera check"). |
 

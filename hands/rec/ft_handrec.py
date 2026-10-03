@@ -323,11 +323,12 @@ class Backend(QObject):
     def handednessChoices(self):
         return [{"value": k, "text": v} for k, v in HANDEDNESS]
 
-    @Slot(bool, bool, str)
-    def acceptConsent(self, adult, agree, handedness):
-        """Write profile.json. A contributor id, once made, stays (a new consent version keeps it)."""
-        if not (adult and agree):
-            self.message.emit("Both boxes need ticking to take part", True)
+    @Slot(bool, bool, bool, str)
+    def acceptConsent(self, adult, region, agree, handedness):
+        """Write profile.json. A contributor id, once made, stays (a new consent version keeps it).
+        region: not living in Illinois, Texas or Washington (CONSENT.md "Who can take part")."""
+        if not (adult and region and agree):
+            self.message.emit("All three boxes need ticking to take part", True)
             return
         profile = self.store.profile()
         optional = profile.get("optional") if isinstance(profile.get("optional"), dict) else {}
@@ -336,7 +337,7 @@ class Backend(QObject):
         profile = {"schema": 1, "contributor": profile.get("contributor") or str(uuid.uuid4()),
                    "consent": {"version": consent_version(),
                                "accepted": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                               "adult": True},
+                               "adult": True, "region_ok": True},
                    "optional": optional}
         takes.write_json(self.store.profile_path, profile)
         self.profileChanged.emit()

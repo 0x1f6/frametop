@@ -222,6 +222,21 @@ class ValidateTest(unittest.TestCase):
         self.assertError(r, "exported is missing")
         self.assertError(r, "prompts.jsonl line 3: not valid JSON")
 
+    def test_region(self):
+        """From consent 2026-10-03, the residency confirmation must be there."""
+        d = self.copy()
+        path = os.path.join(d, "manifest.json")
+        with open(path) as f:
+            m = json.load(f)
+        m["consent_version"] = m["profile"]["consent"]["version"] = "2026-10-03"
+        takes.write_json(path, m)
+        write_sums(d)
+        self.assertError(validate.validate(d), "Illinois, Texas or Washington")
+        m["profile"]["consent"]["region_ok"] = True
+        takes.write_json(path, m)
+        write_sums(d)
+        self.assertEqual(validate.validate(d).errors, [])
+
     def test_device(self):
         d = self.copy()
         bad = json.loads(json.dumps(DEVICE))

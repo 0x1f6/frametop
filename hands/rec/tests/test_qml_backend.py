@@ -22,7 +22,7 @@ class QmlBackendTest(unittest.TestCase):
             import ft_handrec
         except ImportError as e:
             self.skipTest(f"no PySide6: {e}")
-        meta = ft_handrec.Backend.staticMetaObject
+        meta = self.meta = ft_handrec.Backend.staticMetaObject
         self.slots = {bytes(meta.method(i).name()).decode() for i in range(meta.methodCount())}
         self.props = {meta.property(i).name() for i in range(meta.propertyCount())}
         with open(os.path.join(REC, "main.qml")) as f:
@@ -32,6 +32,33 @@ class QmlBackendTest(unittest.TestCase):
         called = set(re.findall(r"\bbackend\.(\w+)\s*\(", self.qml))
         self.assertTrue(called)
         self.assertEqual(sorted(called - self.slots), [], "called from main.qml but not a slot")
+
+    def test_call_arity(self):
+        """Each backend.name(a, b) call passes as many arguments as some slot of that name takes
+        (a decorator left at the old count fails only when the button is pressed)."""
+        arity = {}
+        meta = self.meta
+        for i in range(meta.methodCount()):
+            mm = meta.method(i)
+            arity.setdefault(bytes(mm.name()).decode(), set()).add(mm.parameterCount())
+        bad = []
+        for m in re.finditer(r"\bbackend\.(\w+)\s*\(", self.qml):
+            depth, args, k, seen = 1, 0, m.end(), False
+            while depth and k < len(self.qml):
+                c = self.qml[k]
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    depth -= 1
+                elif c == "," and depth == 1:
+                    args += 1
+                elif not c.isspace() and depth >= 1:
+                    seen = True
+                k += 1
+            n = args + 1 if seen else 0
+            if m.group(1) in arity and n not in arity[m.group(1)]:
+                bad.append("%s: %d arguments, slots take %s" % (m.group(1), n, sorted(arity[m.group(1)])))
+        self.assertEqual(bad, [])
 
     def test_reads_exist(self):
         read = set(re.findall(r"\bbackend\.(\w+)\b(?!\s*\()", self.qml))

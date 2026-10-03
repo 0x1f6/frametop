@@ -51,6 +51,7 @@ except ImportError:
 
 EXPORT_SCHEMA = 1
 TOP_FILES = {"manifest.json", "calibration.json", "device.json", "SHA256SUMS"}
+REGION_CONSENT = "2026-10-03"   # the consent version that added the residency confirmation
 TAKE_FILES = {"prompts.jsonl", "poses.jsonl", "take.json", "sets.bin.zst"}
 TAKE_RE = re.compile(r"^\d{2}-[a-z0-9][a-z0-9-]*$")
 SESSION_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
@@ -527,6 +528,9 @@ def check_manifest(m, report, root):
                 report.error("manifest: profile.consent.version differs from consent_version")
             if pc.get("adult") is not True:
                 report.error("manifest: the contributor didn't confirm being 18 or older")
+            # from consent 2026-10-03: not living in Illinois, Texas or Washington (CONSENT.md)
+            if str(pc.get("version") or "") >= REGION_CONSENT and pc.get("region_ok") is not True:
+                report.error("manifest: the contributor didn't confirm not living in Illinois, Texas or Washington")
             need(pc, "accepted", str, "profile.consent.", report)
         optional = profile.get("optional")
         if isinstance(optional, dict) and str(optional.get("notes") or "").strip():

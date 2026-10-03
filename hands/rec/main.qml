@@ -202,6 +202,11 @@ Kirigami.ApplicationWindow {
                     text: "I'm 18 or older"
                 }
                 Controls.CheckBox {
+                    id: region
+                    visible: backend.needsConsent
+                    text: "I don't live in Illinois, Texas or Washington (USA)"
+                }
+                Controls.CheckBox {
                     id: agree
                     visible: backend.needsConsent
                     text: "I agree to the text above"
@@ -219,11 +224,11 @@ Kirigami.ApplicationWindow {
                 }
                 Controls.Button {
                     visible: backend.needsConsent
-                    enabled: adult.checked && agree.checked
+                    enabled: adult.checked && region.checked && agree.checked
                     text: "Agree and continue"
                     icon.name: "go-next"
                     onClicked: {
-                        backend.acceptConsent(adult.checked, agree.checked, handed.currentValue)
+                        backend.acceptConsent(adult.checked, region.checked, agree.checked, handed.currentValue)
                         if (!backend.needsConsent)
                             root.show(checklistPage)
                     }
