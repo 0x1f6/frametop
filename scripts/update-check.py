@@ -46,8 +46,9 @@ PACKAGES = {
     "deckard-steamvr-rel": "the 3D mouse on the dashboard, on SteamVR Settings, and on a SteamVR "
                            "window's grab bar; picking up a controller; mapped controller buttons; gaze",
     "kwin": "clicks near the far edge of a screen whose scale isn't 1; every screen comes back "
-            "after a desktop restart; floating a window",
-    "plasma-workspace": "the taskbar and panels after a desktop restart",
+            "after a desktop restart; floating a window; no blur behind the taskbar's menus",
+    "plasma-workspace": "the taskbar and panels after a desktop restart; no DiscoverNotifier or "
+                        "ibus-daemon inside the desktop",
     "gamescope": "the headset's volume buttons with nothing focused; typing goes where you last clicked",
     "bluez": "a Bluetooth mouse reconnecting after it sleeps",
 }
@@ -176,14 +177,21 @@ def check_host():
 
     try:
         with open("/usr/bin/kwin_wayland", "rb") as f:
-            # Qt keeps the option name as a UTF-16 string literal.
-            output_count = "output-count".encode("utf-16-le") in f.read()
+            kwin = f.read()
     except OSError:
-        output_count = False
-    if output_count:
+        kwin = b""
+    # Qt keeps the option name as a UTF-16 string literal.
+    if "output-count".encode("utf-16-le") in kwin:
         report("ok", "KWin", "has --output-count (one output per screen)")
     else:
         report("FAIL", "KWin", "no --output-count option: the desktop gets one screen at most")
+    # The session turns these built-in effects off by id (blurEnabled, contrastEnabled in kwinrc).
+    gone = [e for e in ("blur", "contrast") if b"KWin::%s_factory" % e.encode() not in kwin]
+    if not gone:
+        report("ok", "KWin effects", "blur and contrast, which the desktop turns off, keep their ids")
+    else:
+        report("warn", "KWin effects", f"no built-in {', '.join(gone)} effect: renamed? The desktop's "
+               "kwinrc may no longer turn it off (session/frametop-session.sh)")
 
     if systemctl("cat", "steamvr.service"):
         report("ok", "steamvr.service", "Frametop's services start and stop with it")
