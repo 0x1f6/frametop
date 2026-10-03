@@ -46,7 +46,8 @@
 //   - paused ("pause on", from the input relay when Frametop pauses for a VR game,
 //     input/game_pause.py): every screen and floating window hides whatever the mode, the
 //     hotkey, or the dashboard says, and compositor.c gives KWin a frame callback once a
-//     second instead of 90 times, so KWin and its apps hardly draw. "pause off" undoes it.
+//     second, as for any hidden screen, so KWin and its apps hardly draw. "pause off" undoes
+//     it.
 //   - hand cutouts (handcut.cpp): where ft-hands (hands/) tracks a hand between an eye and a
 //     screen, that eye sees through the screen (to Room View). Only then is the screen
 //     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
@@ -291,6 +292,11 @@ struct Screen {
     long resizeSent = 0;          // g_tick of the last resize request (they're throttled)
     int resizeW = 0, resizeH = 0; // ...and its size
     std::map<int, Sub> subs;
+    // Attention (UpdateAttention): what ft_vr_screen_attention answers, and until when (ms)
+    // it stays focused or in view after the last reason for it.
+    ft_attention attention = FT_FOCUSED;
+    int64_t inputMs = INT64_MIN / 2;  // the last pointer event on it or its controls
+    int64_t focusUntil = 0, viewUntil = 0;
     double heightMetres() const {
         if (floating && cropW > 0) return metres * cropH / cropW;
         return width > 0 ? metres * height / width : metres * 9 / 16;
@@ -813,6 +819,66 @@ void UpdateVisibility() {
             visible = alpha > 0.02f;
         }
         SetVisible(s, visible, alpha);
+    }
+}
+
+// Attention, for each screen's frame rate (compositor.c gives KWin frame callbacks at a
+// rate for each level): focused while you look at the screen (within kFocusAngle of where
+// your head points), a laser or the mouse is on it, or it's being carried; in view while
+// any of it is within kViewAngle; hidden otherwise, or while it isn't shown. A level stays
+// for a moment after its reason goes, so a glance away doesn't make it stutter, and goes up
+// at once.
+constexpr double kFocusAngle = 12, kViewAngle = 60;  // degrees
+constexpr int64_t kFocusLinger = 1500, kViewLinger = 500, kInputFocus = 1500;  // ms
+
+bool RayOnPlane(const Mat &p, const Mat &d, double *x, double *y);
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+
+// The smallest angle between where the head points and the screen: to the point of its
+// rectangle nearest where the head's ray meets its plane, its centre, and its corners. A
+// curved screen counts as flat; the angles hardly differ.
+double AngleToScreen(const Screen &s, const Mat &p, const Mat &head) {
+    const double hw = s.metres / 2, hh = s.heightMetres() / 2;
+    double f[3];
+    Column(head, 2, f);  // the head's +Z points backward
+    auto angleTo = [&](double u, double v) {
+        double to[3];
+        for (int i = 0; i < 3; ++i) to[i] = p.m[i][3] + u * p.m[i][0] + v * p.m[i][1] - head.m[i][3];
+        const double len = std::sqrt(Dot3(to, to)) + 1e-9;
+        return std::acos(std::clamp(-Dot3(f, to) / len, -1.0, 1.0)) * 180 / M_PI;
+    };
+    double best = 180, x, y;
+    if (RayOnPlane(p, head, &x, &y)) best = angleTo(std::clamp(x, -hw, hw), std::clamp(y, -hh, hh));
+    for (double u : {-hw, 0.0, hw})
+        for (double v : {-hh, 0.0, hh}) best = std::min(best, angleTo(u, v));
+    return best;
+}
+
+void UpdateAttention() {
+    const int64_t now = NowMs();
+    Mat head;
+    const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
+    for (auto &[i, s] : g_screens) {
+        if (!s.visible) {
+            s.attention = FT_HIDDEN;
+            s.focusUntil = s.viewUntil = 0;
+            continue;
+        }
+        bool focus = s.drag != Drag::None || now - s.inputMs < kInputFocus, view = focus;
+        Mat p;
+        if (!haveHead) {
+            view = true;  // nothing to go by
+        } else if (ScreenPose(s, &p)) {
+            const double a = AngleToScreen(s, p, head);
+            focus = focus || a <= kFocusAngle;
+            view = view || a <= kViewAngle;
+        }
+        if (focus) s.focusUntil = now + kFocusLinger;
+        if (view) s.viewUntil = now + kViewLinger;
+        s.attention = now < s.focusUntil ? FT_FOCUSED : now < s.viewUntil ? FT_IN_VIEW : FT_HIDDEN;
     }
 }
 
@@ -1577,6 +1643,24 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
 bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
 bool ft_vr_paused(void) { return g_paused; }
 
+enum ft_attention ft_vr_screen_attention(int index) {
+    const auto it = g_screens.find(index);
+    return g_vr && it != g_screens.end() ? it->second.attention : FT_FOCUSED;
+}
+
+bool ft_vr_vsync(double *since, double *hz) {
+    if (!g_vr) return false;
+    float s = 0;
+    uint64_t frame = 0;
+    if (!vr::VRSystem()->GetTimeSinceLastVsync(&s, &frame)) return false;
+    vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+    const float f = vr::VRSystem()->GetFloatTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
+                                                                  vr::Prop_DisplayFrequency_Float, &err);
+    if (err != vr::TrackedProp_Success || !(f >= 30 && f <= 240) || !(s >= 0 && s < 1)) return false;
+    *since = s, *hz = f;
+    return true;
+}
+
 }  // extern "C"
 
 namespace {
@@ -1735,6 +1819,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         auto panelEvent = [&](const vr::VREvent_t &ev, bool sub) {
             ft_event e{};
             e.screen = index;
+            if (ev.eventType != vr::VREvent_FocusLeave) s.inputMs = NowMs();
             auto at = [&] { s.ToBuffer(ev.data.mouse.x, ev.data.mouse.y, &e.x, &e.y); };
             switch (ev.eventType) {
                 case vr::VREvent_MouseMove:
@@ -1787,6 +1872,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         // The controls light up under a laser.
         auto hover = [&](int k) {
             const bool on = ev.eventType == vr::VREvent_MouseMove || ev.eventType == vr::VREvent_FocusEnter;
+            if (on) s.inputMs = NowMs();
             if (!on && ev.eventType != vr::VREvent_FocusLeave) return;
             if (s.hover[k] != on) s.hover[k] = on, ApplyAlpha(s);
         };
@@ -1899,6 +1985,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateGame();
     UpdateArrange();
     UpdateVisibility();
+    UpdateAttention();
     UpdateLasers();
     UpdateControls();
     UpdateGuides();

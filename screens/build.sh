@@ -23,6 +23,6 @@ $cxx -c -o build/handcut.o handcut.cpp
 $cxx -c -o build/handtest.o handtest.cpp
 vrlibs="$(pkg-config --libs egl glesv2 gbm) -L/opt/steamvr/bin/linuxarm64 -lopenvr_api -Wl,-rpath,/opt/steamvr/bin/linuxarm64"
 g++ -o build/ft-screens build/compositor.o build/vr.o build/keyboard.o build/handcut.o \
-  $(pkg-config --libs wlroots-0.20 wayland-server xkbcommon) $vrlibs
+  $(pkg-config --libs wlroots-0.20 wayland-server xkbcommon pixman-1) $vrlibs
 g++ -o build/ft-handtest build/handtest.o build/handcut.o $vrlibs
 echo "built build/ft-screens build/ft-handtest"'
