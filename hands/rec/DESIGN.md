@@ -311,6 +311,7 @@ On 2026-10-02 a whole session showed "I can't see your hands": after the headset
   - `calibration.json` and `device.json`, when the session has them.
   - Per take: `prompts.jsonl`, `poses.jsonl`, `take.json`, and `sets.bin.zst` (sets in deleted ranges removed, then zstd -10 with 2 threads).
   - The side cameras are named right in every exported set when the session's `sides.swapped` is known: parts that need it get slam_left and slam_right (and their `_dk`) exchanged in the set headers as they're compressed. The exported take.json says `"parts": {"sets.bin": {"names_swapped": <swapped>}}`, and the manifest's take entry `"sides": {"names_swapped", "renamed_sets"}`. Unknown, the names stay as recorded.
+  - `poses.jsonl` and `prompts.jsonl` without what's in the deleted ranges: no poses and no live-tracker `feedback` there (the prompt timeline stays). With the checklist's controllers at `none`, the controllers' poses are null and `feedback` has no `controller` (`takes.export_jsonl`): controllers left switched on still get tracked, and their poses would pass for the hands' ground truth.
   - `SHA256SUMS`.
 
   Compression runs at nice 19. While it runs with the headset worn, the window notes that VR may stutter a little (exports are done in the headset). Worn is judged the way `frame-job` does: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` reads over 0 (SteamVR turns the panel off 5 s after the headset comes off). CPU work while in VR causes stutter. The proximity sensor is no use here: it read 9-43 with the headset sitting unworn.

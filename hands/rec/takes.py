@@ -126,6 +126,40 @@ def in_ranges(t, ranges):
     return any(a <= t <= b for a, b in ranges)
 
 
+def export_jsonl(src, dst, ranges, keep_controllers):
+    """Copy a take's poses.jsonl or prompts.jsonl for export:
+    - poses in the deleted ranges are left out, and the live tracker's feedback there (the
+      prompt timeline stays: it says what was asked, and shows nothing);
+    - without controllers (the checklist's "none"), the controllers' poses are null and feedback
+      carries no controller state: controllers lying about still get logged, and those poses
+      would read as hands' ground truth.
+    Lines that don't parse are copied as they are (validate.py reports them)."""
+    poses = os.path.basename(src) == "poses.jsonl"
+    with open(src, encoding="utf-8") as f, open(dst, "w", encoding="utf-8", newline="\n") as out:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                out.write(line)
+                continue
+            if not isinstance(obj, dict):
+                out.write(line)
+                continue
+            t = obj.get("t")
+            gone = isinstance(t, int) and in_ranges(t, ranges)
+            if poses:
+                if gone:
+                    continue
+                if not keep_controllers:
+                    obj["left"] = obj["right"] = None
+            elif obj.get("event") == "feedback":
+                if gone:
+                    continue
+                if not keep_controllers:
+                    obj.pop("controller", None)
+            out.write(json.dumps(obj, separators=(", ", ": ")) + "\n")
+
+
 def merge_ranges(ranges):
     """Sorted, with overlapping or touching ranges joined."""
     out = []
@@ -472,17 +506,18 @@ class Store:
         total = sum(t["bytes"] for t in takes) or 1
         done = 0
         take_entries = []
+        keep_controllers = (meta.get("checklist") or {}).get("controllers") == "straps"
         for t in takes:
             if cancelled():
                 raise Cancelled()
             tdir = self.take_dir(session, t["id"])
             out = os.path.join(work, "takes", t["id"])
             os.makedirs(out)
+            ranges = t["ranges"]
             for name in ("prompts.jsonl", "poses.jsonl"):
                 if os.path.isfile(os.path.join(tdir, name)):
-                    shutil.copyfile(os.path.join(tdir, name), os.path.join(out, name))
+                    export_jsonl(os.path.join(tdir, name), os.path.join(out, name), ranges, keep_controllers)
             index = take_index(tdir)
-            ranges = t["ranges"]
             keep = [i for i in range(len(index)) if not in_ranges(index.time_ns(i), ranges)]
             # one file, named right where the decision is known (sides.py): its names_swapped is
             # then the session's swapped; unknown, it's the parts' own (None if they differ)

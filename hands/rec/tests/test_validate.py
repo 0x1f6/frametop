@@ -281,6 +281,44 @@ class ValidateTest(unittest.TestCase):
         self.assertNotEqual(os.system(f"{sys.executable} {validate.__file__} {d} >/dev/null"), 0)
 
 
+class ExportJsonlTest(unittest.TestCase):
+    """takes.export_jsonl: deleted ranges and the controllers when the checklist says none."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="handrec-jsonl-test-")
+        ctrl = {"m": [0.0] * 12, "r": 200, "ok": True}
+        with open(os.path.join(self.tmp, "poses.jsonl"), "w") as f:
+            for t in range(10):
+                f.write(json.dumps({"t": t, "hmd": ctrl, "left": ctrl, "right": ctrl}) + "\n")
+        with open(os.path.join(self.tmp, "prompts.jsonl"), "w") as f:
+            for e in ({"t": 1, "event": "prompt", "id": "a"}, {"t": 4, "event": "feedback", "left": True},
+                      {"t": 7, "event": "feedback", "left": True, "controller": {"left": "ok"}}):
+                f.write(json.dumps(e) + "\n")
+        os.makedirs(os.path.join(self.tmp, "out"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_export(self, name, keep):
+        out = os.path.join(self.tmp, "out", name)
+        takes.export_jsonl(os.path.join(self.tmp, name), out, [[3, 5]], keep)
+        with open(out) as f:
+            return [json.loads(line) for line in f]
+
+    def test_no_controllers(self):
+        poses = self.run_export("poses.jsonl", False)
+        self.assertEqual([p["t"] for p in poses], [0, 1, 2, 6, 7, 8, 9])   # 3-5 deleted
+        self.assertTrue(all(p["left"] is None and p["right"] is None and p["hmd"] for p in poses))
+        prompts = self.run_export("prompts.jsonl", False)
+        self.assertEqual([e["t"] for e in prompts], [1, 7])   # the feedback at 4 was in a deleted range
+        self.assertNotIn("controller", prompts[1])
+
+    def test_with_controllers(self):
+        poses = self.run_export("poses.jsonl", True)
+        self.assertTrue(all(p["left"] and p["right"] for p in poses))
+        self.assertIn("controller", self.run_export("prompts.jsonl", True)[1])
+
+
 class SessionFilesTest(unittest.TestCase):
     """session.py's device.json, and session ids with a suffix."""
 
