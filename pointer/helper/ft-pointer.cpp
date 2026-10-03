@@ -2183,7 +2183,8 @@ int main() {
                 onEdge = false;
                 if (!dragging && best < 1e8 && !bestScene) {
                     edgeKey = bestKey, edgePoint = bestPoint, edgeNormal = Normalize(bestNormal), edgeLast = bestPoint;
-                } else if (!dragging && best >= 1e8 && !edgeKey.empty() && visible[edgeKey]) {
+                } else if (!dragging && best >= 1e8 && !edgeKey.empty() && visible.count(edgeKey) &&
+                           visible.at(edgeKey)) {
                     // Just off a panel: stay on its plane (see "Panel edges" at the top).
                     const double denom = Dot(dir, edgeNormal);
                     if (std::fabs(denom) > 1e-4) {
