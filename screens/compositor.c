@@ -381,7 +381,10 @@ static void keys_update(struct server *s) {
            offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
 }
 
-// Every ~11 ms (90 Hz): SteamVR events, and frame callbacks for screens that committed.
+// Every ~11 ms (90 Hz): SteamVR events, and frame callbacks for screens that committed. While
+// Frametop is paused for a VR game (everything hidden), every 100 ms, and the frame callbacks
+// once a second: KWin draws a screen only after its callback, and its apps wait for theirs, so
+// the desktop hardly draws until it's resumed.
 static int tick(void *data) {
     struct server *s = data;
     ft_vr_poll(handle_vr_event, s);
@@ -395,14 +398,15 @@ static int tick(void *data) {
     }
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    for (int i = 0; i < MAX_SCREENS; ++i) {
+    const bool paused = ft_vr_paused();
+    for (int i = 0; i < MAX_SCREENS && (!paused || s->ticks % 10 == 0); ++i) {
         struct screen *sc = s->screens[i];
         if (sc && sc->frame_pending) {
             sc->frame_pending = false;
             wlr_surface_send_frame_done(sc->toplevel->base->surface, &now);
         }
     }
-    wl_event_source_timer_update(s->tick, 11);
+    wl_event_source_timer_update(s->tick, paused ? 100 : 11);
     return 0;
 }
 

@@ -19,6 +19,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: "Devices"; icon.name: "input-mouse"; onTriggered: root.show(devicesPage) },
             Kirigami.Action { text: "Buttons"; icon.name: "input-keyboard"; onTriggered: root.show(buttonsPage) },
             Kirigami.Action { text: "Controllers"; icon.name: "input-gamepad"; onTriggered: root.show(controllersPage) },
+            Kirigami.Action { text: "Games"; icon.name: "applications-games"; onTriggered: root.show(gamesPage) },
             Kirigami.Action { text: "Keyboard"; icon.name: "input-keyboard-virtual"; onTriggered: root.show(keyboardPage) },
             Kirigami.Action { text: "Pointer"; icon.name: "transform-move"; onTriggered: root.show(pointerPage) },
             Kirigami.Action { text: "Ignored panels"; icon.name: "view-hidden"; onTriggered: root.show(ignorePage) },
@@ -56,8 +57,8 @@ Kirigami.ApplicationWindow {
         pageStack.push(page)
     }
 
-    // FT_INPUT_PAGE=buttons|controllers|keyboard|pointer|ignore|gaze|bluetooth opens the app on that page.
-    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, keyboard: keyboardPage,
+    // FT_INPUT_PAGE=buttons|controllers|games|keyboard|pointer|ignore|gaze|bluetooth opens the app on that page.
+    pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, games: gamesPage, keyboard: keyboardPage,
                               pointer: pointerPage, ignore: ignorePage, gaze: gazePage,
                               bluetooth: bluetoothPage })[startPage] || devicesPage
 
@@ -822,6 +823,140 @@ Kirigami.ApplicationWindow {
                 text: "Saved as POINTER_IGNORE in ~/.config/frametop.conf, and applied at once. A whole app is "
                       + "its key followed by *, which also covers panels it opens later. Frametop's own screens "
                       + "aren't listed."
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Games
+    Component {
+        id: gamesPage
+        Kirigami.ScrollablePage {
+            id: gmpage
+            title: "Games"
+            property var st: backend.pauseStatus
+
+            // The gesture's boxes follow the saved gesture (which may tidy what was picked).
+            function syncGesture() {
+                const g = backend.pauseGesture
+                firstBox.currentIndex = firstBox.indexOfValue(g.first)
+                secondBox.currentIndex = secondBox.indexOfValue(g.second)
+                pressBox.currentIndex = pressBox.indexOfValue(g.presses)
+            }
+            function saveGesture() {
+                backend.setPauseGesture(firstBox.currentValue, secondBox.currentValue, pressBox.currentValue)
+            }
+            Component.onCompleted: syncGesture()
+            Connections {
+                target: backend
+                function onMappingsChanged() { gmpage.syncGesture() }
+            }
+
+            ColumnLayout {
+                spacing: Kirigami.Units.largeSpacing
+
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: !gmpage.st.relay
+                    type: Kirigami.MessageType.Error
+                    text: gmpage.st.old
+                          ? "The input relay that runs is older and can't pause. Restart it: "
+                            + "systemctl --user restart frametop-input-relay"
+                          : "The input relay isn't answering (frametop-input-relay.service). It does the pausing."
+                }
+
+                Kirigami.FormLayout {
+                    Layout.fillWidth: true
+
+                    RowLayout {
+                        Kirigami.FormData.label: "Frametop:"
+                        Controls.Label { text: gmpage.st.summary }
+                        Controls.Button {
+                            text: gmpage.st.paused ? "Resume" : "Pause now"
+                            icon.name: gmpage.st.paused ? "media-playback-start" : "media-playback-pause"
+                            enabled: gmpage.st.relay
+                            onClicked: backend.setPaused(!gmpage.st.paused)
+                        }
+                    }
+                    Controls.Switch {
+                        Kirigami.FormData.label: "VR games:"
+                        text: "Pause while a VR game runs, and resume when it ends"
+                        checked: backend.pauseAuto
+                        onToggled: backend.setPauseAuto(checked)
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Controller gesture" }
+                    Controls.ComboBox {
+                        id: firstBox
+                        Kirigami.FormData.label: "Button:"
+                        model: backend.gestureButtons
+                        textRole: "text"
+                        valueRole: "value"
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                        onActivated: gmpage.saveGesture()
+                    }
+                    Controls.ComboBox {
+                        id: secondBox
+                        Kirigami.FormData.label: "Together with:"
+                        model: backend.gestureButtons
+                        textRole: "text"
+                        valueRole: "value"
+                        enabled: firstBox.currentValue !== ""
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                        onActivated: gmpage.saveGesture()
+                    }
+                    Controls.ComboBox {
+                        id: pressBox
+                        Kirigami.FormData.label: "Pressed:"
+                        model: [{ value: 2, text: "Twice" }, { value: 1, text: "Once" }]
+                        textRole: "text"
+                        valueRole: "value"
+                        // One button pressed once would go off far too easily in games.
+                        enabled: firstBox.currentValue !== "" && secondBox.currentValue !== ""
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+                        onActivated: gmpage.saveGesture()
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        opacity: 0.7
+                        text: (backend.pauseGesture.first === "" ? "No gesture: a mapped button, a key combination, or ft-pause still work."
+                               : "Pauses and resumes Frametop, in games too. The game still gets the presses, so pick buttons it "
+                                 + "doesn't use this way. Two buttons count as together when both go down within a third of a "
+                                 + "second, and twice means within 0.7 s.")
+                              + (gmpage.st.relay && backend.pauseGesture.first !== "" && !gmpage.st.gestureReader
+                                 ? " Not reading the controllers right now (SteamVR isn't running?)." : "")
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "While paused" }
+                    Controls.ComboBox {
+                        Kirigami.FormData.label: "The desktop:"
+                        model: backend.pauseDesktopModes
+                        textRole: "text"
+                        valueRole: "value"
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                        Component.onCompleted: currentIndex = indexOfValue(backend.pauseDesktop)
+                        onActivated: backend.setPauseDesktop(currentValue)
+                    }
+                    Controls.Switch {
+                        Kirigami.FormData.label: "Sound:"
+                        text: "Play a sound on pause and resume"
+                        checked: backend.pauseSound
+                        onToggled: backend.setPauseSound(checked)
+                    }
+                }
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                    text: "Paused, Frametop leaves the headset's CPU and GPU to the game. The gaze service and our eye "
+                          + "tracker stop, and nothing reads SteamVR's eye tracking. Hand tracking and remote desktop stop "
+                          + "if they run. The desktop hides and slows down, or closes, as chosen above. The 3D mouse lets go, "
+                          + "so the mouse is a plain one for SteamVR. Mapped buttons and key combinations do nothing but "
+                          + "pausing, the Steam menu, and your own commands. Resuming brings back what pausing stopped. "
+                          + "Map \"Pause/resume Frametop\" to a button or key combination on the other pages, or run "
+                          + "input/ft-pause."
+                }
             }
         }
     }

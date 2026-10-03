@@ -802,7 +802,7 @@ Kirigami.ApplicationWindow {
                     Repeater {
                         model: [
                             { value: "hide", text: "Hide them unless the SteamVR dashboard is open", help: "The game has the view to itself; open the dashboard (or press Meta+Shift+H) to see the screens." },
-                            { value: "visible", text: "Keep them visible over the game", help: "They float over the game as they are outside it." }
+                            { value: "visible", text: "Keep them visible over the game", help: "They float over the game as they are outside it. Turn off Pause while a VR game runs in Frametop Input Settings (Games), or Frametop pauses and hides them anyway." }
                         ]
                         delegate: ColumnLayout {
                             required property var modelData

@@ -931,8 +931,8 @@ int main() {
     Clock::time_point handUsed{};  // a gesture began then (keeps the pointer, like gaze mode)
     Clock::time_point lastTyping{};  // the relay's last "typing": a key on a keyboard
     // Gaze mode outside games, and its dot (see the top): lastMove/lastHeld/pulseAt.
-    bool inGame = false, gazeAwake = false;
-    Clock::time_point inGameAt{}, gazeAwakeAt{};
+    bool inGame = false, gazeAwake = false, gameSent = false;
+    Clock::time_point inGameAt{}, gazeAwakeAt{}, gameSentAt{};
     Clock::time_point lastMove{}, lastHeld{}, pulseAt{};
     // The left button, as sent to the driver; pressRight: the next press is the right button
     // instead (gaze_right), heldButton: the one pressed.
@@ -1282,6 +1282,13 @@ int main() {
                 gazeAwake = awake;
                 gazeAwakeAt = t;
                 SendTo(out, "frametop_relay", awake ? "gazeawake 1" : "gazeawake 0");
+            }
+            // The relay pauses Frametop for VR games (input/game_pause.py). Repeated, so a relay
+            // that restarts learns it, and silence (SteamVR gone) ends the game there.
+            if (inGame != gameSent || t - gameSentAt > std::chrono::seconds(5)) {
+                gameSent = inGame;
+                gameSentAt = t;
+                SendTo(out, "frametop_relay", inGame ? "vrgame 1" : "vrgame 0");
             }
         }
 

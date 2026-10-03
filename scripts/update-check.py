@@ -12,15 +12,18 @@ This checks each one, and compares the versions with the last ones recorded as w
 From a PC: ssh frame python3 - [--mark-good] < scripts/update-check.py
 
 It only reads. It connects to SteamVR as a background app (which never starts SteamVR),
-runs `vrcmd --overlays` as the pointer helper does, and maps the eye tracker's shared
-memory read-only. It never starts, stops, or restarts anything.
+runs `vrcmd --overlays` as the pointer helper does, maps the eye tracker's shared memory
+read-only, and follows a controller on vrserver's web socket for a moment. It never starts,
+stops, or restarts anything.
 """
+import base64
 import json
 import math
 import mmap
 import os
 import platform
 import re
+import socket
 import struct
 import subprocess
 import sys
@@ -34,6 +37,8 @@ LAUNCHER = os.path.join(HOME, ".local/share/applications/deckard-nested-desktop.
 VRPATHS = os.path.join(HOME, ".config/openvr/openvrpaths.vrpath")
 BACKLIGHT = "/sys/class/backlight/ae94000.dsi.0/brightness"  # as in power/ft-powerd.cpp
 EYE_MMAP = "/dev/shm/eye-server.mmap"
+VRSERVER = "http://127.0.0.1:27062"  # its web socket: input/vrws.py
+PAUSE_STATE = f"/run/user/{os.getuid()}/frametop-pause.json"  # input/game_pause.py
 HOST_GLIBC = (2, 39)  # the newest the pointer driver may need (pointer/driver/build.sh)
 
 # Packages in the OS image that Frametop depends on, and what to try by hand when one changes.
@@ -297,11 +302,19 @@ def check_overlays(desktop_up):
 
 
 def check_services(sockets, desktop_up):
+    try:
+        with open(PAUSE_STATE) as f:
+            pause = json.load(f)
+        paused = pause["stopped"]["units"] if pause.get("paused") else []
+    except (OSError, ValueError, KeyError, TypeError):
+        paused = []
     for unit, socket in UNITS.items():
         if systemctl("is-enabled", unit) != "enabled":
             continue
         state = systemctl("is-active", unit)
-        if state != "active":
+        if state != "active" and unit + ".service" in paused:
+            report("skip", unit, "stopped while Frametop is paused for a VR game (input/ft-pause off resumes it)")
+        elif state != "active":
             report("FAIL", unit, f"{state}; see journalctl --user -u {unit}")
         elif socket and socket not in sockets:
             report("FAIL", unit, f"runs, but hasn't opened {socket}")
@@ -343,6 +356,63 @@ def check_steam_ui():
         report("skip", "Steam menu shortcut", detail[len("ft-steam:"):].strip())
     else:
         report("warn", "Steam menu shortcut", f"{detail}; a Meta tap won't open the Steam menu (steam/ft-steam)")
+
+
+def check_vr_socket():
+    """vrserver's web socket, which the pause gesture reads the controllers from (input/vrws.py,
+    input/game_pause.py). It's undocumented: SteamVR's controller binding page uses it."""
+    label, headers = "vrserver web socket", {"Referer": f"{VRSERVER}/dashboard/controllerbinding.html"}
+    try:
+        import urllib.request
+        with urllib.request.urlopen(urllib.request.Request(f"{VRSERVER}/input/getstate.json", headers=headers),
+                                    timeout=3) as r:
+            devices = json.load(r).get("devices", [])
+    except (OSError, ValueError) as e:
+        report("FAIL", label, f"/input/getstate.json didn't answer ({e}); the pause gesture can't read the controllers")
+        return
+    found = [d for d in devices if d.get("controller_type") == "frame_controller" and d.get("root_path")
+             and d.get("side") in ("left", "right")]
+    if not found:
+        report("skip", label, "no Frame controller is on, so it wasn't checked")
+        return
+    if not all(any(c.get("path") == "/input/thumbstick/click" for c in d.get("components", [])) for d in found):
+        report("warn", label, "a controller lists no /input/thumbstick/click; the default pause gesture needs it")
+    data = b""
+    try:
+        with socket.create_connection(("127.0.0.1", 27062), timeout=3) as s:
+            key = base64.b64encode(os.urandom(16)).decode()
+            s.sendall((f"GET / HTTP/1.1\r\nHost: 127.0.0.1:27062\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                       f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nOrigin: {VRSERVER}\r\n"
+                       f"Referer: {headers['Referer']}\r\n\r\n").encode())
+            while b"\r\n\r\n" not in data:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            if b" 101 " not in data.split(b"\r\n", 1)[0] + b" ":
+                report("FAIL", label, "vrserver refused the web socket; the pause gesture can't read the controllers")
+                return
+            mailbox = f"frametop_check_{os.getpid()}"
+            for text in (f"mailbox_open {mailbox}", "mailbox_send input_server " + json.dumps(
+                    {"type": "request_input_state_updates", "device_path": found[0]["root_path"],
+                     "returnAddress": mailbox})):
+                payload, mask = text.encode(), os.urandom(4)
+                size = bytes([0x80 | len(payload)]) if len(payload) < 126 else bytes([0x80 | 126]) + struct.pack(">H", len(payload))
+                s.sendall(b"\x81" + size + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+            deadline = time.monotonic() + 3
+            while b"update_component_states" not in data and time.monotonic() < deadline:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+    except OSError as e:
+        report("FAIL", label, f"{e}; the pause gesture can't read the controllers")
+        return
+    if b"update_component_states" in data and b"/click" in data:
+        report("ok", label, "it still streams the controllers' buttons, which the pause gesture reads")
+    else:
+        report("FAIL", label, "no button states came, so the pause gesture can't read the controllers "
+               "(input/vrws.py: the message format changed?)")
 
 
 def check_eye_tracker():
@@ -394,6 +464,7 @@ def main():
         check_overlays(desktop_up)
         check_services(sockets, desktop_up)
         check_steam_ui()
+        check_vr_socket()
         check_eye_tracker()
 
     if args == ["--mark-good"]:

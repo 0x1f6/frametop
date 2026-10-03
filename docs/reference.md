@@ -66,12 +66,12 @@ place N x y z yaw pitch roll     width N metres          curve N radius|on|off
 pin N|all left|right|head [matrix]    unpin N|all        size N w h
 get N    screens    head    state    key code value    scale N s    vrkeyboard show|hide|toggle|close
 visibility always|dashboard|gesture|toggle    wrist degrees    gesture left|right degrees
-hide | show | toggle    controllers always|outside_games|dashboard    ingames hide|visible
+hide | show | toggle    controllers always|outside_games|dashboard    ingames hide|visible    pause on|off|state
 conceal N|all    reveal N|all    concealed    cutouts on|off|state    cutouts predict on|off    cutouts lead ms
 float N mpp x y w h title    unfloat N    pose N matrix    sub N k x y w h | sub N k off    minimized N 0|1    carry N
 ```
 
-`conceal` and `reveal` hide and show one screen on its own (`ft-layout hide` and `show` send them), and `concealed` lists those screens. `cutouts` turns the hand cutouts on and off (`ft-handsctl cutouts`). The last line is ft-floatd's, for floating windows: N is a floating window's panel, numbered on from the screens, one per spare output. `float` gives the window's rectangle in its output, metres per pixel, and the title bar's height, and shows the panel; `unfloat` hides it. `pose` places it (a 3x4 matrix, standing universe), `sub` shows popup or dialog k over it, `minimized` hides it while its window is minimized, and `carry` moves it with the laser that pressed the window's own title bar.
+`conceal` and `reveal` hide and show one screen on its own (`ft-layout hide` and `show` send them), and `concealed` lists those screens. `pause on` (from the input relay, when Frametop pauses for a VR game) hides every screen and floating window whatever else says, and slows the desktop down; `pause off` undoes it. `cutouts` turns the hand cutouts on and off (`ft-handsctl cutouts`). The last line is ft-floatd's, for floating windows: N is a floating window's panel, numbered on from the screens, one per spare output. `float` gives the window's rectangle in its output, metres per pixel, and the title bar's height, and shows the panel; `unfloat` hides it. `pose` places it (a 3x4 matrix, standing universe), `sub` shows popup or dialog k over it, `minimized` hides it while its window is minimized, and `carry` moves it with the laser that pressed the window's own title bar.
 
 ## Input relay
 
@@ -114,11 +114,12 @@ The pointer settings are in `~/.config/frametop.conf`: `POINTER_SENSITIVITY`, `P
 
 ## Frametop Input Settings
 
-A Kirigami app with a Python backend, in the Plasma menu under Settings. It runs in the `dev` container and talks to the relay over its control socket, `@frametop_relay`. It has eight pages:
+A Kirigami app with a Python backend, in the Plasma menu under Settings. It runs in the `dev` container and talks to the relay over its control socket, `@frametop_relay`. It has nine pages:
 
 - Devices lists every USB and Bluetooth mouse and keyboard, with a light that flashes when the device is used. Each device gets a role: 3D pointer (grabbed, drives the pointer; the default for anything with a mouse), Pass through (grabbed only while typing goes to the desktop; the default for keyboards, whose key combinations work everywhere), or Ignore. A device is identified by its Bluetooth address, or its USB ids and name, so all of its input nodes share one role. Forget drops everything saved for a device.
-- Buttons maps a pointer device's buttons. Choose Capture a button, press the button or key, then pick an action: a click, back, scroll, toggle dashboard, recenter, pointer on or off, head follow on or off, gaze pointer on or off, gaze precision, gaze drag, gaze quick check, faster or slower, reset the screen layout, hide or show the screens, open or close the keyboard, float a window in VR or put it back, put all floating windows back, Open profile NAME (one per profile, [profiles.md](profiles.md)), pass the key through, or nothing. Devices with saved mappings are listed even while they're asleep.
+- Buttons maps a pointer device's buttons. Choose Capture a button, press the button or key, then pick an action: a click, back, scroll, toggle dashboard, recenter, pointer on or off, head follow on or off, gaze pointer on or off, gaze precision, gaze drag, gaze quick check, faster or slower, reset the screen layout, hide or show the screens, open or close the keyboard, float a window in VR or put it back, put all floating windows back, pause or resume Frametop ([Pausing for VR games](#pausing-for-vr-games)), Open profile NAME (one per profile, [profiles.md](profiles.md)), pass the key through, or nothing. Devices with saved mappings are listed even while they're asleep.
 - Controllers maps the Frame controllers' buttons (every button but the system button) to the same actions, except passing a key through and the gaze actions: gaze mode is a mouse and keyboard feature ([gaze-controllers.md](gaze-controllers.md)). Capture a button and press it on a controller, or pick it from the list. The controllers aren't input devices on the host; only SteamVR sees them. So the pointer helper reads them with SteamVR input (`pointer/helper/vrbuttons.h`, `pointer/helper/actions/`) and sends presses to the relay (`vrbtn right/a 1`), which does the mapped action. The helper only takes the buttons that are mapped (the relay tells it with `vrbind`), at an overlay-global priority, and only while no game (scene application) runs, so games keep every button; with In games on (`controller_in_games`), a mapped button is taken from games too. That needs SteamVR's "Enable global input from overlays (Experimental)" setting (`steamvr/globalActionSetPriority`), which the page's Global input switch turns on and off. Mappings are saved as `controller_buttons` in `~/.config/frametop-input.json`.
+- Games has the pause for VR games: its state with Pause now or Resume, whether VR games pause Frametop by themselves, the controller gesture (one or two buttons, pressed once or twice; one button always takes two presses), what happens to the desktop, and the sound. They're saved as `pause_auto`, `pause_gesture`, `pause_desktop`, and `pause_sound` in `~/.config/frametop-input.json`. See [Pausing for VR games](#pausing-for-vr-games).
 - Keyboard sets when Frametop's keyboard opens: whenever a text field is selected; only while no pass-through keyboard is connected (the default; keyboards other programs make through uinput, like frame-voice's, don't count); only with a mouse or controller button mapped to Open/close keyboard; or never, which turns the button off too. Keep it open (on by default, `vr_keyboard_persist`) leaves it open after the text field loses focus. The mode is saved as `vr_keyboard` in `~/.config/frametop-input.json`, and the page lists the keyboards that count as connected. Its Key combinations section maps modifiers plus a key, or one modifier tapped on its own, on any keyboard, to any action but passing a key through or nothing, or to Run a command…: a command line the input relay runs with `sh -c` when you press the keys (`command:CMD`). The command runs as the relay's user service, outside the desktop's session, with `layout/`, `float/` and `steam/` on its `PATH` (so `ft-layout use Work` or `ft-float launch org.kde.dolphin` work as they are), and its output goes to the relay's journal. The gaze clicks (Gaze left click and Gaze right click) only go on key combinations. The defaults are a Meta tap (open the Steam menu, or close the dashboard), Meta+J (gaze left click), Meta+K (gaze right click), and Meta+Shift+F (float window in VR or put it back); remove them or add others there. A tap is a press and release with no other key, mouse button, or scroll in between; a bound one sends the desktop F24 before the release, so Plasma's launcher doesn't open on it. The combination's last key isn't typed, and the modifiers still reach the app; while typing goes to Steam rather than the desktop, keyboards aren't grabbed, so Steam or the game sees the keys too. They're saved as `key_bindings` in the same file; a file with its own list, even an empty one, gets no defaults.
 - Pointer has a Head follow switch and sliders for the pointer settings, which apply immediately, and a Recenter button.
 - Ignored panels lists the SteamVR overlays that are showing, grouped by app (the first two parts of the overlay key, such as `sasaken.frame-perf-overlay`), from the pointer helper (`overlays`). Tick a panel, or Ignore the whole app, and the pointer passes through it to what's behind. It's for panels you only look at, like a performance overlay that follows your view. The list is saved as `POINTER_IGNORE` in `~/.config/frametop.conf`: comma-separated overlay keys, where a shell pattern like `vendor.app*` covers a whole app, including panels it opens later. The helper reloads at once. Frametop's own screens aren't listed, and entries for apps that aren't open are listed below, to remove.
@@ -198,6 +199,33 @@ power/run.sh status        # "ok on|off|away <seconds unused> <timeout seconds>"
 power/run.sh off | on      # the displays off now, or back on
 power/run.sh log
 ```
+
+## Pausing for VR games
+
+Paused, Frametop leaves the headset's CPU and GPU to a VR game. The input relay does it (`input/game_pause.py`), since it's the one part that always runs:
+
+- The gaze service stops (`frametop-gaze`: ft-gazed, ft-gaze, our own eye tracker, the gaze panel), so nothing reads SteamVR's eye tracking. Our frame grabber, the root service `ft-eyegrab`, goes idle by itself 3 seconds after our eye tracker stops asking it for frames.
+- Hand tracking stops if it runs (`frametop-camd`, `frametop-hands`).
+- The desktop, as the Games page of Frametop Input Settings says (`pause_desktop`): hidden (the default) or closed. Hidden, ft-screens hides every screen and floating window whatever the visibility mode, the hotkey, or the dashboard says, and gives KWin a frame callback once a second instead of 90 times. KWin draws a screen only after its frame callback, and its apps wait for theirs, so the desktop hardly draws, but its windows stay open. Remote desktop stops if it runs (`session/remote-ctl.sh`). Closed, `desktops.sh stop` closes the desktop and its windows, and resuming starts it again (about 12 seconds), in its start profile if it has one.
+- The relay lets go of the 3D mouse and feeds pointer devices to its virtual mouse and keyboard, as with `POINTER=0`. Typing goes to Steam. Mapped buttons and key combinations do nothing but pausing, the Steam menu, and commands; a key combination that does nothing is typed as usual.
+
+Resuming starts again only what pausing stopped, and plays a second sound. The pointer helper and ft-powerd keep running: they cost little, the helper is what says a game started, and stopping it would leave its virtual controller connected with its last pose.
+
+Ways to pause and resume:
+
+- The controller gesture, by default both thumbsticks clicked together twice: both go down within 0.3 seconds of each other, and the second time within 0.7 seconds of the first. The relay reads it from vrserver's web socket (`input/vrws.py`), which works whatever has input focus and takes nothing from the game, so the game sees the clicks too. The Games page changes it: one or two of the buttons the Controllers page lists, pressed once or twice (one button always takes two), or none.
+- The Pause/resume Frametop action, on a mouse button, a key combination, or a controller button (outside games, like every mapped controller button).
+- VR games, with Pause while a VR game runs on (`pause_auto`, the default). The pointer helper tells the relay when a scene app starts and ends (`vrgame 1|0`, repeated every 5 seconds). A game starting pauses Frametop. A pause that starts while a game runs ends 5 seconds after the game does, unless another game starts first. Resumed during a game, Frametop stays on until that game ends. A pause that starts outside a game lasts until you resume. Flatscreen games aren't scene apps, so they don't pause it.
+- From a terminal or a script:
+
+```
+input/ft-pause on | off | toggle   # pause or resume
+input/ft-pause status              # the state as JSON (the relay's "pause ?")
+input/vrws.py 10                   # the controllers' buttons from vrserver's web socket, for 10 s
+input/test/pause-test.py           # the gesture and the automatic pause, offline
+```
+
+The state outlives a relay restart, in `/run/user/UID/frametop-pause.json`. A SteamVR restart while paused starts the gaze service with it, and the relay stops it again when the pointer helper comes back.
 
 ## Gaze pointer (experimental)
 

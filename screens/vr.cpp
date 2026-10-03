@@ -43,6 +43,10 @@
 //     own; also for flatscreen games, which aren't scene apps).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
+//   - paused ("pause on", from the input relay when Frametop pauses for a VR game,
+//     input/game_pause.py): every screen and floating window hides whatever the mode, the
+//     hotkey, or the dashboard says, and compositor.c gives KWin a frame callback once a
+//     second instead of 90 times, so KWin and its apps hardly draw. "pause off" undoes it.
 //   - hand cutouts (handcut.cpp): where ft-hands (hands/) tracks a hand between an eye and a
 //     screen, that eye sees through the screen (to Room View). Only then is the screen
 //     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
@@ -320,6 +324,7 @@ double g_gestureAngle = 20;  // gesture: look within this of the controller
 std::string g_gestureHand = "left";
 Lasers g_lasers = Lasers::OutsideGames;  // when controllers' lasers work the screens (see the top)
 bool g_gameRunning = false;              // a scene app (VR game) is running
+bool g_paused = false;                   // Frametop paused for a VR game: everything hidden (see the top)
 InGames g_inGames = InGames::Hide;       // during a VR game, the always mode acts like the dashboard mode
 
 // ---------------------------------------------------------------- chrome (bar, button, handle)
@@ -734,6 +739,7 @@ void UpdateGame() {
 }
 
 bool ModeVisible() {
+    if (g_paused) return false;
     switch (EffectiveMode()) {
         case Mode::Always: return !g_manual;
         case Mode::Toggle: return g_manual;
@@ -792,7 +798,7 @@ void UpdateVisibility() {
     Mat head;
     const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
     for (auto &[i, s] : g_screens) {
-        bool visible = s.shown && (shared || s.drag != Drag::None) && !s.alone;
+        bool visible = !g_paused && s.shown && (shared || s.drag != Drag::None) && !s.alone;
         // A floating window's panel: while a window floats on it, its output is on, and the
         // window isn't minimized (and once it has a crop).
         if (s.floating) visible = visible && s.floatOn && s.outputOn && !s.minimized && s.cropW > 0;
@@ -1569,6 +1575,7 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
 }
 
 bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
+bool ft_vr_paused(void) { return g_paused; }
 
 }  // extern "C"
 
@@ -2104,6 +2111,17 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         g_manual = always ? !want : want;
         UpdateVisibility();
         std::snprintf(reply, size, "ok %s", want ? "shown" : "hidden");
+    } else if (std::sscanf(cmd, "pause %15s", word) == 1) {
+        if (!std::strcmp(word, "on") || !std::strcmp(word, "off")) {
+            const bool on = !std::strcmp(word, "on");
+            if (on != g_paused)
+                std::printf("%s\n", on ? "paused for a VR game: everything hidden, KWin slowed down" : "resumed");
+            g_paused = on;
+            UpdateVisibility();
+        } else if (std::strcmp(word, "state") != 0) {
+            return (void)std::snprintf(reply, size, "error pause on|off|state");
+        }
+        std::snprintf(reply, size, "ok %s", g_paused ? "paused" : "running");
     } else if (std::sscanf(cmd, "ingames %15s", word) == 1) {
         if (!std::strcmp(word, "hide")) g_inGames = InGames::Hide;
         else if (!std::strcmp(word, "visible")) g_inGames = InGames::Visible;
