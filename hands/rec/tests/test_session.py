@@ -89,6 +89,12 @@ class SessionTest(SessionBase):
         self.assertGreater(ev[2]["t"] - ev[1]["t"], 0.25e9)
         with open(os.path.join(s.session_dir, "session.json")) as f:
             self.assertEqual(json.load(f)["mode"], "step")
+        # a clock sample as each part starts (2 steps: 2 parts), for capture_ns (RAW) -> MONOTONIC
+        with open(os.path.join(s.session_dir, "takes", "01-poses", "take.json")) as f:
+            clock = json.load(f)["clock"]
+        self.assertEqual(len(clock), 2)
+        self.assertTrue(all(len(c) == 2 and all(isinstance(v, int) for v in c) for c in clock))
+        self.assertLess(clock[0][0], clock[1][0])
         # the panel: Ready?, then the countdown, then the section's word for the hold, the diagram
         self.assertIn("panel: action " + session.READY_TEXT, self.panel)
         self.assertLess(self.panel.index("panel: big 3"), self.panel.index("panel: big 1"))

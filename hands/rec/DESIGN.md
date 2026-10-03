@@ -57,11 +57,12 @@ Test hooks:
       poses.jsonl               head and controller poses from ft-handpanel (below)
       take.json                 {"section", "title", "started_ns", "ended_ns", "status": "complete"|"stopped"|"skipped",
                                  "deleted": [[from_ns, to_ns], ...], "notes": "",
-                                 "parts": {"sets.bin": {"names_swapped": false}, "sets-2.bin": {...}}}
+                                 "parts": {"sets.bin": {"names_swapped": false}, "sets-2.bin": {...}},
+                                 "clock": [[mono_ns, raw_minus_mono_ns], ...]}
   exports/<session>/            what export writes (below)
 ```
 
-All `_ns` times are CLOCK_MONOTONIC nanoseconds, the clock of `dqbuf_ns` in sets.bin and of `capture_ns` in the hands file. sets.bin's `capture_ns` is the camera clock (CLOCK_MONOTONIC_RAW).
+All `_ns` times are CLOCK_MONOTONIC nanoseconds, the clock of `dqbuf_ns` in sets.bin and of `capture_ns` in the hands file. sets.bin's `capture_ns` is the camera clock (CLOCK_MONOTONIC_RAW). The two drift apart with NTP's corrections: on 2026-10-03 RAW ran 0.80 s ahead, gaining about 10 ppm. take.json `"clock"` samples the difference (RAW minus MONOTONIC, as ft-hands' `raw_minus_mono_ns()`) when each part starts and stops, so a set's exposure time on the poses' clock is `capture_ns - raw_minus_mono_ns`, interpolated between samples. `dqbuf_ns` is on the right clock already, but a few ms after the exposure. Takes recorded before 2026-10-03 have no `"clock"`.
 
 ### profile.json
 

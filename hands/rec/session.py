@@ -99,6 +99,18 @@ def mono_ns():
     return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
 
 
+def clock_sample():
+    """[CLOCK_MONOTONIC ns, CLOCK_MONOTONIC_RAW - CLOCK_MONOTONIC ns], as ft-hands' raw_minus_mono_ns().
+    sets.bin's capture_ns is on the RAW clock and everything else on MONOTONIC; the two drift
+    apart with NTP's corrections (0.8 s apart and ~10 ppm on 2026-10-03), so take.json keeps
+    samples to turn capture_ns into MONOTONIC: capture_ns - offset, interpolated by time."""
+    a = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    r = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    b = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    mid = (a + b) // 2
+    return [mid, r - mid]
+
+
 def run_dir():
     return "/run/user/%d/frametop-hands" % os.getuid()
 
@@ -2010,6 +2022,7 @@ class Session:
     def _start_recording(self):
         t = self._take
         t["part"] += 1
+        t["json"].setdefault("clock", []).append(clock_sample())
         if not self.dry_run:
             # a safety net only: the session ends the recording itself
             remaining = section_seconds(t["section"], worst=True, auto=self.auto) / self.speed
@@ -2031,6 +2044,7 @@ class Session:
             self._log("recording part %d ended (%s)" % (rec.part, code))
             if self._take:   # how this part's side cameras are named (sides.py)
                 self._take["json"].setdefault("parts", {})[rec.file] = {"names_swapped": rec.names_swapped}
+                self._take["json"].setdefault("clock", []).append(clock_sample())
                 write_json(os.path.join(self._take["dir"], "take.json"), self._take["json"])
 
     def _end_take(self, status):
