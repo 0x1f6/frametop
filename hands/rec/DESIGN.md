@@ -78,13 +78,14 @@ No name, email, or account. The contributor id is random, so several sessions fr
  "checklist": {"objects": ["pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small"], "own_objects": ["..."],
                "controllers": "straps|none", "sleeves": "short|long|", "rings": false, "watch": false, "notes": ""},
  "device": {"steamos": "<VERSION_ID from /etc/os-release>", "steamvr": "<version if known>", "cameras": [{"name", "width", "height"}]},
- "mode": "step|auto", "takes": ["01-hand-size", "..."],
+ "mode": "step|auto", "quick": false, "shuffle": {"seed": 123, "sweeps": {"pose-sweeps": [{"id", "hands", "cues"}]}},
+ "takes": ["01-hand-size", "..."],
  "camera": {"status": "ok|unknown|degraded", "reason": "..."}, "stop_reason": "..."}
 ```
 
 `camera` is the camera check's verdict at the start (no paths or log lines: those go to `session.log`). `stop_reason` is there when a session was stopped at the no-hands screen, with the check's result.
 
-A session started before step mode existed has no `mode`: it ran as `auto`.
+A session started before step mode existed has no `mode`: it ran as `auto`. `quick` and `shuffle` (below, "Sweeps" and "Quick round") are missing from sessions before the sweeps.
 
 ### calibration.json
 
@@ -132,7 +133,7 @@ prompt     the hold: its labels start here
 wait       the hold is over: no labels from here; part N stops
 ```
 
-The touch-the-dot targets after the first follow straight on: no `ready` or `wait` between them. `redo` marks a try done again (R): `from` is that step's `ready` (or its `prompt` if it had none), `to` its end. Its prompt is skipped; the sets stay. In auto mode there's no `ready` or `wait`, and the intro is a recorded prompt `<section>/intro`. `nohands` marks the first hand-size step stopped because no hand was seen (below, "Camera check"); a `redo` over the same range follows it, so the try gets no labels. Readers that knew only `prompt` and `end` keep working, but they'd give the countdown to the step before: `hub_review.py` (frame-hands `train/hub`) shows it as "(countdown)" and redone prompts as "(redone)"; `FORMAT.md` in the dataset repo has the rules.
+The touch-the-dot targets after the first follow straight on: no `ready` or `wait` between them. `redo` marks a try done again (R): `from` is that step's `ready` (or its `prompt` if it had none), `to` its end. Its prompt is skipped; the sets stay. In auto mode there's no `ready` or `wait`, and the intro is a recorded prompt `<section>/intro`. `nohands` marks the first hand-size step stopped because no hand was seen (below, "Camera check"); a `redo` over the same range follows it, so the try gets no labels. A sweep step (below, "Sweeps") has a `prompt` per cue, each with its `pose`, `"cue": true` and `"step"`, the step's id; its `ready`, `wait` and `redo` carry the step's id. Readers that knew only `prompt` and `end` keep working, but they'd give the countdown to the step before: `hub_review.py` (frame-hands `train/hub`) shows it as "(countdown)", redone prompts as "(redone)" and cues as "[pose] text"; `FORMAT.md` in the dataset repo has the rules.
 
 ### poses.jsonl
 
@@ -171,6 +172,7 @@ Commands (UTF-8; `|` starts a new line in text):
 | `big <text>` | Large cyan text under the instruction: the countdown (empty clears it). |
 | `keys <text>` | The faint key hints along the bottom. |
 | `rec on` / `rec off` | The red "Rec" by the step line. |
+| `strip <cue> <path>\|<mode>\|<label>;...` / `strip off` | A sweep's row of pose pictures (path `-`: none; mode `-` or `mirror`), each with its label under it; the one at index `cue` (from 0, -1 for none) framed in cyan and bright, the others dim. It sits along the bottom of the space left, the where-to diagram at its right end if there is one, and the text above it; it takes the left column's place. Each picture is loaded once. A file that can't be read: `error can't read ...`, and that item shows an empty frame. |
 | `target <x> <y> <z> [show\|hold <0..1>\|done]` / `target off` | The touch target: a small sphere-like dot about 2 cm across, in its own overlay (`frametop.handpanel.target`). The point is in the head frame (metres, +x right, +y up, -z forward). The first `target` with a new point places it in the room with the current HMD pose, and it stays there. Later commands with the same point change only the state. `hold` draws a filling ring, `done` turns it green. Reply: `ok <room x> <room y> <room z>`. |
 | `poses start <path>` / `poses stop` | Log poses to the path (appending, `poses.jsonl` format above) from a thread at 250 Hz, until stopped. |
 | `devices` | Reply: `ok hmd <r> left <r or -> right <r or ->`, the current `ETrackingResult` values (`-` for no device in that role). |
@@ -196,9 +198,13 @@ A pose with no entry, or whose file is missing, shows no picture: the text alone
 
 ```json
 {"version": 1,
+ "cue_names": {"thumbs-up": "Thumbs up", "...": "..."},
  "sections": [
    {"id": "hand-size", "title": "Hand size", "requires": [], "intro": "text shown before the first prompt: 4 s, or until Next", "go": "Hold",
-    "prompts": [{"text": "...", "seconds": 8, "hands": "both", "pose": "flat", "distance": "near"}]},
+    "quick": true, "prompts": [{"text": "...", "cues": ["flat", "flat-back", "spread"], "cue_s": 5, "hands": "both", "distance": "mid"}]},
+   {"id": "pose-sweeps", "title": "Hand poses", "kind": "sweep", "quick": true, "cue_s": 4, "step_s": 20,
+    "groups": [["open", "fist", "point", "pinch"], ["ok", "thumbs-up", "spread", "claw"], ["count-1", "...", "count-5"]],
+    "sweeps": [{"hands": "both", "group": "next", "text": "..."}, {"hands": "left", "group": "any", "quick": false, "text": "..."}]},
    {"id": "objects", "title": "Things you hold", "requires": ["objects"], "for_each": "object",
     "prompts": [{"text": "Pick up the {object} and use it the way you normally would.", "seconds": 15, "hands": "both", "object": "{object}"}]},
    {"id": "touch", "title": "Touch the dot", "kind": "targets", "hold_s": 1.0, "timeout_s": 8,
@@ -210,11 +216,29 @@ A pose with no entry, or whose file is missing, shows no picture: the text alone
 
 - `requires`: `objects` (at least one object ticked), `controllers` (straps ticked). A section whose requirements aren't met is skipped and logged.
 - `go`: the word the countdown ends on, "Go" unless set ("Hold" for the still poses).
+- `quick`: the section is in a quick round; a step with `"quick": false` isn't (below).
 - `kind`:
-  - `prompts` (the default): each prompt shows for its `seconds` with a countdown.
+  - `prompts` (the default): each prompt shows for its `seconds` with a countdown. A prompt with `cues` (and `cue_s`) is a sweep step with those cues in that order, `seconds` = cues x cue_s (hand size; the mouse and switch step).
+  - `sweep`: steps built from `sweeps` (below).
   - `targets`: each target shows until the live index tip is within 3 cm of it for `hold_s`, or `timeout_s` passes.
   - `bar`: the target marker sweeps near to far and back, `reps` times per height, at `period_s` per sweep. The current marker follows the live palm distance.
 - Each section is one take. Prompts within it are marked in `prompts.jsonl`.
+- `cue_names`: the short labels under the strip's pictures (otherwise the pose id).
+
+### Sweeps
+
+The second in-headset session (sessions/20261002-202734) took about 16 min and was "super long and kind of annoying": the 36 held poses alone took 7.9 min, 3.2 of it reading, and the person skipped the wrist turns and gave up on the bare push after 3 steps. The labels come from the auto-labeller (teacher model and triangulation, frame-hands `train/label`), not from the prompts, so what the recordings need is variety (shapes, distances, angles), not clean holds. So the poses are swept:
+
+- A sweep step shows a strip of 2-5 pose pictures and asks for slow, continuous movement (near and far, all around) while the hands change shape with the lit picture. The light moves on every `cue_s` (4 s), cycling, over `step_s` (20 s): 5 cues for a group of 4 or 5. Each cue is a `prompt` event with that `pose`, `"cue": true` and `"step"` (the step's id); `distance` and `position` are "" (varied). So the timeline tags each pose roughly, and the countdown, `wait` and `redo` work per step as before. The time-left bar covers the whole step.
+- `groups`: lists of poses. A step takes `"group": "next"` (the groups in turn) or `"any"` (one drawn at random, a different one for each "any" while there are groups left), or names its own `cues`. `"shuffle": false` (gestures) keeps the script's order; `"cycle": false` runs the cues once; `"fixed": true` keeps one step's order.
+- The pose sweeps: 3 two-hand sweeps, one per group ([open, fist, point, pinch], [ok, thumbs-up, spread, claw], [count-1 ... count-5]); then a left-hand and a right-hand sweep (the other hand in the lap) on groups drawn from those three, which also turn the wrist as they go, so the wrist angles come for free (the old wrist-turns section is gone).
+- **The shuffle, per session.** The groups' order, the "any" draws and the cues' order in each step are shuffled with a seed from the session's id (`session_seed`: the first 8 hex digits of its SHA-256), separately per section (`random.Random("<seed>/<section>")`). The sections' order isn't shuffled (the controller sections need their before and after). session.json records `"shuffle": {"seed", "sweeps": {section: [{"id", "hands", "cues"}]}}`, and `build_plan(script, checklist, seed=...)` gives the same again. `--seed N` overrides it; `--plan` without one shows the script's order.
+- The strip has one picture per pose, a single hand: both hands make the same shape, and five pairs wouldn't fit. A left hand's pictures are flipped.
+- Gestures are sweeps too, in order and once: tap then drag; grab, cross, overlap; near the face then a screen's distance. Hand size is one step of three held shapes (flat, backs, spread; 5 s each), still the no-hands check's first step.
+
+### Quick round
+
+For more lighting rounds: "Quick round (about 3 min)" on the checklist page, `session.py --quick`. It has the sections marked `quick` (hand size, the pose sweeps without the one-hand ones, touch the dot, no hands), about 2 min recorded in 6 steps. session.json gets `"quick": true`. The checklist page suggests it (and picks it) once a full session has gone to the end (`Backend.hasFullSession`: a session.json with status `done`, not quick, not a dry run).
 
 ### Step mode (the default) and auto mode
 
@@ -228,22 +252,21 @@ Steps that wait: each prompt, each bar height, and the first touch-the-dot targe
 
 Auto mode ("Advance by itself" on the checklist page, `session.py --auto`) is the old timed flow: the welcome, the between and before screens, the intro (recorded) and each prompt for its seconds, one recording per take. R still works there: it restarts the step running.
 
-Holds are 5 s for still poses (4 s counting fingers), 8-10 s for movements. The core session (no objects, no controllers) records about 11 min in 62 steps; with 5 s of reading a step that's about 16 min. Everything ticked: about 16.5 min recorded in 86 steps. The window and `session.py --plan` give these (`plan_summary`); in step mode they leave the reading time out and say so.
+Steps are 20 s sweeps, 16-18 s gestures, 10-12 s desk and object steps, the touch targets (6) and the push heights (2, 3 reps of 6 s). The core session (no objects, no controllers) records about 5 min in 15 steps; with 5 s of reading a step that's about 6 min. Everything ticked (four objects, controllers): about 7.3 min recorded in 24 steps. A quick round: about 2 min in 6 steps. The window and `session.py --plan` give these (`plan_summary`); in step mode they leave the reading time out and say so.
 
 The sections, in this order (see the plan):
-1. hand size
-2. static poses (both hands, then each hand: open, fist, point, pinch, OK, thumbs up, spread, claw, counting 1-5, at near, mid and far, and centre, left, right, up, down)
-3. wrist rotations
-4. gestures (pinch taps, pinch-drag, grabs, hands crossing and overlapping, hands near the face, hands at screen distance)
-5. desk work (typing, mouse)
-6. objects (one prompt per ticked object, own objects included)
-7. touch the dot
-8. controller depth, straps (push out and back at 3 heights and to each side, wrist turns, open and close). "Out and back" is straight away from the headset and back toward it: the first in-headset session took the left-right bar for sideways. The texts say so, the bar's ends read "At your chest" and "Arm out" (`near_label`, `far_label`, sent as `bar ... At your chest|Arm out`), and the picture is a side view.
-9. bridge (one controller on, the bare fingertip touches the marked point on it at near, mid and far, then swap; then a controller on the desk, touched from several angles)
-10. bare repeat of section 8, controllers off
-11. no hands (10 s)
+1. hand size (one step: flat, backs, spread)
+2. pose sweeps (above: 3 with both hands, one with each hand)
+3. gestures (3 sweeps: pinch taps and drags; grabs, crossing and overlapping; near the face, then pointing at screen distance)
+4. desk work (typing or pretend typing; the mouse, with switching to the keyboard when both are there)
+5. objects (one prompt per ticked object, own objects included)
+6. touch the dot (6 dots spread near and far, left and right, low)
+7. controller depth, straps (push out and back at chest and eye level, 3 reps each; then the wrists and fingers with the controllers on). "Out and back" is straight away from the headset and back toward it: the first in-headset session took the left-right bar for sideways. The texts say so, the bar's ends read "At your chest" and "Arm out" (`near_label`, `far_label`, sent as `bar ... At your chest|Arm out`), and the picture is a side view.
+8. bridge (one controller on, the bare fingertip on its thumbstick while that hand moves from close to arm's length and back, then swap; then a controller on the desk, touched from the front and above, then from the sides: 4 steps, the controller changes during the ready screens)
+9. bare repeat of section 7's pushes, controllers off
+10. no hands (10 s)
 
-Before section 8: "Put on both controllers and tighten the straps". Before section 10: "Take the controllers off and put them out of view".
+Before section 7: "Put on both controllers and tighten the straps". Before section 9: "Take the controllers off and put them out of view".
 
 ### Feedback while recording
 
@@ -307,7 +330,7 @@ On 2026-10-02 a whole session showed "I can't see your hands": after the headset
     Errors get a plain explanation: not logged in, a token Hugging Face rejects (401), a token that can't open a pull request (403), terms not accepted, dataset not found, network errors. `--dry-run` does everything except the network calls and the record, and lists what it would upload.
   - **The page** shows the login (`whoami`, with "Check again"). If nobody is logged in, it explains how to run `distrobox enter dev -- hf auth login` in Konsole with a write token: the token goes only into that terminal. The page then has Upload and Cancel, the phase with a progress bar (a share while the export is checked, a sweep while it's sent, as `huggingface_hub` reports no progress), and the pull request's link when it's done. If this export was uploaded before, the page says so, and uploading it again asks first. A stale export can't be uploaded.
   - **While the texts are drafts**, Upload stays off unless `FT_HANDREC_ALLOW_UPLOAD=1`, so the maintainer can rehearse against a private test repo. `FT_HANDREC_DATASET` overrides `HF_DATASET`. `ft-handrec --hub-dry-run` makes Upload a dry run: no network, so it isn't held back by the drafts.
-  - **Rehearsal: `hands/rec/rehearse.sh [--repo ID]`** runs it all without the headset, in the dev container, in one `frame-job --local` scope when frame-job is installed. `ft-ringplay` plays 30 s of a recording into a ring in `/run/user/UID`. A tracking ft-hands that's already running is used, or one is started on that ring. `ft-handpanel --no-vr` stands in for the panel. `session.py --no-start --next-after 0.3` records a two-section test script in step mode, three parts of 6 s (countdown and hold), about 360 MB once exported. Then `takes.py` exports, `validate.py` checks, and `hub.py` uploads: a dry run by default, or for real to `--repo ID` with `FT_HANDREC_ALLOW_UPLOAD=1`. It prints a summary, deletes its temporary folders (camera images of a room) and stops everything it started, Ctrl+C included. The `--no-vr` panel logs no poses, so `poses.jsonl` is missing there (a warning).
+  - **Rehearsal: `hands/rec/rehearse.sh [--repo ID]`** runs it all without the headset, in the dev container, in one `frame-job --local` scope when frame-job is installed. `ft-ringplay` plays 30 s of a recording into a ring in `/run/user/UID`. A tracking ft-hands that's already running is used, or one is started on that ring. `ft-handpanel --no-vr` stands in for the panel. `session.py --no-start --next-after 0.3` records a three-section test script (a prompt, a two-cue sweep, no hands) in step mode, three parts of 6 s (countdown and hold), about 360 MB once exported. Then `takes.py` exports, `validate.py` checks, and `hub.py` uploads: a dry run by default, or for real to `--repo ID` with `FT_HANDREC_ALLOW_UPLOAD=1`. It prints a summary, deletes its temporary folders (camera images of a room) and stops everything it started, Ctrl+C included. The `--no-vr` panel logs no poses, so `poses.jsonl` is missing there (a warning).
 
 ## Licensing and consent (texts in `CONSENT.md`)
 

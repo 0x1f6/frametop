@@ -469,7 +469,8 @@ Kirigami.ApplicationWindow {
                     text: "Press Start, then put the headset on. A panel in the headset shows each step: a picture "
                           + "of the hand pose, where to hold your hands, and what to do. The sections: hand poses, "
                           + "gestures, typing and the mouse, your objects, touching a dot, and moves with the "
-                          + "controllers on and off. Each section is recorded as one take.\n\n"
+                          + "controllers on and off. Each section is recorded as one take. In the pose steps your "
+                          + "hands keep moving while a row of pictures lights up one shape after another: follow it.\n\n"
                           + "Each step waits until you're ready: press the button on the right side of the headset, "
                           + "or Space or Next in this window. A 3-2-1 "
                           + "countdown follows, then hold the pose until the bar runs out. Nothing is recorded while "
@@ -477,6 +478,28 @@ Kirigami.ApplicationWindow {
                           + "pauses, R records the last step again, S skips a section and Esc stops.\n\n"
                           + "Nothing leaves the headset. Afterwards you watch the takes in Review, delete anything "
                           + "you don't want to share, and only then export."
+                }
+                ColumnLayout {
+                    Kirigami.FormData.label: "Round:"
+                    Controls.RadioButton {
+                        id: fullRound
+                        text: "Full session"
+                        checked: !backend.hasFullSession
+                    }
+                    Controls.RadioButton {
+                        id: quickRound
+                        text: "Quick round (about 3 min): hand size, poses, the dot, no hands"
+                        checked: backend.hasFullSession
+                    }
+                }
+                Kirigami.InlineMessage {
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    Layout.fillWidth: true
+                    visible: backend.hasFullSession
+                    Layout.preferredHeight: visible ? implicitHeight : 0
+                    type: Kirigami.MessageType.Information
+                    text: "You've recorded a full session already. A quick round in a different light (dim, "
+                          + "daylight) adds the most now."
                 }
                 Controls.CheckBox {
                     id: autoAdvance
@@ -490,14 +513,15 @@ Kirigami.ApplicationWindow {
                     text: (autoAdvance.checked
                            ? "Each step shows for a few seconds and the next follows by itself. Quicker if you "
                              + "know the steps already. "
-                           : "") + "Length: " + backend.planText(checklist.answers(), autoAdvance.checked) + "."
+                           : "") + "Length: " + backend.planText(checklist.answers(), autoAdvance.checked, quickRound.checked) + "."
                 }
                 Controls.Button {
                     text: "Start"
                     icon.name: "media-record"
                     enabled: checklist.ready && !backend.camerasBlockStart && !backend.restartingSteamVR
                     onClicked: {
-                        if (backend.startSession(checklist.answers(), lighting.currentValue, autoAdvance.checked))
+                        if (backend.startSession(checklist.answers(), lighting.currentValue, autoAdvance.checked,
+                                                 quickRound.checked))
                             root.show(sessionPage)
                     }
                 }
@@ -777,6 +801,45 @@ Kirigami.ApplicationWindow {
                             wrapMode: Text.Wrap
                             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
                             text: sessionView.st.prompt || ""
+                        }
+                        // A sweep's row of pictures, the lit one framed, as on the panel
+                        Row {
+                            visible: (sessionView.st.strip || []).length > 0
+                            spacing: Kirigami.Units.largeSpacing
+                            Repeater {
+                                model: sessionView.st.strip || []
+                                Column {
+                                    required property var modelData
+                                    required property int index
+                                    readonly property bool lit: index === sessionView.st.cue
+                                    spacing: Kirigami.Units.smallSpacing
+                                    Rectangle {
+                                        width: Kirigami.Units.gridUnit * 5.5
+                                        height: width
+                                        radius: Kirigami.Units.smallSpacing * 2
+                                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g,
+                                                       Kirigami.Theme.textColor.b, 0.06)
+                                        border.width: parent.lit ? 3 : 0
+                                        border.color: "#4cd9ff"
+                                        Image {
+                                            anchors.fill: parent
+                                            anchors.margins: 4
+                                            source: modelData.image ? "file://" + modelData.image : ""
+                                            fillMode: Image.PreserveAspectFit
+                                            mirror: modelData.mode === "mirror"
+                                            opacity: parent.parent.lit ? 1 : 0.4
+                                            smooth: true
+                                            mipmap: true
+                                        }
+                                    }
+                                    Controls.Label {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: modelData.label || ""
+                                        color: parent.lit ? "#4cd9ff" : Kirigami.Theme.textColor
+                                        opacity: parent.lit ? 1 : 0.6
+                                    }
+                                }
+                            }
                         }
                         // The countdown's 3, 2, 1, then the hold's word, big
                         Controls.Label {

@@ -26,10 +26,12 @@ All _ns times are CLOCK_MONOTONIC nanoseconds.
 """
 import argparse
 import glob
+import hashlib
 import json
 import math
 import mmap
 import os
+import random
 import re
 import select
 import shutil
@@ -742,9 +744,12 @@ PROMPT_KEYS = ("text", "seconds", "hands", "pose", "distance", "position", "obje
 
 
 def _when_ok(cond, ctx):
-    """A prompt's or block's "when": "controllers", "objects:keyboard", or either negated with "!"."""
+    """A prompt's or block's "when": "controllers", "objects:keyboard", either negated with "!",
+    or a list of them, all to hold."""
     if not cond:
         return True
+    if isinstance(cond, list):   # all of them
+        return all(_when_ok(c, ctx) for c in cond)
     neg = cond.startswith("!")
     c = cond.lstrip("!")
     value = c[len("objects:"):] in ctx["objects"] if c.startswith("objects:") else bool(ctx.get(c))
@@ -790,9 +795,67 @@ def load_script(path):
     return script
 
 
-def build_plan(script, checklist):
+def session_seed(session_id):
+    """The shuffle's seed for a session: from its id, so the same id gives the same plan."""
+    return int(hashlib.sha256(session_id.encode()).hexdigest()[:8], 16)
+
+
+def _sweep_prompts(s, raw, ctx, rng):
+    """A sweep section's steps (DESIGN.md, "Sweeps"): each a prompt with "cues", the pose of each
+    cue_s slot in order. A step names its cues, or takes a group: "next" (the groups in turn, in
+    the shuffled order) or "any" (a group drawn at random, different for each "any" while there
+    are groups left). With rng (the session's shuffle) the groups' order, the "any" draws and the
+    cues' order within a step are shuffled, unless the section says "shuffle": false or the
+    step "fixed": true; without it, everything goes in the script's order."""
+    groups = [list(g) for g in raw.get("groups") or []]
+    shuffle = rng is not None and raw.get("shuffle", True)
+    order = list(range(len(groups)))
+    pool = list(range(len(groups)))
+    if shuffle:
+        rng.shuffle(order)
+        rng.shuffle(pool)
+    taken, drawn, counts = 0, 0, {}
+    out = []
+    for step in raw.get("sweeps") or []:
+        if not _when_ok(step.get("when"), ctx):
+            continue
+        g = step.get("group")
+        if step.get("cues"):
+            cues = list(step["cues"])
+        elif g == "next" and groups:
+            cues, taken = list(groups[order[taken % len(order)]]), taken + 1
+        elif g == "any" and groups:
+            cues, drawn = list(groups[pool[drawn % len(pool)]]), drawn + 1
+        elif isinstance(g, int) and 0 <= g < len(groups):
+            cues = list(groups[g])
+        else:
+            raise ValueError("%s: a sweep needs cues or a group" % s["id"])
+        if shuffle and not step.get("fixed"):
+            rng.shuffle(cues)
+        cue_s = float(step.get("cue_s", raw.get("cue_s", 4)))
+        slots = max(len(cues), int(math.ceil(float(step.get("seconds", raw.get("step_s", cue_s * len(cues)))) / cue_s
+                                             - 1e-9))) if step.get("cycle", raw.get("cycle", True)) else len(cues)
+        p = _prompt(s, {k: v for k, v in step.items() if k not in ("group", "cues", "fixed", "cycle", "quick")}, ctx)
+        p["cues"] = [cues[k % len(cues)] for k in range(slots)]
+        p["cue_s"] = cue_s
+        p["seconds"] = cue_s * slots
+        p["pose"] = p["cues"][0]
+        if not step.get("id"):
+            counts[p["hands"]] = counts.get(p["hands"], 0) + 1
+            p["id"] = "%s/%s-%d" % (s["id"], p["hands"] or "any", counts[p["hands"]])
+        else:
+            p["id"] = "%s/%s" % (s["id"], step["id"])
+        if step.get("quick") is False:
+            p["quick"] = False
+        out.append(p)
+    return out
+
+
+def build_plan(script, checklist, seed=None, quick=False):
     """The sections this session runs, prompts expanded for the checklist, and the ones
-    skipped: (plan, skipped) with skipped = [{"section", "reason"}]."""
+    skipped: (plan, skipped) with skipped = [{"section", "reason"}]. seed: the shuffle of the
+    sweeps (session_seed; None: the script's order). quick: the quick round, only sections
+    marked "quick" and, in those, no step marked "quick": false."""
     objects = [o for o in (checklist.get("objects") or []) if o]
     own = [o for o in (checklist.get("own_objects") or []) if str(o).strip()]
     ctx = {"objects": set(objects) | set(own), "controllers": checklist.get("controllers") == "straps"}
@@ -800,6 +863,9 @@ def build_plan(script, checklist):
     plan, skipped = [], []
     for raw in script["sections"]:
         sid = raw["id"]
+        if quick and not raw.get("quick"):
+            skipped.append({"section": sid, "reason": "not in a quick round"})
+            continue
         missing = [r for r in raw.get("requires") or [] if not ctx.get(r)]
         if missing:
             skipped.append({"section": sid, "reason": "needs " + ", ".join(missing)})
@@ -808,7 +874,12 @@ def build_plan(script, checklist):
         s["kind"] = raw.get("kind", "prompts")
         s["intro_s"] = float(raw.get("intro_s", script.get("intro_s", 4)))
         prompts = []
-        if raw.get("for_each") == "object":
+        if s["kind"] == "sweep":
+            rng = random.Random("%d/%s" % (seed, sid)) if seed is not None else None
+            prompts = _sweep_prompts(s, raw, ctx, rng)
+            if quick:
+                prompts = [p for p in prompts if p.get("quick") is not False]
+        elif raw.get("for_each") == "object":
             skip = set(raw.get("skip_objects") or [])
             for o in [o for o in objects if o not in skip] + own:
                 label = clean_text(names.get(o, o)).replace("|", "/")
@@ -816,7 +887,14 @@ def build_plan(script, checklist):
                     if _when_ok(p.get("when"), ctx):
                         prompts.append(_prompt(s, p, ctx, {"object": label, "object_key": clean_text(o)}))
         else:
-            prompts = [_prompt(s, p, ctx) for p in raw.get("prompts") or [] if _when_ok(p.get("when"), ctx)]
+            prompts = [_prompt(s, p, ctx) for p in raw.get("prompts") or [] if _when_ok(p.get("when"), ctx)
+                       and not (quick and p.get("quick") is False)]
+            for p in prompts:   # a prompt may have cues too (hand size): its own, in its order
+                if p.get("cues"):
+                    cue_s = float(p.get("cue_s", raw.get("cue_s", 4)))
+                    p["cues"], p["cue_s"] = list(p["cues"]), cue_s
+                    p["seconds"] = cue_s * len(p["cues"])
+                    p["pose"] = p["cues"][0]
         _set_ids(s, prompts)
         s["prompts"] = prompts
         if s["kind"] == "bar":
@@ -829,7 +907,7 @@ def build_plan(script, checklist):
             s["heights"] = heights
         before = raw.get("before")
         s["before"] = before if before and _when_ok(before.get("when"), ctx) else None
-        if s["kind"] == "prompts" and not prompts:
+        if s["kind"] in ("prompts", "sweep") and not prompts:
             skipped.append({"section": sid, "reason": "nothing to do"})
             continue
         if s["kind"] == "targets" and not raw.get("targets"):
@@ -837,6 +915,16 @@ def build_plan(script, checklist):
             continue
         plan.append(s)
     return plan, skipped
+
+
+def plan_record(plan):
+    """What the shuffle chose, for session.json: each section's sweep steps and their cues."""
+    out = {}
+    for s in plan:
+        steps = [{"id": p["id"], "hands": p["hands"], "cues": p["cues"]} for p in s["prompts"] if p.get("cues")]
+        if steps:
+            out[s["id"]] = steps
+    return out
 
 
 def section_steps(s):
@@ -875,7 +963,7 @@ def plan_steps(plan):
 
 
 def plan_summary(script, plan, auto=False):
-    """The length in words, for the window and --plan."""
+    """The length in words, for the window and --plan (the plan of a quick round or a full one)."""
     minutes = max(1, round(plan_seconds(script, plan, auto=auto) / 60))
     if auto:
         return "about %d min, each step advancing by itself" % minutes
@@ -971,12 +1059,13 @@ class Session:
     headset's button (not in a dry run unless button_device, a test hook, names the device or
     a FIFO of input_event structs). check_cameras: run the camera check first and don't start
     if it fails (not in a dry run, nor with ring). hands_reader (a test hook): an object whose
-    read() stands in for the hands file, read in a dry run too."""
+    read() stands in for the hands file, read in a dry run too. quick: the quick round (a few
+    sections, about 3 min). seed: the sweeps' shuffle (default: from the session's id)."""
 
     def __init__(self, base_dir, profile, checklist, lighting_choice, script_path, *, ring=None,
                  start_processes=True, dry_run=False, speed=1.0, on_status=None, hands_dir=None, panel_bin=None,
                  auto=False, next_after=None, poses_dir=None, button=True, button_device=None,
-                 check_cameras=True, hands_reader=None):
+                 check_cameras=True, hands_reader=None, quick=False, seed=None):
         self.base_dir = os.path.abspath(os.path.expanduser(base_dir or BASE_DIR))
         self.profile = dict(profile or {})
         self.checklist = dict(checklist or {})
@@ -993,13 +1082,16 @@ class Session:
         self.next_after = next_after
         self.button, self.button_device = bool(button), button_device
         self.check_cameras = bool(check_cameras)
+        self.quick = bool(quick)
+        self.seed = seed   # set from the session's id when it starts, unless given
         # the camera check (a test hook: tests swap it); a dry run looks at no real cameras
         self.camera_check_fn = (lambda: None) if dry_run else camera_check
         self.input_devices = INPUT_DEVICES   # where mice are looked for (a test hook)
         self._button = None                  # the ButtonReader
         self.print = print   # where dry-run panel commands go (the CLI's stdout)
         self.script = load_script(self.script_path)
-        self.plan, self.skipped = build_plan(self.script, self.checklist)
+        # the plan in the script's order; the session's own shuffle comes with its id (_make_dir)
+        self.plan, self.skipped = build_plan(self.script, self.checklist, seed=seed, quick=self.quick)
         self._poses = load_poses(poses_dir or POSES_DIR)
         self.session_dir = ""
         self._thread = None
@@ -1016,7 +1108,7 @@ class Session:
                         "take": None, "error": "", "waiting": False, "countdown": 0, "big": "", "can_redo": False,
                         "image": "", "image_mode": "", "caption": "", "position": "", "distance": "",
                         "ready_text": READY_TEXT, "button": False, "mouse": True,
-                        "camera": None, "nohands": False}
+                        "camera": None, "nohands": False, "strip": [], "cue": -1, "quick": self.quick}
         self._last_emit = 0.0
         self._log_file = None
         self._panel = None
@@ -1176,6 +1268,10 @@ class Session:
                 path = os.path.join(sessions, "%s-%d" % (sid, n))
         os.mkdir(os.path.join(path, "takes"))
         self.session_dir = path
+        if self.seed is None:
+            self.seed = session_seed(os.path.basename(path))
+        # the same sections and steps, the sweeps shuffled for this session
+        self.plan, self.skipped = build_plan(self.script, self.checklist, seed=self.seed, quick=self.quick)
         self._log_file = open(os.path.join(path, "session.log"), "a", buffering=1)
         self._log("session %s%s, script %s" % (os.path.basename(path), " (dry run)" if self.dry_run else "",
                                                 self.script_path))
@@ -1219,7 +1315,9 @@ class Session:
             "calibration_removed": removed,
             "script": {"version": self.script.get("version"), "sections": [s["id"] for s in self.plan],
                        "skipped": self.skipped},
-            "mode": "auto" if self.auto else "step", "takes": [], "status": "recording"}
+            "mode": "auto" if self.auto else "step", "quick": self.quick,
+            "shuffle": {"seed": self.seed, "sweeps": plan_record(self.plan)},
+            "takes": [], "status": "recording"}
         cam = self._status.get("camera")
         if cam:
             self._session_json["camera"] = {"status": cam.get("status"), "reason": cam.get("reason", "")}
@@ -1236,7 +1334,7 @@ class Session:
         self._panel.cmd("paused off")
         for key, c in (("note", "note "), ("countdown", "countdown off"), ("hands", "hands off off"),
                        ("bar", "bar off"), ("target", "target off"), ("image", "image off"), ("where", "where off"),
-                       ("big", "big "), ("action", "action "), ("rec", "rec off")):
+                       ("big", "big "), ("action", "action "), ("rec", "rec off"), ("strip", "strip off")):
             self._panel.set(key, c)
         self._hints(action=False)
 
@@ -1416,7 +1514,7 @@ class Session:
             try:
                 self._panel.cmd("paused off")
                 for key, c in (("big", "big "), ("action", "action "), ("rec", "rec off"), ("keys", "keys "),
-                               ("bar", "bar off"), ("target", "target off")):
+                               ("bar", "bar off"), ("target", "target off"), ("strip", "strip off")):
                     self._panel.set(key, c)
                 self._screen(state, screen, controls=False)
             except (_Stop, _Skip, _Fail):
@@ -1430,7 +1528,7 @@ class Session:
                    prompt=error or (self._stop_note if state == "stopped" else "") or screen.get("text", "").replace("|", "\n"),
                    hands={"left": None, "right": None}, nohands=False,
                    waiting=False, countdown=0, big="", can_redo=False, image="", image_mode="", caption="",
-                   position="", distance="")
+                   position="", distance="", strip=[], cue=-1)
 
     # --- the timing loop
     def _controls(self):
@@ -1634,12 +1732,35 @@ class Session:
         """The prompt's picture and where-to diagram, on the panel and in the status (sent with
         the next _emit); none without a prompt."""
         p = p or {}
-        path, mode, caption = pose_view(self._poses, p)
+        path, mode, caption = ("", "", "") if p.get("cues") else pose_view(self._poses, p)
+        self._strip(p)
         pos, dist = p.get("position") or "", p.get("distance") or ""
         self._panel.set("image", "image %s%s" % (path, " " + mode if mode else "") if path else "image off")
         self._panel.set("where", "where %s %s" % (clean_text(pos) or "-", clean_text(dist) or "-")
                         if pos or dist else "where off")
         self._status.update(image=path, image_mode=mode, caption=caption, position=pos, distance=dist)
+
+    def _cue_name(self, pose):
+        return clean_text((self.script.get("cue_names") or {}).get(pose) or pose.replace("-", " ").capitalize())
+
+    def _strip(self, p):
+        """A sweep's strip of pictures, the cue's highlighted (panel "strip", status strip and
+        cue), or none. One hand per picture, as both hands make the same shape: a left hand's
+        flipped, the rest as drawn."""
+        poses = list(dict.fromkeys(p.get("cues") or []))   # each once, in the step's order
+        if not poses:
+            self._panel.set("strip", "strip off")
+            self._status.update(strip=[], cue=-1)
+            return
+        items = []
+        for pose in poses:
+            path, mode, _ = pose_view(self._poses, {"pose": pose, "hands": p.get("hands")})
+            items.append({"image": path, "mode": "" if mode == "both" else mode, "label": self._cue_name(pose)})
+        cue = poses.index(p["pose"]) if p.get("pose") in poses else -1
+        self._panel.set("strip", "strip %d %s" % (cue, ";".join(
+            "%s|%s|%s" % (e["image"] or "-", e["mode"] or "-", e["label"].replace("|", "/").replace(";", ","))
+            for e in items)))
+        self._status.update(strip=items, cue=cue)
 
     def _hints(self, action=True):
         """The Next hint (with action) and the key line for what's there now: the headset button
@@ -1799,9 +1920,12 @@ class Session:
             self._log("take %s %s" % (t["id"], status))
 
     def _prompt_event(self, p):
+        extra = {"controllers": p["controllers"]} if p["controllers"] else {}
+        if p.get("cue"):   # a sweep's cue: the pose highlighted from now, within the step
+            extra.update(cue=True, step=p["step"])
         return self._event("prompt", id=p["id"], text=p["text"], hands=p["hands"], pose=p["pose"],
                            distance=p["distance"], position=p["position"], object=p["object"],
-                           controller=bool(p["controller"]), **({"controllers": p["controllers"]} if p["controllers"] else {}))
+                           controller=bool(p["controller"]), **extra)
 
     def _begin_prompt(self, s, p, step, state="running"):
         self._prompt = p
@@ -1822,7 +1946,7 @@ class Session:
 
     # --- steps: a section's prompts, bar heights and targets
     def _step_list(self, s):
-        """[{"kind": "prompt"|"bar"|"target", "p": prompt, "ready": waits for Next in step mode, ...}]."""
+        """[{"kind": "prompt"|"sweep"|"bar"|"target", "p": prompt, "ready": waits for Next in step mode, ...}]."""
         out = []
         defaults = s.get("defaults") or {}
         if s["kind"] == "targets":
@@ -1841,7 +1965,7 @@ class Session:
                      "controllers": list(defaults.get("controllers") or []),
                      "seconds": lead + h["reps"] * float(s.get("period_s", 6))}
                 out.append({"kind": "bar", "p": p, "h": h, "lead": lead, "ready": True})
-        out += [{"kind": "prompt", "p": p, "ready": True} for p in s["prompts"]]
+        out += [{"kind": "sweep" if p.get("cues") else "prompt", "p": p, "ready": True} for p in s["prompts"]]
         return out
 
     def _steps(self, i, s, label):
@@ -1873,7 +1997,7 @@ class Session:
                     retry = False
                     self._redo_ok = True
                     self._emit(force=False, can_redo=True)
-                check = self._read_hands and s["id"] == HANDS_CHECK_SECTION and k == 0 and st["kind"] == "prompt"
+                check = self._read_hands and s["id"] == HANDS_CHECK_SECTION and k == 0 and st["kind"] in ("prompt", "sweep")
                 self._hold_watch = {"reads": 0, "published": 0, "seen": 0} if check else None
                 try:
                     self._run_step(s, st, where)
@@ -2041,8 +2165,42 @@ class Session:
             self._target(s, st, where)
         elif st["kind"] == "bar":
             self._bar(s, st, where)
+        elif st["kind"] == "sweep":
+            self._sweep(s, st, where)
         else:
             self._run_prompt(s, st["p"], where)
+
+    def _sweep(self, s, st, where):
+        """A sweep: the strip's pictures highlighted in turn, one every cue_s, while the hands
+        keep moving. Each cue is a prompt event of its own, with that pose, "cue": true and the
+        step's id, so the timeline tags each pose roughly; the time-left bar covers the step."""
+        p = st["p"]
+        cues, cue_s = p["cues"], p["cue_s"]
+        seen = {}
+
+        def cue_prompt(j):
+            pose = cues[j]
+            seen[pose] = seen.get(pose, 0) + 1
+            return dict(p, id="%s/%s%s" % (p["id"], pose, "#%d" % seen[pose] if seen[pose] > 1 else ""),
+                        pose=pose, cue=True, step=p["id"])
+
+        self._begin_prompt(s, cue_prompt(0), where)
+        state = {"t": 0.0, "j": 0}
+
+        def tick(dt):
+            state["t"] += dt
+            j = min(len(cues) - 1, int(state["t"] / cue_s + 1e-9))
+            if j != state["j"]:
+                state["j"] = j
+                cp = cue_prompt(j)
+                self._prompt = cp
+                self._strip(cp)
+                self._prompt_event(cp)
+                self._emit()
+                self._log("    cue %s" % cp["id"])
+            return False
+
+        self._wait(p["seconds"], tick)
 
     def _target(self, s, st, where):
         hold_s, timeout_s = float(s.get("hold_s", 1.0)), float(s.get("timeout_s", 8))
@@ -2162,6 +2320,9 @@ def main():
                     help="don't read the headset's button (gpio-keys KEY_SELECT: Next, pause, resume)")
     ap.add_argument("--button-device", metavar="PATH",
                     help="test: read the button from this event device or FIFO of input_event structs (also in a dry run)")
+    ap.add_argument("--quick", action="store_true",
+                    help="a quick round (about 3 min, for another lighting): hand size, the two-hand sweeps, touch, no hands")
+    ap.add_argument("--seed", type=int, help="the sweeps' shuffle (default: from the session's id; --plan: the script's order)")
     ap.add_argument("--ignore-cameras", action="store_true",
                     help="start even if the camera check (hands/camcheck.py) finds the upper cameras off")
     a = ap.parse_args()
@@ -2211,11 +2372,11 @@ def main():
     s = Session(base, profile, checklist, a.lighting, a.script, ring=a.ring, start_processes=not a.no_start,
                 dry_run=a.dry_run, speed=a.speed, on_status=on_status, hands_dir=a.hands_dir, panel_bin=a.panel,
                 auto=a.auto, next_after=a.next_after, poses_dir=a.poses, button=not a.no_headset_button,
-                button_device=a.button_device, check_cameras=not a.ignore_cameras)
+                button_device=a.button_device, check_cameras=not a.ignore_cameras, quick=a.quick, seed=a.seed)
     est = plan_seconds(s.script, s.plan, auto=a.auto)
     worst = plan_seconds(s.script, s.plan, worst=True, auto=a.auto)
-    print("%d sections, %s mode: about %.1f min%s (at most %.1f)%s" % (
-        len(s.plan), "auto" if a.auto else "step", est / 60, "" if a.auto else " recorded", worst / 60,
+    print("%d sections%s, %s mode: about %.1f min%s (at most %.1f)%s" % (
+        len(s.plan), " (a quick round)" if a.quick else "", "auto" if a.auto else "step", est / 60, "" if a.auto else " recorded", worst / 60,
         ", %gx speed" % a.speed if a.speed != 1 else ""))
     if not a.auto:
         print("  %d steps wait for Next: add your reading time (at 5 s a step, %.1f min)"
@@ -2226,6 +2387,9 @@ def main():
         for sec in s.plan:
             print("  %-18s %-9s %3d prompts %3d steps %5.0f s" % (sec["id"], sec["kind"], len(sec["prompts"]),
                                                                 section_steps(sec), section_seconds(sec, auto=a.auto)))
+            for p in sec["prompts"]:
+                if p.get("cues"):
+                    print("      %-26s %-5s %3.0f s  %s" % (p["id"], p["hands"], p["seconds"], " ".join(p["cues"])))
         return 0
     if not a.dry_run and not a.ring:
         cam = camera_check()

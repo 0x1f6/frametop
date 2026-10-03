@@ -6,8 +6,9 @@ A Kirigami (QML) app with a Python backend. It runs in the dev container:
     changes. Agreeing writes profile.json with a random contributor id.
   - Before you start: the checklist (objects, controller straps, lighting, sleeves, privacy,
     free space), the camera check (hands/camcheck.py: Start stays off while the upper cameras
-    are off, with a Restart SteamVR button; --ignore-cameras overrides it) and what will happen.
-    Start hands it to the session runner (session.py).
+    are off, with a Restart SteamVR button; --ignore-cameras overrides it), a full session or a
+    quick round (suggested once a full one is done) and what will happen. Start hands it to
+    the session runner (session.py).
   - Session: the runner's live status with the step's pose picture and where-to diagram, Next,
     Pause/Resume, Redo, Skip section and Stop (Space: Next, P, R, S and Esc while the window has
     focus; the button on the headset's right side is Next, pause and resume). The prompts appear
@@ -492,21 +493,31 @@ class Backend(QObject):
     def sessionId(self):
         return self._session_id
 
-    @Slot("QVariantMap", bool, result=str)
-    def planText(self, checklist, auto):
-        """How long a session with these answers takes (session.plan_summary)."""
+    @Slot("QVariantMap", bool, bool, result=str)
+    def planText(self, checklist, auto, quick):
+        """How long a session with these answers takes (session.plan_summary), or a quick round."""
         mod = self._runner()
         if not mod:
             return ""
         try:
             script = mod.load_script(SCRIPT_PATH)
-            plan, _ = mod.build_plan(script, dict(checklist))
+            plan, _ = mod.build_plan(script, dict(checklist), quick=quick)
             return mod.plan_summary(script, plan, auto=auto)
         except Exception as e:
             return f"Couldn't read the script: {e}"
 
-    @Slot("QVariantMap", str, bool, result=bool)
-    def startSession(self, checklist, lighting, auto):
+    @Property(bool, notify=sessionsChanged)
+    def hasFullSession(self):
+        """A full session (not a quick round, not a dry run) went to the end: the window then
+        suggests a quick round, in another light."""
+        for s in self.store.sessions():
+            meta = takes.read_json(os.path.join(self.store.session_dir(s["id"]), "session.json"))
+            if meta.get("status") == "done" and not meta.get("quick") and not meta.get("dry_run"):
+                return True
+        return False
+
+    @Slot("QVariantMap", str, bool, bool, result=bool)
+    def startSession(self, checklist, lighting, auto, quick):
         if self.sessionActive:
             return False
         mod = self._runner()
@@ -528,7 +539,7 @@ class Backend(QObject):
         try:
             self._session = mod.Session(self.store.base, self.store.profile(), checklist, lighting, SCRIPT_PATH,
                                         on_status=lambda s: self._statusArrived.emit(dict(s)), auto=auto,
-                                        **self._session_options)
+                                        quick=quick, **self._session_options)
         except Exception as e:
             self.message.emit(f"Couldn't set up the session: {e}", True)
             return False

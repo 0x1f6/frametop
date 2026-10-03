@@ -36,6 +36,12 @@
 //   big <text>                   large, under the instruction: the countdown's 3, 2, 1, then "Hold"
 //   keys <text>                  a small faint line along the bottom: the window's keys
 //   rec on|off                   a red "Rec" dot by the step line while recording
+//   strip <cue> <path>|<mode>|<label>;... / strip off
+//                                a sweep's row of pose pictures under the text (path "-": none,
+//                                mode "-" or "mirror"), each with its label; the one at index
+//                                cue (from 0; -1: none) lit, framed in cyan, the others dim. The
+//                                where-to diagram, if any, goes at the row's right end. It takes
+//                                the place of the left column (image is ignored meanwhile)
 //   target <x> <y> <z> [show|hold <0..1>|done] / target off
 //                                the touch target, about 2 cm across. The point is in the head
 //                                frame (metres, +x right, +y up, -z forward). The first command
@@ -344,12 +350,25 @@ const Picture &Scaled(Image &img, int side, bool mirror) {
     return out;
 }
 
-void DrawPicture(Picture &dst, const Picture &src, int x0, int y0) {
+void DrawPicture(Picture &dst, const Picture &src, int x0, int y0, double opacity = 1) {
     for (int y = 0; y < src.h; ++y)
         for (int x = 0; x < src.w; ++x) {
             const uint8_t *q = &src.px[(size_t(y) * src.w + x) * 4];
-            if (q[3]) Blend(dst, x0 + x, y0 + y, q[0] / 255.0, q[1] / 255.0, q[2] / 255.0, q[3] / 255.0);
+            if (q[3]) Blend(dst, x0 + x, y0 + y, q[0] / 255.0, q[1] / 255.0, q[2] / 255.0, opacity * q[3] / 255.0);
         }
+}
+
+// A sweep's strip: its pictures, loaded once each (a strip changes only its lit one as it goes).
+struct StripItem {
+    std::string path, mode, label;
+};
+std::map<std::string, Image> g_stripImages;  // path -> picture (empty if it can't be read)
+
+Image &StripImage(const std::string &path) {
+    auto [it, fresh] = g_stripImages.try_emplace(path);
+    if (fresh && !LoadImage(it->second, path))
+        std::fprintf(stderr, "ft-handpanel: can't read %s: %s\n", path.c_str(), stbi_failure_reason());
+    return it->second;
 }
 
 // The where-to diagram's cells: a front view, 3 x 3, (column, row) from the top left.
@@ -434,6 +453,8 @@ struct Panel {
     Image image;                     // the pose picture, if image.path isn't empty
     std::string imageMode;           // "", "mirror" or "both"
     std::string wherePos, whereDist; // the diagram's, "" for none
+    std::vector<StripItem> strip;    // a sweep's pictures, or none
+    int stripCue = -1;               // the lit one
     // What the last Draw laid out, for --no-vr's printout.
     std::vector<std::string> lines, noteLines;
     double textDeg = 0;
@@ -508,13 +529,34 @@ void Draw(Panel &p) {
         bottom = ty - int(ring) - int(ppd * 0.8);
     }
 
-    // The pose picture and the diagram in a column on the left, centred together; the text
-    // takes the rest. "both": the picture flipped (the left hand) beside it as it is.
+    // A sweep's strip: a row of pictures along the bottom of what's left, labels under them, the
+    // diagram at its right end; the text goes above it.
     int textX0 = margin, textX1 = kW - margin;
     int col, row;
-    const bool imageOn = !p.image.path.empty();
+    const bool imageOn = !p.image.path.empty() && p.strip.empty();
     const bool whereOn = WhereCell(p.wherePos, col, row) || DistanceStep(p.whereDist) >= 0;
-    if (imageOn || whereOn) {
+    if (!p.strip.empty()) {
+        const int n = int(p.strip.size()), gap = int(ppd * 0.6), whereW = whereOn ? int(ppd * 9) : 0;
+        const int labelSize = int(ppd * 0.85), labelH = int(labelSize * 1.6), frame = std::max(3, int(ppd * 0.14));
+        const int rowW = width - (whereOn ? whereW + gap : 0);
+        const int side = std::max(8, std::min({int(ppd * 6), (rowW - (n - 1) * gap) / n, (bottom - top) / 2 - labelH}));
+        const int y0 = bottom - side - labelH, totalW = n * side + (n - 1) * gap;
+        int x = margin + (rowW - totalW) / 2;
+        for (int k = 0; k < n; ++k, x += side + gap) {
+            const StripItem &it = p.strip[k];
+            const bool lit = k == p.stripCue;
+            RoundRect(pic, x - frame, y0 - frame, x + side + frame, y0 + side + frame, ppd * 0.5, kCyan[0], kCyan[1],
+                      kCyan[2], lit ? 0.95 : 0);
+            RoundRect(pic, x, y0, x + side, y0 + side, ppd * 0.4, 0.16, 0.16, 0.18, 1);
+            Image *img = it.path.empty() ? nullptr : &StripImage(it.path);
+            if (img && !img->path.empty()) DrawPicture(pic, Scaled(*img, side, it.mode == "mirror"), x, y0, lit ? 1.0 : 0.4);
+            if (lit) Text(pic, it.label, labelSize, x + side / 2, y0 + side + labelH / 2 + frame, kCyan[0], kCyan[1], kCyan[2]);
+            else Text(pic, it.label, labelSize, x + side / 2, y0 + side + labelH / 2 + frame, 0.6);
+        }
+        if (whereOn) DrawWhere(pic, kW - margin - whereW, y0 + (side + labelH - int(ppd * 4.4)) / 2, whereW, int(ppd * 4.4),
+                               p.wherePos, p.whereDist);
+        bottom = y0 - frame - int(ppd * 0.8);
+    } else if (imageOn || whereOn) {
         const int colW = int(ppd * 14), gap = int(ppd * 0.6);
         const int whereH = whereOn ? int(ppd * 4.4) : 0, between = imageOn && whereOn ? gap : 0;
         const bool both = p.imageMode == "both";
@@ -650,6 +692,15 @@ void Print(const Panel &p, const Target &t, bool visible, int number) {
     if (!p.wherePos.empty() || !p.whereDist.empty())
         std::printf("where: %s %s\n", p.wherePos.empty() ? "-" : p.wherePos.c_str(), p.whereDist.empty() ? "-" : p.whereDist.c_str());
     else std::printf("where: off\n");
+    if (!p.strip.empty()) {
+        std::printf("strip: cue %d:", p.stripCue);
+        for (const StripItem &it : p.strip)
+            std::printf(" %s(%s%s)", it.label.c_str(), it.path.empty() ? "no picture" : it.path.c_str(),
+                        it.mode.empty() ? "" : (" " + it.mode).c_str());
+        std::printf("\n");
+    } else {
+        std::printf("strip: off\n");
+    }
     if (t.on)
         std::printf("target: %s %.2f, head %.3f %.3f %.3f, room %.3f %.3f %.3f\n", t.state.c_str(), t.progress, t.head[0],
                     t.head[1], t.head[2], t.room[0], t.room[1], t.room[2]);
@@ -1048,6 +1099,38 @@ int main(int argc, char **argv) {
                     p.imageMode.clear(), dirty = true;  // no picture rather than the last one
                 } else {
                     p.imageMode = mode, dirty = true;
+                }
+            } else if (Is(buf, "strip", &rest)) {
+                // strip <cue> <path>|<mode>|<label>;...
+                int cue = -1, used = 0;
+                if (!std::strcmp(rest, "off")) {
+                    p.strip.clear(), p.stripCue = -1, dirty = true;
+                } else if (std::sscanf(rest, "%d %n", &cue, &used) >= 1 && rest[used]) {
+                    std::vector<StripItem> items;
+                    std::string all = rest + used;
+                    for (size_t at = 0; at <= all.size();) {
+                        const size_t end = std::min(all.find(';', at), all.size());
+                        const std::string item = all.substr(at, end - at);
+                        at = end + 1;
+                        if (item.empty()) continue;
+                        const size_t a1 = item.find('|'), a2 = a1 == std::string::npos ? a1 : item.find('|', a1 + 1);
+                        StripItem it;
+                        it.path = item.substr(0, a1);
+                        if (a1 != std::string::npos) it.mode = item.substr(a1 + 1, a2 == std::string::npos ? a2 : a2 - a1 - 1);
+                        if (a2 != std::string::npos) it.label = item.substr(a2 + 1);
+                        if (it.path == "-") it.path.clear();
+                        if (it.mode == "-") it.mode.clear();
+                        items.push_back(it);
+                    }
+                    if (items.empty()) {
+                        reply = "error usage: strip <cue> <path>|<mode>|<label>;... | strip off";
+                    } else {
+                        for (const StripItem &it : items)
+                            if (!it.path.empty() && StripImage(it.path).path.empty()) reply = "error can't read " + it.path;
+                        p.strip = items, p.stripCue = cue, dirty = true;
+                    }
+                } else {
+                    reply = "error usage: strip <cue> <path>|<mode>|<label>;... | strip off";
                 }
             } else if (Is(buf, "where", &rest)) {
                 char pos[16] = "", dist[16] = "";

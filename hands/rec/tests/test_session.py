@@ -204,6 +204,182 @@ class SessionTest(SessionBase):
         self.assertIn("2 steps", session.plan_summary(SCRIPT, plan))
 
 
+SWEEP_SCRIPT = {
+    "version": 1, "intro_s": 1, "between_s": 1,
+    "welcome": {"title": "Test", "seconds": 1, "text": "A test."},
+    "done": {"title": "Done", "seconds": 0, "text": "Done."},
+    "stopped": {"title": "Stopped", "seconds": 0, "text": "Stopped."},
+    "cue_names": {"thumbs-up": "Thumbs up"},
+    "sections": [
+        {"id": "sweeps", "title": "Poses", "kind": "sweep", "intro": "Keep moving.", "quick": True,
+         "cue_s": 2, "step_s": 6,
+         "groups": [["open", "fist"], ["ok", "thumbs-up", "claw"]],
+         "sweeps": [{"hands": "both", "group": "next", "text": "Both hands."},
+                    {"hands": "left", "group": "any", "quick": False, "text": "Left hand."}]}]}
+
+
+class SweepTest(SessionBase):
+    def setUp(self):
+        super().setUp()
+        with open(self.script, "w") as f:
+            json.dump(SWEEP_SCRIPT, f)
+
+    def events(self, s):
+        with open(os.path.join(s.session_dir, "takes", "01-sweeps", "prompts.jsonl")) as f:
+            return [json.loads(line) for line in f]
+
+    def test_sweep_flow(self):
+        s = self.session(next_after=0.0, speed=10, seed=1)
+        s.start()
+        s.join(20)
+        self.assertEqual(s.state, "done")
+        ev = self.events(s)
+        names = [e["event"] for e in ev]
+        self.assertEqual(names, ["take", "ready", "prompt", "prompt", "prompt", "wait",
+                                 "ready", "prompt", "prompt", "prompt", "wait", "end"])
+        plan = {p["id"]: p["cues"] for p in s.plan[0]["prompts"]}
+        for step, first in (("sweeps/both-1", 2), ("sweeps/left-1", 7)):
+            cues = [e for e in ev[first:first + 3]]
+            self.assertEqual([e["pose"] for e in cues], plan[step])          # one prompt per cue, in order
+            self.assertTrue(all(e["cue"] and e["step"] == step for e in cues))
+            self.assertTrue(all(e["distance"] == e["position"] == "" for e in cues))
+            self.assertEqual(ev[first - 1], dict(ev[first - 1], event="ready", id=step))
+            gaps = [(b["t"] - a["t"]) / 1e9 for a, b in zip(cues, cues[1:])]
+            self.assertTrue(all(0.15 < g < 0.4 for g in gaps), gaps)          # cue_s 2 at 10x speed
+        # a cue repeated within a step (6 s of 2 s cues from a group of 2) gets its own id
+        both = [e["id"] for e in ev[2:5]]
+        self.assertEqual(len(set(both)), 3)
+        # the strip: every picture of the step, the cue lit
+        strips = [c for c in self.panel if c.startswith("panel: strip ")]
+        self.assertIn("panel: strip off", strips)
+        self.assertTrue(any(c.startswith("panel: strip 1 ") for c in strips))
+        with open(os.path.join(s.session_dir, "session.json")) as f:
+            meta = json.load(f)
+        self.assertEqual(meta["shuffle"]["seed"], 1)
+        self.assertEqual({x["id"]: x["cues"] for x in meta["shuffle"]["sweeps"]["sweeps"]}, plan)
+        self.assertFalse(meta["quick"])
+
+    def test_seed_from_session_id(self):
+        s = self.session(next_after=0.0, speed=20)
+        s.start()
+        s.join(20)
+        with open(os.path.join(s.session_dir, "session.json")) as f:
+            meta = json.load(f)
+        sid = os.path.basename(s.session_dir)
+        self.assertEqual(meta["shuffle"]["seed"], session.session_seed(sid))
+        again, _ = session.build_plan(SWEEP_SCRIPT, {}, seed=meta["shuffle"]["seed"])   # reproducible
+        self.assertEqual(session.plan_record(again), meta["shuffle"]["sweeps"])
+
+    def test_quick_session(self):
+        s = self.session(next_after=0.0, speed=20, quick=True)
+        s.start()
+        s.join(20)
+        self.assertEqual(s.state, "done")
+        self.assertEqual([e["event"] for e in self.events(s)].count("ready"), 1)   # the left sweep left out
+        with open(os.path.join(s.session_dir, "session.json")) as f:
+            self.assertTrue(json.load(f)["quick"])
+
+    def test_auto(self):
+        s = self.session(auto=True, speed=20)
+        s.start()
+        s.join(20)
+        self.assertEqual(s.state, "done")
+        names = [e["event"] for e in self.events(s)]
+        self.assertEqual(names, ["take", "prompt"] + ["prompt"] * 6 + ["end"])   # intro, 3 cues a step
+
+
+class ShuffleTest(unittest.TestCase):
+    def setUp(self):
+        self.script = session.load_script(session.SCRIPT_PATH)
+
+    def cues(self, seed, quick=False, checklist=None):
+        plan, _ = session.build_plan(self.script, checklist or {}, seed=seed, quick=quick)
+        return session.plan_record(plan)
+
+    def test_deterministic(self):
+        self.assertEqual(self.cues(42), self.cues(42))
+        self.assertNotEqual(self.cues(42)["pose-sweeps"], self.cues(43)["pose-sweeps"])
+        self.assertEqual(session.session_seed("20261002-202734"), session.session_seed("20261002-202734"))
+        self.assertNotEqual(session.session_seed("20261002-202734"), session.session_seed("20261002-202735"))
+
+    def test_groups(self):
+        groups = [sorted(g) for g in self.script["sections"][1]["groups"]]
+        for seed in range(20):
+            steps = self.cues(seed)["pose-sweeps"]
+            self.assertEqual([x["hands"] for x in steps], ["both", "both", "both", "left", "right"])
+            used = [sorted(set(x["cues"])) for x in steps]
+            self.assertEqual(sorted(used[:3]), sorted(groups))       # each group once with both hands
+            self.assertTrue(all(u in groups for u in used[3:]))
+            self.assertNotEqual(used[3], used[4])                    # the one-hand sweeps differ
+            self.assertTrue(all(len(x["cues"]) == 5 for x in steps))  # 20 s of 4 s cues
+        # unshuffled: the script's order
+        steps = self.cues(None)["pose-sweeps"]
+        self.assertEqual(steps[0]["cues"], ["open", "fist", "point", "pinch", "open"])
+        # gestures and hand size keep their order
+        for seed in (1, 2, 3):
+            self.assertEqual([x["cues"] for x in self.cues(seed)["gestures"]],
+                             [["pinch-tap", "pinch-drag"], ["grab", "cross", "overlap"], ["near-face", "screen-point"]])
+            self.assertEqual(self.cues(seed)["hand-size"][0]["cues"], ["flat", "flat-back", "spread"])
+
+    def test_plans(self):
+        full, skipped = session.build_plan(self.script, {}, seed=5)
+        self.assertEqual([s["id"] for s in full],
+                         ["hand-size", "pose-sweeps", "gestures", "desk-work", "touch", "bare-push", "no-hands"])
+        self.assertEqual(session.plan_steps(full), 15)
+        self.assertLess(session.plan_seconds(self.script, full, auto=False), 6 * 60)
+        everything, _ = session.build_plan(self.script, {"objects": ["pencil", "keyboard", "mouse"],
+                                                         "controllers": "straps"}, seed=5)
+        self.assertEqual(len(everything), 10)
+        quick, skipped = session.build_plan(self.script, {"objects": ["pencil"], "controllers": "straps"},
+                                            seed=5, quick=True)
+        self.assertEqual([s["id"] for s in quick], ["hand-size", "pose-sweeps", "touch", "no-hands"])
+        self.assertEqual([p["hands"] for p in quick[1]["prompts"]], ["both"] * 3)
+        self.assertEqual(len(quick[2]["targets"]), 6)
+        self.assertLess(session.plan_seconds(self.script, quick, auto=False), 150)
+        self.assertIn({"section": "objects", "reason": "not in a quick round"}, skipped)
+        # desk work: the mouse-and-keyboard step only with both ticked
+        desk = [s for s in everything if s["id"] == "desk-work"][0]["prompts"]
+        self.assertEqual([p.get("cues") for p in desk], [None, ["mouse", "switch"]])
+
+
+class StripPanelTest(unittest.TestCase):
+    """The panel's strip command on ft-handpanel --no-vr (skipped if it isn't built)."""
+
+    def test_strip(self):
+        import subprocess
+        binary = session.PANEL_BIN
+        if not os.access(binary, os.X_OK):
+            self.skipTest("ft-handpanel isn't built")
+        name = "hrtest-strip-%d" % os.getpid()
+        proc = subprocess.Popen([binary, "--no-vr", "--socket", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+        try:
+            panel = session.Panel(name=name)
+            for _ in range(50):
+                if panel.cmd("ping", reply=True, timeout=0.1):
+                    break
+                if proc.poll() is not None:
+                    self.skipTest("ft-handpanel doesn't run here: " + proc.stderr.read().strip()[-200:])
+                time.sleep(0.1)
+            else:
+                self.fail("ft-handpanel --no-vr doesn't answer")
+            poses = session.POSES_DIR
+            ok = panel.cmd("strip 1 %s/fist.png|mirror|Fist;-|-|No picture;%s/ok.png|-|OK" % (poses, poses), reply=True)
+            bad = panel.cmd("strip 1", reply=True)
+            missing = panel.cmd("strip 0 /nonexistent.png|-|Gone", reply=True)
+            panel.cmd("show", reply=True)
+            panel.cmd("strip off", reply=True)
+            panel.close()
+        finally:
+            proc.terminate()
+            out = proc.communicate(timeout=5)[0]
+        self.assertEqual(ok, "ok")
+        self.assertTrue(bad.startswith("error usage: strip"))
+        self.assertTrue(missing.startswith("error can't read"))
+        self.assertIn("strip: cue 0: Gone(/nonexistent.png)", out)
+        self.assertIn("strip: off", out)
+
+
 # /proc/bus/input/devices as the Frame has it (2026-10-02), trimmed, plus a USB mouse.
 DEVICES = """I: Bus=0019 Vendor=0001 Product=0001 Version=0100
 N: Name="gpio-keys"
