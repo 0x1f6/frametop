@@ -229,6 +229,24 @@ def cmdline(pid):
         return []
 
 
+def desktop_name(app, cls):
+    """The desktop file name for a window's app id and class. A Flatpak app's window can give an
+    id with no desktop file: RustDesk's (an X11 window) says com.carriez.flutter_hbb, and its
+    desktop file is com.rustdesk.RustDesk. That file's StartupWMClass names the window's class
+    then. The app id itself when nothing matches."""
+    try:
+        if not app or Gio.DesktopAppInfo.new(app + ".desktop"):
+            return app
+    except TypeError:  # PyGObject raises for the NULL a missing desktop file returns
+        pass
+    names = {n.lower() for n in (app, cls) if n}
+    for info in Gio.AppInfo.get_all():
+        wm = info.get_startup_wm_class() if isinstance(info, Gio.DesktopAppInfo) else None
+        if wm and wm.lower() in names:
+            return info.get_id().removesuffix(".desktop")
+    return app
+
+
 class Launch:
     """An app we started: its first window floats, or (for a profile) its windows go to the
     profile's entries for it, in order."""
@@ -779,8 +797,10 @@ class Daemon:
             return None
         chain = pid_chain(int(ev.get("pid") or 0))
         app = ev.get("app", "")
+        # (An X11 window in a Flatpak gives its pid in the sandbox: only its app id can match.)
+        apps = {app, desktop_name(app, ev.get("cls", ""))} if app and any(la.app for la in self.launches) else {app}
         for la in self.launches:
-            if any(p in chain for p in la.pids) or (la.app and app and la.app == app):
+            if any(p in chain for p in la.pids) or (la.app and app and la.app in apps):
                 if not la.entries or len(la.entries) <= 1:
                     self.launches.remove(la)
                 return la
@@ -844,7 +864,7 @@ class Daemon:
         for wid, ev in self.windows.items():
             if not recordable(ev):
                 continue
-            entry = {"app": ev["app"]} if ev.get("app") else {"cmd": cmdline(ev.get("pid")), "class": ev.get("cls", "")}
+            entry = {"app": desktop_name(ev["app"], ev.get("cls", ""))} if ev.get("app") else {"cmd": cmdline(ev.get("pid")), "class": ev.get("cls", "")}
             if not entry.get("app") and not entry.get("cmd"):
                 continue
             f = self.floats.get(wid)
@@ -871,7 +891,7 @@ class Daemon:
         return out
 
     def window_key(self, ev):
-        return ev.get("app") or json.dumps(cmdline(ev.get("pid")))
+        return desktop_name(ev.get("app", ""), ev.get("cls", "")) or json.dumps(cmdline(ev.get("pid")))
 
     def open_profile(self, name):
         """Open a profile's apps (additive: nothing closes)."""
@@ -887,9 +907,9 @@ class Daemon:
             if key != "[]":
                 groups.setdefault(key, []).append(e)
         claimed = set()
+        keys = {wid: self.window_key(ev) for wid, ev in self.windows.items() if recordable(ev)}
         for key, entries in groups.items():
-            have = [ev for wid, ev in self.windows.items()
-                    if wid not in claimed and recordable(ev) and self.window_key(ev) == key]
+            have = [ev for wid, ev in self.windows.items() if wid not in claimed and keys.get(wid) == key]
             for e, ev in zip(entries, have):
                 claimed.add(ev["id"])
                 self.place_entry(ev, e)
