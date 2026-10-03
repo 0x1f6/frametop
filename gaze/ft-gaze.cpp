@@ -58,6 +58,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -72,6 +73,7 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -430,6 +432,14 @@ int main(int argc, char **argv) {
         if (std::strcmp(argv[i], "-v") == 0) verbose = true;
         if (std::strcmp(argv[i], "--watch-stdin") == 0) watchStdin = true;
     }
+    // Nice 5, before any thread starts (they inherit it): we run in the dev container's podman
+    // scope, beside vrcompositor and vrserver at nice 0, and the gaze service's unit doesn't
+    // reach us. Not SCHED_BATCH, as ft-eyes is: that would let each wakeup wait out another
+    // task's turn, and each sample goes on to the pointer.
+    errno = 0;
+    const int nice0 = getpriority(PRIO_PROCESS, 0);
+    if (errno == 0 && nice0 < 5 && setpriority(PRIO_PROCESS, 0, 5) != 0)
+        std::fprintf(stderr, "ft-gaze: nice: %s\n", std::strerror(errno));
     // --watch-stdin: quit when stdin closes. The probe runs us through distrobox, which
     // passes neither its signals nor a closed stdout on to us, but does pass stdin's end.
     std::atomic<bool> stdinClosed{false};

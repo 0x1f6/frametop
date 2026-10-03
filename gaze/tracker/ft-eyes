@@ -377,7 +377,24 @@ def serve(sock, tracker):
                 pass
 
 
+def below_steamvr():
+    """Nice 10 and SCHED_BATCH, for this thread and those it starts. ft-eyes runs in the dev
+    container's podman scope, where the gaze service's unit doesn't reach it, so it ran at
+    nice 0 on the cores vrcompositor and vrserver use. Batch also lets a waking ft-eyes wait
+    for the running task's turn instead of taking the core: a frame a few ms late costs the
+    gaze little, a late compositor frame costs a dropped frame in the headset."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, max(os.getpriority(os.PRIO_PROCESS, 0), 10))
+    except OSError as e:
+        print(f"ft-eyes: nice: {e}", file=sys.stderr, flush=True)
+    try:
+        os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+    except (OSError, AttributeError) as e:
+        print(f"ft-eyes: SCHED_BATCH: {e}", file=sys.stderr, flush=True)
+
+
 def main():
+    below_steamvr()
     verbose = "-v" in sys.argv
     if "--watch-stdin" in sys.argv:
         # Run by ft-gazed through distrobox, which doesn't pass a stop on: quit when our
