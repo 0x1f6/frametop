@@ -9,7 +9,12 @@ the search runs again with a smaller closing.
 import cv2
 import numpy as np
 
-DARK = 30          # pupil pixels are below this (the face around it is 40-180)
+# One thread: OpenCV's pool of one per core costs more than it saves on a frame this small
+# (a 140-240 px window while it follows the pupil). Its idle workers spun and yielded about
+# 14,000 times a second each, a quarter of a core, beside SteamVR's compositor.
+cv2.setNumThreads(1)
+
+DARK = 30         # pupil pixels are below this (the face around it is 40-180)
 MIN_AREA = 150     # pupil area range in pixels
 MAX_AREA = 20000
 MIN_FILL = 0.75    # blob area / fitted-ellipse area

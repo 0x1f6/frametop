@@ -47,6 +47,7 @@
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <gbm.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -524,7 +525,11 @@ int main(int argc, char **argv) {
             if (!shown) ov->ShowOverlay(h), shown = true;
             dirty = false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(visible ? 10 : 50));
+        // Until a command comes, or 10 ms while shown (SteamVR's events). Hidden, it waits up to a
+        // second: it woke 20 to 30 times a second for nothing, the main cost left with gaze idle.
+        // A closed stdin (--watch-stdin) wakes it too, so quitting doesn't wait.
+        pollfd fds[2] = {{sock, POLLIN, 0}, {0, POLLIN, 0}};
+        poll(fds, watchStdin ? 2 : 1, visible ? 10 : 1000);
     }
     ov->DestroyOverlay(h);
     buffers.Drop();

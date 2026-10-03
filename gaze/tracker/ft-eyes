@@ -50,6 +50,7 @@ import json
 import math
 import mmap
 import os
+import select
 import socket
 import struct
 import sys
@@ -58,7 +59,12 @@ import time
 from collections import deque
 from pathlib import Path
 
-import numpy as np
+# One thread for numpy's BLAS and OpenMP, set before numpy loads: it would start one per core
+# (8 here) for small arrays that never need them. eyes_pupil keeps OpenCV to one as well.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import eyes_model  # noqa: E402
@@ -82,6 +88,15 @@ GAP = 3.0             # s without frames: the headset was off, and may sit diffe
 CLICK_BEFORE = 0.3    # a click's frames: the 300 ms before it (like the probe's fixation)
 CALIB_MIN = 15        # frames an eye needs in a calibration dot's window
 CALIB_SPREAD = 4.0    # px: more than this and the eye moved during the dot
+# Waiting for frames. They come only as a counter in shared memory, so there's nothing to block
+# on: sleep until a camera's next frame is due, then look every POLL. ft-eyegrab passes each one
+# on within a ms or two of when its camera starts the one after, so they arrive 11.1 ms apart,
+# give or take that.
+PERIOD = 1 / 90       # s between a camera's frames
+EARLY = 0.002         # start looking this long before a frame is due
+POLL = 0.001          # then this often until it comes
+STALLED = 0.1         # s without a frame: that camera stopped (headset off), and isn't waited for
+IDLE_POLL = 0.02      # how often to look while both are stopped
 
 
 class Cams:
@@ -352,7 +367,7 @@ def wait_for_cams(sock, tracker, want):
             return Cams()
         except (OSError, ValueError, RuntimeError):
             serve(sock, tracker)
-            time.sleep(0.2)
+            select.select([sock], [], [], 0.2)
 
 
 def serve(sock, tracker):
@@ -372,7 +387,24 @@ def serve(sock, tracker):
                 pass
 
 
+def below_steamvr():
+    """Nice 10 and SCHED_BATCH, for this thread and those it starts. ft-eyes runs in the dev
+    container's podman scope, where the gaze service's unit doesn't reach it, so it ran at
+    nice 0 on the cores vrcompositor and vrserver use. Batch also lets a waking ft-eyes wait
+    for the running task's turn instead of taking the core: a frame a few ms late costs the
+    gaze little, a late compositor frame costs a dropped frame in the headset."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, max(os.getpriority(os.PRIO_PROCESS, 0), 10))
+    except OSError as e:
+        print(f"ft-eyes: nice: {e}", file=sys.stderr, flush=True)
+    try:
+        os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+    except (OSError, AttributeError) as e:
+        print(f"ft-eyes: SCHED_BATCH: {e}", file=sys.stderr, flush=True)
+
+
 def main():
+    below_steamvr()
     verbose = "-v" in sys.argv
     if "--watch-stdin" in sys.argv:
         # Run by ft-gazed through distrobox, which doesn't pass a stop on: quit when our
@@ -398,6 +430,7 @@ def main():
     print("ft-eyes: frames found, tracking", file=sys.stderr, flush=True)
     seen = [cams.count(0), cams.count(1)]
     report = time.monotonic()
+    arrived = [0.0, 0.0]  # when each camera's newest frame was seen (monotonic)
     while True:
         serve(sock, tracker)
         want()
@@ -407,6 +440,7 @@ def main():
             if n == seen[c]:
                 continue
             seen[c] = n
+            arrived[c] = time.monotonic()
             got = cams.frame(c, n - 1)  # only the newest: never fall behind
             if got:
                 eyes[c].feed(*got)
@@ -425,8 +459,6 @@ def main():
                     shifts += [float(v) for v in e.shift.value]
                     pupils += [e.gaze[3], e.gaze[4]] if fresh else [math.nan, math.nan]
                 out.write(latest, (yaw, pitch), flags, per, shifts, pupils)
-        else:
-            time.sleep(0.001)
         now = time.monotonic()
         if now - report >= 5:
             if verbose:
@@ -444,6 +476,12 @@ def main():
                 print("ft-eyes: frames went away; waiting", file=sys.stderr, flush=True)
                 cams = wait_for_cams(sock, tracker, want)
                 seen = [cams.count(0), cams.count(1)]
+        # Until the next frame is due (a command on the socket wakes us sooner).
+        wait = IDLE_POLL
+        for c in (0, 1):
+            if now - arrived[c] < STALLED:
+                wait = min(wait, max(arrived[c] + PERIOD - EARLY - now, POLL))
+        select.select([sock], [], [], wait)
 
 
 if __name__ == "__main__":
