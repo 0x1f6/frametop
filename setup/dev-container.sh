@@ -23,6 +23,9 @@ packages=(
   # tools (hands/tools) need NumPy and OpenCV, which aren't here: Fedora's python3-opencv pulls
   # in over a gigabyte (hands/README.md says how to get them)
   jsoncpp-devel glibc-static
+  # hand recorder (hands/rec): its export compresses recordings with zstd; its Upload page and
+  # hub.py upload to Hugging Face with huggingface_hub (also the hf command, for hf auth login)
+  zstd python3-huggingface-hub
   # Frametop Input Settings app (Kirigami, PySide6)
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)

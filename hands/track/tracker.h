@@ -95,7 +95,11 @@ public:
     void set_keep_presence(double p) { keep_presence_ = p; }
     // One view's 3D hand: each landmark along its ray, as far as how big the palm looks says
     // for a hand `scale` times the model's (Hand::scale). False if the palm is degenerate.
-    bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) const;
+    static bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]);
+    // Cameras a and b's images were under each other's names (the side cameras, track/sides.h):
+    // each view moves to the other camera (its crop is in the image's pixels, so it keeps
+    // following its hand), and every hand's 3D starts over from its views at the next step.
+    void exchange(const std::string &a, const std::string &b);
 
 private:
     struct View {

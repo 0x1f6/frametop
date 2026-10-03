@@ -3,7 +3,7 @@
 // Python prototype: the same scheduling, with the models on a few threads.
 //
 //   ft-hands [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N]
-//            [--no-publish] [--no-gestures] [--record DIR] [--swap-sides] [--cams auto|mono|color|all] ...
+//            [--no-publish] [--no-gestures] [--record DIR] [--sides auto|0|1] [--cams auto|mono|color|all] ...
 //            (--help lists them all)
 //
 // --no-gestures: hands for the cutouts only. No pinch or grip detection, so nothing reaches
@@ -22,14 +22,24 @@
 // own clock, so they're placed on the mono cameras' by when they were dequeued, less the
 // mono cameras' measured delay.
 //
+// Which side camera is which (--sides, HANDS_SWAP_SIDES): ft-camd tells slam_left's buffers from
+// slam_right's by XRService's allocation order, which some XRService starts reverse. auto (the
+// default) tells from the hands it tracks (track/sides.h): once it's sure, it exchanges the two
+// cameras if they're backwards (the tracked views move with their images), and checks once
+// more. 0 and 1 force the naming (1: exchanged; --swap-sides is --sides 1); it still checks,
+// and warns if the hands disagree. The decision is published in /run/user/UID/frametop-hands/sides.json (see
+// write_sides below) and, for recordings, in DIR/sides.json. --record-only can't tell (it tracks
+// nothing): under auto it records the ring's names as they are.
+//
 // Settings in ~/.config/frametop.conf (FT_<name> in the environment overrides them, and
-// options override both): HANDS_SWAP_SIDES (1: as --swap-sides), HANDS_CPUS (as --cpus),
+// options override both): HANDS_SWAP_SIDES (auto, 0 or 1), HANDS_CPUS (as --cpus),
 // HANDS_CAMERAS, HANDS_BRIGHT, HANDS_BRIGHT_ON, HANDS_BRIGHT_OFF, HANDS_COLOR_LEFT (which
 // colour camera is passthrough_left: color_video0 or color_video3), HANDS_COLOR_CROP
 // (subtract or none: tools/check_color.py tells both).
 #include "io.h"
 #include "pinch.h"
 #include "record.h"
+#include "sides.h"
 
 #include <sched.h>
 #include <sys/resource.h>
@@ -45,6 +55,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -148,12 +159,25 @@ struct Lighting {
     }
 };
 
+// Writes path through a temporary file, so a reader never sees half of it.
+bool write_file(const std::string &path, const std::string &text) {
+    const std::string tmp = path + ".tmp";
+    FILE *f = std::fopen(tmp.c_str(), "w");
+    if (!f) return false;
+    const bool ok = std::fputs(text.c_str(), f) >= 0;
+    if (std::fclose(f) != 0 || !ok || std::rename(tmp.c_str(), path.c_str()) != 0) return unlink(tmp.c_str()), false;
+    return true;
+}
+
+std::string json_bool(std::optional<bool> b) { return !b ? "null" : *b ? "true" : "false"; }
+std::string json_str(const std::string &s) { return s.empty() ? "null" : "\"" + s + "\""; }
+
 }  // namespace
 
 int main(int argc, char **argv) {
     double seconds = 0, status = 5;
     int threads = 3, niceness = 5;
-    bool int8 = false, publish = true, track = true, swap_sides = false, gestures_on = true;
+    bool int8 = false, publish = true, track = true, gestures_on = true;
     std::string models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     std::string record, ring_path = "/run/user/" + std::to_string(getuid()) + "/" FH_RING_NAME;
     // SteamOS starts user processes on CPUs 0-4 and keeps 5-7 (two A720s and the X4) for
@@ -163,7 +187,9 @@ int main(int argc, char **argv) {
     // latency 9.6 against 14.1 ms, and the compositor's late frames and CPU/GPU time didn't change.
     std::vector<int> cpus = {5, 6, 7};
     if (const auto c = parse_cpus(setting("HANDS_CPUS").c_str()); !c.empty()) cpus = c;
-    swap_sides = setting("HANDS_SWAP_SIDES") == "1";
+    // Which side camera is which (see the top): auto, 0 or 1, and where that came from
+    std::string sides_mode = setting("HANDS_SWAP_SIDES"), sides_from = "config";
+    if (sides_mode.empty()) sides_mode = "auto", sides_from = "default";
     // Which cameras (see the top).
     std::string cams_arg = setting("HANDS_CAMERAS"), bright_arg = setting("HANDS_BRIGHT");
     std::string color_left = setting("HANDS_COLOR_LEFT"), color_crop = setting("HANDS_COLOR_CROP");
@@ -181,7 +207,7 @@ int main(int argc, char **argv) {
     PinchParams pinch_params;
     GripParams grip_params;
     bool gesture_log = false;   // what the pinch and grip detectors measure, 10 times a second
-    double record_for = 120;
+    double record_for = 120, record_hz = 0;   // record_hz: at most this many sets a second (0: all)
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const bool more = i + 1 < argc;
@@ -200,11 +226,13 @@ int main(int argc, char **argv) {
         else if (a == "--grip-begin" && more) grip_params.begin = std::atof(argv[++i]);
         else if (a == "--grip-end" && more) grip_params.end = std::atof(argv[++i]);
         else if (a == "--gesture-log") gesture_log = true;
-        else if (a == "--swap-sides") swap_sides = true;
+        else if (a == "--swap-sides") sides_mode = "1", sides_from = "option";
+        else if (a == "--sides" && more) sides_mode = argv[++i], sides_from = "option";
         else if (a == "--record-only") track = publish = false;
         else if (a == "--ring" && more) ring_path = argv[++i];
         else if (a == "--record" && more) record = argv[++i];
         else if (a == "--record-for" && more) record_for = std::atof(argv[++i]);
+        else if (a == "--record-hz" && more) record_hz = std::max(0.0, std::atof(argv[++i]));
         else if (a == "--keep-presence" && more) keep_presence = std::atof(argv[++i]);
         else if (a == "--cams" && more) cams_arg = argv[++i];
         else if (a == "--bright" && more) bright_arg = argv[++i];
@@ -222,19 +250,22 @@ int main(int argc, char **argv) {
         else {
             std::printf("usage: %s [--seconds N] [--threads N] [--int8] [--status S] [--models DIR] [--nice N] [--no-publish]\n"
                         "          [--no-gestures] (hands for the cutouts only: no pinches or grips)\n"
-                        "          [--record DIR] [--record-for S] [--record-only] [--cpus 5,6,7] [--swap-sides]\n"
+                        "          [--record DIR] [--record-for S] [--record-hz N] [--record-only] [--cpus 5,6,7]\n"
+                        "          [--sides auto|0|1] (auto: tell from the hands which side camera is which; 1: exchange them,\n"
+                        "          as --swap-sides; 0: as ft-camd names them)\n"
                         "          [--keep-presence P] (0.5) [--ring PATH] (ft-camd's, or ft-ringplay's)\n"
                         "          [--cams auto|mono|color|all] (auto) [--bright all|color] (all) [--bright-on L] (40) [--bright-off L] (25)\n"
                         "          [--color-left color_video0|color_video3] [--color-crop subtract|none]\n"
                         "          [--pinch-begin M] (0.020) [--pinch-end M] (0.035) [--pinch-triangulated] [--pinch-palm-down MAX] (1: off)\n"
                         "          [--grip-begin R] (1.2) [--grip-end R] (1.45) [--gesture-log]\n"
                         "          [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch; default clahe:2/none)\n"
-                        "Recording saves every frame set for S seconds (120) to DIR/sets.bin, for ft-handreplay; SIGUSR1\n"
+                        "Recording saves every frame set (at most N a second with --record-hz) for S seconds (120) to DIR/sets.bin,\n"
+                        "for ft-handreplay; SIGUSR1\n"
                         "starts one in ~/.local/share/frametop/hands/rec-<time>. --record-only records without tracking, so it\n"
                         "can run beside a tracking ft-hands. With ft-camd --with-dark, recordings also get each\n"
                         "camera's newest dark frame, as <name>_dk; with --with-color, the color cameras' as color_video<N>.\n"
                         "auto picks the cameras by the light (see the top of track/main.cpp).\n"
-                        "Settings in ~/.config/frametop.conf: HANDS_SWAP_SIDES=1, HANDS_CPUS=5,6,7, HANDS_CAMERAS, HANDS_BRIGHT,\n"
+                        "Settings in ~/.config/frametop.conf: HANDS_SWAP_SIDES=auto|0|1, HANDS_CPUS=5,6,7, HANDS_CAMERAS, HANDS_BRIGHT,\n"
                         "HANDS_BRIGHT_ON, HANDS_BRIGHT_OFF, HANDS_COLOR_LEFT, HANDS_COLOR_CROP (FT_<name> overrides).\n",
                         argv[0]);
             return a == "--help" ? 0 : 1;
@@ -245,6 +276,8 @@ int main(int argc, char **argv) {
     if ((!automatic && !parse_cams(cams_arg, fixed)) || !parse_cams(bright_arg, bright_cams) || bright_cams == Cams::Mono)
         return std::fprintf(stderr, "--cams auto|mono|color|all, --bright all|color\n"), 1;
     if (color_crop != "subtract" && color_crop != "none") return std::fprintf(stderr, "--color-crop subtract|none\n"), 1;
+    if (sides_mode != "auto" && sides_mode != "0" && sides_mode != "1")
+        return std::fprintf(stderr, "--sides (HANDS_SWAP_SIDES) auto, 0 or 1, not %s\n", sides_mode.c_str()), 1;
     std::setvbuf(stdout, nullptr, _IOLBF, 0);   // whole lines to the journal as they come
     if (nice(niceness) < 0) std::perror("nice");   // the VR stack wins contested CPUs
     std::signal(SIGINT, [](int) { g_stop = 1; });
@@ -260,10 +293,32 @@ int main(int argc, char **argv) {
     Pinch pinch(pinch_params);
     Grip grip(grip_params);
     std::unique_ptr<Recorder> rec;
-    uint64_t rec_start = 0;
+    uint64_t rec_start = 0, rec_next_ns = 0;   // rec_next_ns: --record-hz's next set, capture clock
+    // The side cameras (see the top). names_swapped: slam_left's and slam_right's ring cameras
+    // are exchanged from ft-camd's naming. truth: whether ft-camd's naming is backwards, once known.
+    bool names_swapped = sides_mode == "1";
+    std::optional<bool> truth;
+    std::string decided_by, sides_state = "deciding", decision_evidence;
+    double decided_after_s = -1;
+    if (sides_mode != "auto") truth = names_swapped, decided_by = sides_from, sides_state = "forced";
+    std::string rec_dir;
+    std::vector<std::pair<size_t, bool>> rec_names;   // from which recorded set on, names_swapped was what
+    // DIR/sides.json beside a recording's sets.bin: how its side cameras are named. A set's
+    // names are right when its names_swapped equals swapped (null: not known when recorded).
+    auto write_rec_sides = [&] {
+        if (!rec) return;
+        std::string runs;
+        for (auto &[from, sw] : rec_names) runs += (runs.empty() ? "" : ", ") + ("[" + std::to_string(from) + ", " + json_bool(sw) + "]");
+        write_file(rec_dir + "/sides.json",
+                   "{\"swapped\": " + json_bool(truth) + ", \"decided_by\": " + json_str(truth ? decided_by : "") +
+                       ", \"names_swapped\": [" + runs + "]" +
+                       (decision_evidence.empty() ? "" : ", \"evidence\": " + decision_evidence) + "}\n");
+    };
     auto start_recording = [&](const std::string &dir, std::string &e) {
         rec = std::make_unique<Recorder>();
         if (!rec->open(dir, e)) return rec.reset(), false;
+        rec_dir = dir, rec_names = {{0, names_swapped}};
+        write_rec_sides();
         rec_start = mono_ns();
         std::printf("recording to %s for %.0f s\n", dir.c_str(), record_for);
         std::fflush(stdout);
@@ -299,12 +354,26 @@ int main(int argc, char **argv) {
         else index[name] = i, used[name] = calib[name];
     }
     // ft-camd tells the side cameras' buffers apart by XRService's allocation order, which
-    // some XRService restarts reverse; tools/check_sides.py --ring tells when.
-    if (swap_sides && index.count("slam_left") && index.count("slam_right")) {
+    // some XRService restarts reverse (see the top).
+    const bool have_sides = index.count("slam_left") && index.count("slam_right");
+    std::map<std::string, uint64_t> last;       // per camera: the frame last used
+    auto exchange_sides = [&] {
         std::swap(index["slam_left"], index["slam_right"]);
+        std::swap(last["slam_left"], last["slam_right"]);
         if (dark.count("slam_left_dk") && dark.count("slam_right_dk")) std::swap(dark["slam_left_dk"], dark["slam_right_dk"]);
-        std::printf("side cameras swapped (--swap-sides)\n");
+    };
+    if (names_swapped && have_sides) {
+        exchange_sides();
+        std::printf("side cameras exchanged (%s)\n", sides_from == "option" ? "--sides 1" : "HANDS_SWAP_SIDES=1");
     }
+    // the mono cameras the side check may pair (not the colour ones)
+    std::map<std::string, Camera> side_cams;
+    for (auto &[name, i] : index) side_cams[name] = calib[name];
+    SideCheck side_check(side_cams);
+    bool checking = track && have_sides && side_check.usable();
+    int side_round = 0;   // auto: 0 deciding, then each check after a decision
+    if (!track && sides_mode == "auto" && have_sides)
+        std::printf("side cameras: as ft-camd names them (--record-only can't tell; the recording's sides.json says so)\n");
     // The colour pair, calibrated (see the top), unless only the mono cameras are wanted.
     if (color.size() == 2 && (automatic || fixed != Cams::Mono)) {
         const std::string left = color.count(color_left) ? color_left : color.begin()->first;
@@ -345,7 +414,6 @@ int main(int argc, char **argv) {
     Tracker tracker(used, nets, pool);
     tracker.set_keep_presence(keep_presence);
     std::map<std::string, std::vector<uint8_t>> pixels;
-    std::map<std::string, uint64_t> last;       // per camera: the frame last used
     std::map<std::string, uint64_t> lit_seen;   // per colour camera: the frame last counted for the light
     const uint64_t start = mono_ns();
     uint64_t t_status = start, next_ns = 0, t_want = 0, t_glog = 0;
@@ -357,6 +425,71 @@ int main(int argc, char **argv) {
     // to place the colour frames, whose capture clock is their own (see the top).
     double mono_delay_ns = -1;
     const std::string want_file = run_dir() + "/color-fps";
+    // The side cameras' naming, for the hand recorder and other tools (hands/rec/session.py
+    // reads it): written by a tracking, publishing ft-hands at the start, on every change and
+    // every 2 s, and removed when it exits. swapped: ft-camd's naming is backwards (null: not
+    // known yet); names_swapped: whether this ft-hands exchanged them; ring_ino: the ring file's
+    // inode (a new ft-camd makes a new one, and the decision is only good for that run).
+    const std::string sides_file = run_dir() + "/sides.json";
+    const bool write_sides_file = publish && track;
+    struct stat ring_st{};
+    stat(ring_path.c_str(), &ring_st);
+    uint64_t t_sides = 0;
+    auto write_sides = [&] {
+        if (!write_sides_file) return;
+        t_sides = mono_ns();
+        write_file(sides_file,
+                   "{\"pid\": " + std::to_string(getpid()) + ", \"ring_ino\": " + std::to_string(ring_st.st_ino) +
+                       ", \"mode\": \"" + sides_mode + "\", \"state\": \"" + sides_state + "\", \"swapped\": " +
+                       json_bool(truth) + ", \"decided_by\": " + json_str(truth ? decided_by : "") +
+                       ", \"names_swapped\": " + json_bool(names_swapped) +
+                       ", \"decided_after_s\": " + std::to_string(decided_after_s) +
+                       ", \"evidence\": " + (decision_evidence.empty() ? "null" : decision_evidence) +
+                       ", \"checking\": " + (checking ? side_check.json() : "null") +
+                       ", \"updated_ns\": " + std::to_string(mono_ns()) + "}\n");
+    };
+    write_sides();
+    // A verdict from the side check (see the top and track/sides.h).
+    auto side_verdict = [&](SideCheck::Verdict v, uint64_t now) {
+        const bool backwards = v == SideCheck::Swapped;   // relative to the names as they are now
+        const double after = (now - start) / 1e9;
+        const std::string ev = side_check.json(), text = side_check.summary();
+        if (sides_mode != "auto") {   // forced: only say so
+            const std::string what = (sides_from == "option" ? "--sides " : "HANDS_SWAP_SIDES=") + sides_mode;
+            if (backwards)
+                std::printf("side cameras: %s looks WRONG: the hands say the side cameras are the other way round (%s). "
+                            "Use auto.\n", what.c_str(), text.c_str());
+            else
+                std::printf("side cameras: %s agrees with the hands (%s)\n", what.c_str(), text.c_str());
+            sides_state = backwards ? "forced, disagrees" : "forced, agrees";
+            decision_evidence = ev;
+            checking = false;
+        } else if (side_round == 0 || backwards) {
+            if (backwards) {
+                exchange_sides();
+                names_swapped = !names_swapped;
+                tracker.exchange("slam_left", "slam_right");
+                if (rec) rec_names.push_back({rec->added(), names_swapped});
+            }
+            const bool reversed = side_round > 0;
+            truth = names_swapped, decided_by = "auto", decided_after_s = after, decision_evidence = ev;
+            sides_state = reversed ? "decided, reversed" : "decided";
+            std::printf("side cameras: %s after %.1f s (%s)\n",
+                        reversed ? "decision REVERSED" : names_swapped ? "SWAPPED, now exchanged" : "as named", after,
+                        text.c_str());
+            // check once more with the new names, more strictly; at most two changes
+            side_check.reset();
+            side_check.min_clean = 20, side_check.min_votes = 40;
+            checking = ++side_round < 3;
+        } else {
+            std::printf("side cameras: confirmed after %.1f s (%s)\n", after, text.c_str());
+            sides_state = "confirmed";
+            checking = false;
+        }
+        std::fflush(stdout);
+        write_rec_sides();
+        write_sides();
+    };
 
     // The colour pair's newest frames if both are newer than last used and taken together
     // (their own clock): their time, on the mono cameras' capture clock, else 0.
@@ -403,8 +536,13 @@ int main(int argc, char **argv) {
         return n ? sum / n : -1;
     };
 
+    int exit_code = 0;
     while (!g_stop && (seconds <= 0 || (mono_ns() - start) / 1e9 < seconds)) {
-        if (!ring.alive()) return std::fprintf(stderr, "ft-camd stopped\n"), 2;
+        if (!ring.alive()) {
+            std::fprintf(stderr, "ft-camd stopped\n");
+            exit_code = 2;
+            break;
+        }
         const uint64_t now0 = mono_ns();
         const int64_t raw_off = raw_minus_mono_ns();
 
@@ -490,7 +628,16 @@ int main(int argc, char **argv) {
                 if (!start_recording(dir + "/" + name, e)) std::fprintf(stderr, "%s\n", e.c_str());
             }
             if (rec) {   // about 80 MB/s; dark frames double that, color frames add 70 MB/s
-                if ((mono_ns() - rec_start) / 1e9 < record_for) {
+                const bool due = record_hz <= 0 || tmin >= rec_next_ns;   // --record-hz skips the sets between
+                if (due && record_hz > 0) rec_next_ns = tmin + uint64_t(1e9 / record_hz) - 5'000'000;
+                if ((mono_ns() - rec_start) / 1e9 >= record_for) {
+                    write_rec_sides();
+                    const size_t n = rec->written(), d = rec->dropped();
+                    rec.reset();   // writes out what's queued
+                    std::printf("recording done: %zu sets, %zu dropped\n", n, d);
+                    std::fflush(stdout);
+                    if (!track) break;
+                } else if (due) {
                     for (auto &[name, i] : dark) {   // the newest dark and color frames, as they are
                         fh_ring_slot_t meta;
                         const uint64_t n = ring.latest(i);
@@ -500,12 +647,6 @@ int main(int argc, char **argv) {
                                               meta.dqbuf_ns});
                     }
                     rec->add(frames);
-                } else {
-                    const size_t n = rec->written(), d = rec->dropped();
-                    rec.reset();   // writes out what's queued
-                    std::printf("recording done: %zu sets, %zu dropped\n", n, d);
-                    std::fflush(stdout);
-                    if (!track) break;
                 }
             }
             if (!track && rec && status > 0 && (mono_ns() - t_status) / 1e9 >= status) {
@@ -548,6 +689,16 @@ int main(int argc, char **argv) {
         const auto hands = tracker.step(images, int64_t(tmin));
         const uint64_t capture = uint64_t(int64_t(tmin) - raw_off);   // CLOCK_MONOTONIC
         const std::vector<Seen> views = tracker.views_now();
+        std::vector<Seen> side_views;   // the tracker's views, plus the side check's own looks
+        if (checking) {
+            side_views = views;
+            for (Seen &v : side_check.probe(nets, pool, images, views, int64_t(tmin))) side_views.push_back(v);
+        }
+        if (checking && side_check.add(side_views, int64_t(tmin)) > 0) {
+            const SideCheck::Verdict v = side_check.verdict();
+            if (v != SideCheck::Undecided) side_verdict(v, mono_ns());
+        }
+        if (mono_ns() - t_sides > 2'000'000'000ull) write_sides();
         if (gestures_on) {
             grip.update(hands, views, int64_t(capture));
             pinch.update(hands, views, int64_t(capture), grip.gripping());
@@ -603,6 +754,9 @@ int main(int argc, char **argv) {
                             s.handoff_miss, s.dups, s.splits, s.created, s.merged, s.forgotten,
                             !rec ? "" : ("  recorded " + std::to_string(rec->written()) + " dropped " +
                                          std::to_string(rec->dropped())).c_str());
+            if (checking)
+                std::printf("        side cameras: %s, %s\n", side_round ? "checking the decision" : "deciding",
+                            side_check.summary().c_str());
             if (gestures_on) {
                 std::printf("        pinches: left %u right %u (held back, palm down: %d %d)  grips: left %u right %u",
                             pinch.side(0).begins, pinch.side(1).begins, pinch.held_back[0], pinch.held_back[1],
@@ -628,11 +782,13 @@ int main(int argc, char **argv) {
         }
     }
     if (!color.empty()) unlink(want_file.c_str());
+    if (write_sides_file) unlink(sides_file.c_str());
+    write_rec_sides();
     if (publish) pub.write({}, mono_ns());
     if (publish && gestures_on) {
         pinch.release(int64_t(mono_ns()));   // a drag in progress ends, as lost
         grip.release(int64_t(mono_ns()));
         gestures.write(pinch, grip, mono_ns());
     }
-    return 0;
+    return exit_code;
 }

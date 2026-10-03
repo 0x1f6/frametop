@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Frametop Hand Recorder
+GenericName=Record your hands for the hand dataset
+Comment=Record, review and export hand recordings for Frametop's open hand dataset
+Exec=@REPO@/hands/rec/ft-handrec
+Icon=camera-video
+Categories=Utility;
+Keywords=hands;hand tracking;dataset;record;frametop;
