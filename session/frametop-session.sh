@@ -234,6 +234,23 @@ elif [ "$(kreadconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
 fi
 
+# KWin draws through zink on the headset's GPU, which vrcompositor needs, so the blur and
+# background contrast behind panels and menus and the window animations cost frames for
+# little. They're off by default in this desktop. Each is written once, before KWin first
+# reads it, and only if this desktop's config doesn't have it yet; the marker keeps it
+# from coming back, since System Settings deletes a setting put back to KDE's default.
+# docs/reference.md says how to turn them on again.
+default() {  # file group key value
+  [ -n "$(kreadconfig6 --file "$1" --group "$2" --key "$3")" ] || kwriteconfig6 --file "$1" --group "$2" --key "$3" "$4"
+}
+frametoprc=$XDG_CONFIG_HOME/frametoprc
+if [ "$(kreadconfig6 --file "$frametoprc" --group Defaults --key effects)" != 1 ]; then
+  default "$kwinrc" Plugins blurEnabled false
+  default "$kwinrc" Plugins contrastEnabled false
+  default "$XDG_CONFIG_HOME/kdeglobals" KDE AnimationDurationFactor 0
+  kwriteconfig6 --file "$frametoprc" --group Defaults --key effects 1
+fi
+
 # Profiles reopen apps (docs/profiles.md), so Plasma's own session restore stays off here;
 # with both, apps would open twice.
 kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginMode emptySession

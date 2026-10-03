@@ -18,6 +18,14 @@ desktops.sh start | stop | restart | status | log [lines]
 
 When the VR launcher starts the desktop, it inherits the Steam client's environment. The session script drops the client's runtime from it (`LD_LIBRARY_PATH`, the `STEAM_*` settings, and the Steam overlay's Vulkan layer), so apps in the desktop use the system's libraries, including its video codecs, just as they would after a normal login.
 
+KWin's blur and background contrast effects and its animations are off in this desktop, because KWin draws on the headset's GPU, which SteamVR needs. The session script turns them off once, the first time it starts (it leaves a setting you already have alone, and marks it done in `~/.config/frametop/frametoprc`), so turning them back on sticks. In the Frametop desktop, System Settings → Window Management → Desktop Effects has Blur and Background Contrast, and General Behavior has Animation speed. Or from a terminal, then restart the desktop:
+
+```
+kwriteconfig6 --file ~/.config/frametop/kwinrc --group Plugins --key blurEnabled true
+kwriteconfig6 --file ~/.config/frametop/kwinrc --group Plugins --key contrastEnabled true
+kwriteconfig6 --file ~/.config/frametop/kdeglobals --group KDE --key AnimationDurationFactor 1
+```
+
 Settings are in two files, and Frametop Display Settings edits both. The screens (resolution, width in metres, scale, curve, which one has the taskbar) and their layout are in `~/.config/frametop-layout.json`. The backend, remote desktop, and pointer settings are in `~/.config/frametop.conf`; `session/frametop.conf.example` lists every key.
 
 Restarting the desktop closes its windows. Before the unit stops, `session/keep-apps.sh` moves every program started in the desktop into a systemd scope of its own, so background work such as servers, tmux, and builds keeps running. An app that shuts down its own helper processes when its window closes will still lose them; run that kind of work outside the desktop, for example as a systemd user service.
