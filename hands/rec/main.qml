@@ -1396,11 +1396,19 @@ Kirigami.ApplicationWindow {
                 }
                 RowLayout {
                     Controls.Button {
-                        text: exportView.chosen && exportView.chosen.exported ? "Export again" : "Export"
+                        text: backend.exporting ? "Exporting…"
+                              : exportView.chosen && exportView.chosen.exported ? "Export again" : "Export"
                         icon.name: "document-export"
                         enabled: exportView.chosen !== null && !backend.exporting && backend.zstdFound
                                  && !exportView.chosen.active
                         onClicked: backend.exportSession(exportView.chosen.id, false)
+                    }
+                    // Shows the moment Export is pressed: the first progress can take a few seconds.
+                    Controls.BusyIndicator {
+                        visible: backend.exporting
+                        running: visible
+                        implicitWidth: Kirigami.Units.gridUnit * 1.5
+                        implicitHeight: implicitWidth
                     }
                     Controls.Button {
                         visible: backend.exporting
@@ -1426,7 +1434,7 @@ Kirigami.ApplicationWindow {
                 }
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 26
-                    visible: backend.exportText !== "" && backend.exportSessionId === sessionBox.currentValue
+                    visible: backend.exportText !== "" && (backend.exporting || backend.exportSessionId === sessionBox.currentValue)
                     wrapMode: Text.WrapAnywhere
                     text: backend.exportText
                 }
@@ -1643,10 +1651,16 @@ Kirigami.ApplicationWindow {
                 RowLayout {
                     visible: uploadView.session !== ""
                     Controls.Button {
-                        text: backend.hubDryRun ? "Upload (dry run)" : "Upload"
+                        text: backend.uploading ? "Uploading…" : backend.hubDryRun ? "Upload (dry run)" : "Upload"
                         icon.name: "cloud-upload"
                         enabled: uploadView.blocked === "" && !backend.uploading
                         onClicked: uploadView.startUpload()
+                    }
+                    Controls.BusyIndicator {
+                        visible: backend.uploading
+                        running: visible
+                        implicitWidth: Kirigami.Units.gridUnit * 1.5
+                        implicitHeight: implicitWidth
                     }
                     Controls.Button {
                         visible: backend.uploading

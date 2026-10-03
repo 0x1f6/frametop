@@ -787,7 +787,6 @@ class Backend(QObject):
     def exportSessionId(self):
         return self._export_session
 
-    @Slot(str, bool)
     def _stay_awake(self, why, on):
         """Hold off sleep while an export or upload runs, so the headset can be taken off and
         left plugged in: a host unit running systemd-inhibit, started with the first reason
@@ -812,6 +811,7 @@ class Backend(QObject):
                     print(f"keeping the Frame awake: {e}", file=sys.stderr, flush=True)
         self._thread(run)
 
+    @Slot(str, bool)
     def exportSession(self, session, keep_notes):
         if self.exporting or self._active_guard(session):
             return
