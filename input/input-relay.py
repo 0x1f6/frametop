@@ -461,6 +461,7 @@ class Pointer:
     RESUME_PAUSE = 1.5  # mouse idle this long, then moving again, re-claims the laser
     WAKE_WINDOW = 1.0  # seconds in which WAKE_COUNTS of motion must add up
     QUEUE_MAX = 512  # commands kept while the helper is behind (see send)
+    MOVE_EVERY = 0.004  # mouse motion goes to the helper at most this often (see flush)
 
     def __init__(self, sensitivity, idle, wake_counts=40):
         # Never blocks (see send): a stalled helper must not stall the keyboard, volume keys and pausing.
@@ -474,6 +475,7 @@ class Pointer:
         self.active = False
         self.last_used = 0.0
         self.dx = self.dy = 0
+        self.move_at = 0.0  # motion last went to the helper then
         self.scroll_until = None
         self.claim_at = None  # when to press the claim button
         self.claim_release = None
@@ -637,11 +639,16 @@ class Pointer:
             self.sensitivity *= 1.25 if name == "sens_up" else 0.8
             log(f"sensitivity {self.sensitivity:.4f} deg/count")
 
-    def flush(self):
-        if self.dx or self.dy:
-            # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
-            self._move(-self.dx * self.sensitivity, -self.dy * self.sensitivity)
-            self.dx = self.dy = 0
+    def flush(self, now=None):
+        """Send the motion so far. With now (a mouse's SYN_REPORT), only once MOVE_EVERY has passed
+        since the last: a 1000 Hz mouse sent the helper, which runs every 8 ms, 1000 datagrams a
+        second. tick() sends the rest when it's due; a button sends it first, so it lands there."""
+        if not (self.dx or self.dy) or (now is not None and now - self.move_at < self.MOVE_EVERY):
+            return
+        self.move_at = time.monotonic() if now is None else now
+        # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
+        self._move(-self.dx * self.sensitivity, -self.dy * self.sensitivity)
+        self.dx = self.dy = 0
 
     def dashboard(self, now=None):
         """Toggle the SteamVR dashboard with the virtual controller's system button.
@@ -657,6 +664,7 @@ class Pointer:
 
     def tick(self, now):
         self.drain()
+        self.flush(now)
         if self.system_at is not None and now >= self.system_at:
             self.send("btn system 1")
             self.system_at = None
@@ -681,7 +689,10 @@ class Pointer:
 
     def timeout(self):
         pending = (self.scroll_until, self.claim_at, self.claim_release, self.system_at, self.system_release)
-        return 0.02 if self.queue or any(t is not None for t in pending) else 0.5
+        wait = 0.02 if self.queue or any(t is not None for t in pending) else 0.5
+        if self.dx or self.dy:  # motion held back by flush
+            wait = max(0.0, min(wait, self.move_at + self.MOVE_EVERY - time.monotonic()))
+        return wait
 
     def stand_down(self):
         """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
@@ -1389,7 +1400,7 @@ def main():
                         mouse.emit(etype, code, value)
                 elif etype == EV_SYN and code == SYN_REPORT:
                     if pointer:
-                        pointer.flush()
+                        pointer.flush(now)
                     mouse.sync()
                     keyboard.sync()
 

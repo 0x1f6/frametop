@@ -1356,6 +1356,36 @@ int main() {
         return msg;
     };
 
+    // "move <dyaw> <dpitch>" from the relay.
+    auto mouseMove = [&](double a, double b) {
+        // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
+        // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
+        const bool heldBack = mouseMoveHeld();
+        if (!heldBack) lastMouse = Clock::now();
+        // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
+        if (!active) wake(Clock::now());
+        if (heldBack) return;
+        if (tilting) {
+            tiltYaw += a;
+            tiltPitch = std::clamp(tiltPitch + b, -80.0, 80.0);
+            return;
+        }
+        lastMove = Clock::now();  // the dot shows while the mouse moves it (gaze mode)
+        if (gazeOn && gazeOwns) {
+            // The mouse takes the pointer from the gaze, from where the gaze left it.
+            gazeOwns = false;
+            nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
+            nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+            nudgeAt = Clock::now(), nudgeMoved = 0;
+        }
+        if (nudging || aimHeld) nudgeMoved += std::hypot(a, b);
+        if (!anchored) recenter = true;
+        yaw += a;
+        while (yaw > 180) yaw -= 360;
+        while (yaw < -180) yaw += 360;
+        pitch = std::clamp(pitch + b, -85.0, 85.0);
+    };
+
     std::printf("ft-pointer running: free distance %.2f m, dot %.2f deg\n", freeDistance, cursorDeg);
     std::fflush(stdout);
 
@@ -1421,6 +1451,12 @@ int main() {
                 if (senderLen > offsetof(sockaddr_un, sun_path))
                     sendto(out, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr *>(&sender), senderLen);
             };
+            // Mouse moves first, the most frequent command.
+            double mx, my;
+            if (std::strncmp(buf, "move ", 5) == 0 && std::sscanf(buf + 5, "%lf %lf", &mx, &my) == 2) {
+                mouseMove(mx, my);
+                continue;
+            }
             // The gaze, from ft-gazed: not mouse input, it never wakes the pointer.
             double g[4];
             if (std::sscanf(buf, "gz %lf %lf %lf %lf", &g[0], &g[1], &g[2], &g[3]) == 4) {
@@ -1509,16 +1545,11 @@ int main() {
                     reply(gazeOn ? "ok on" : "ok off");
                 continue;
             }
-            const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
-                                    std::strncmp(buf, "scroll", 6) == 0;
-            // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
-            // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
-            const bool moveHeldBack = std::strncmp(buf, "move", 4) == 0 && mouseMoveHeld();
-            if (mouseInput && !moveHeldBack) lastMouse = Clock::now();
+            // (Moves were taken first, above.)
+            const bool mouseInput = std::strncmp(buf, "btn", 3) == 0 || std::strncmp(buf, "scroll", 6) == 0;
+            if (mouseInput) lastMouse = Clock::now();
             // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
             if (!active && mouseInput) wake(Clock::now());
-            if (moveHeldBack) continue;
-            double a, b;
             char key[128];
             double px, py, pz, pyaw, ppitch, proll = 0, pgrab = -1;
             if (std::sscanf(buf, "grabprobe %127s", key) == 1) {
@@ -1577,27 +1608,7 @@ int main() {
                 tilting = swallowedRight = false;
                 continue;
             }
-            if (tilting && std::sscanf(buf, "move %lf %lf", &a, &b) == 2) {
-                tiltYaw += a;
-                tiltPitch = std::clamp(tiltPitch + b, -80.0, 80.0);
-                continue;
-            }
-            if (std::sscanf(buf, "move %lf %lf", &a, &b) == 2) {
-                lastMove = Clock::now();  // the dot shows while the mouse moves it (gaze mode)
-                if (gazeOn && gazeOwns) {
-                    // The mouse takes the pointer from the gaze, from where the gaze left it.
-                    gazeOwns = false;
-                    nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
-                    nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
-                    nudgeAt = Clock::now(), nudgeMoved = 0;
-                }
-                if (nudging || aimHeld) nudgeMoved += std::hypot(a, b);
-                if (!anchored) recenter = true;
-                yaw += a;
-                while (yaw > 180) yaw -= 360;
-                while (yaw < -180) yaw += 360;
-                pitch = std::clamp(pitch + b, -85.0, 85.0);
-            } else if (std::strncmp(buf, "recenter", 8) == 0) {
+            if (std::strncmp(buf, "recenter", 8) == 0) {
                 recenter = true;
             } else if (std::strncmp(buf, "reload", 6) == 0) {
                 loadConfig();
