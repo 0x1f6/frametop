@@ -12,9 +12,12 @@ An upload:
   3. stops while CONSENT.md or UPLOAD.md is a draft, unless FT_HANDREC_ALLOW_UPLOAD=1;
   4. checks the login (whoami: a read-only token can't open a pull request) and access to the
      dataset (auth_check: a gated dataset's terms must be accepted first);
-  5. upload_folder(..., create_pr=True) to contributions/<contributor>/<session>;
-  6. records {"repo", "pr_url", "uploaded", "export_sha"} under "uploads" in session.json.
---dry-run does all of it except the network calls (4 and 5) and recording (6), and says what
+  5. opens the pull request first (a draft, empty), so its link can be shown while the files go,
+     and records it under "uploads" in session.json with "status": "started";
+  6. upload_folder(..., revision="refs/pr/N") to contributions/<contributor>/<session>; a retry of
+     the same export goes on in the same pull request while it's still open;
+  7. marks the record {"repo", "pr_url", "pr_num", "uploaded", "export_sha", "status": "done"}.
+--dry-run does all of it except the network calls (4 to 6) and recording (5, 7), and says what
 it would upload.
 
 The dataset is HF_DATASET; FT_HANDREC_DATASET overrides it (a test repo, for rehearsals).
@@ -22,7 +25,8 @@ The dataset is HF_DATASET; FT_HANDREC_DATASET overrides it (a test repo, for reh
 usage: hub.py [--base DIR] whoami [--json]
        hub.py [--base DIR] upload SESSION [--dry-run] [--again] [--json]
 With --json, each line of output is one JSON object: {"phase", "text", "fraction"} as it goes,
-then {"done": {...}} or {"error": {"kind", "text", "link", "errors"}}. Exit status 0: done.
+with {"phase": "opened", "pr_url"} once the pull request exists, then {"done": {...}} or
+{"error": {"kind", "text", "link", "errors"}}. Exit status 0: done.
 """
 import argparse
 import datetime
@@ -114,8 +118,18 @@ def uploads(store, session):
 
 
 def previous_upload(store, session, sha):
-    """The latest upload of this same export, or None."""
-    same = [u for u in uploads(store, session) if sha and u.get("export_sha") == sha]
+    """The latest finished upload of this same export, or None. (Records from before
+    2026-10-03 have no status: they were written only when an upload finished.)"""
+    same = [u for u in uploads(store, session) if sha and u.get("export_sha") == sha
+            and u.get("status", "done") == "done"]
+    return same[-1] if same else None
+
+
+def unfinished_upload(store, session, sha, repo):
+    """The latest upload of this same export to repo that opened its pull request and didn't
+    finish, or None."""
+    same = [u for u in uploads(store, session) if sha and u.get("export_sha") == sha and u.get("repo") == repo
+            and u.get("status") == "started" and u.get("pr_num")]
     return same[-1] if same else None
 
 
@@ -129,7 +143,13 @@ def record_upload(store, session, record):
     except OSError:
         st = None
     meta = takes.read_json(path)
-    meta.setdefault("uploads", []).append(record)
+    records = meta.setdefault("uploads", [])
+    same = [i for i, u in enumerate(records) if isinstance(u, dict) and record.get("pr_num")
+            and u.get("pr_num") == record["pr_num"] and u.get("repo") == record.get("repo")]
+    if same:
+        records[same[-1]] = record   # the same pull request: started, then done
+    else:
+        records.append(record)
     takes.write_json(path, meta)
     if st:
         os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
@@ -228,7 +248,7 @@ def whoami():
 def upload(store, session, dry_run=False, again=False, progress=None, log=None):
     """Upload exports/<session> (the steps in this file's docstring). progress(phase, text,
     fraction or None); log(text) for the dry run's account. Returns the result; raises HubError."""
-    tell = progress or (lambda phase, text, fraction=None: None)
+    tell = progress or (lambda phase, text, fraction=None, **extra: None)
     say = log or (lambda text: None)
     import validate
     repo = dataset_id()
@@ -271,7 +291,7 @@ def upload(store, session, dry_run=False, again=False, progress=None, log=None):
             say(f"  {rel}  {takes.human_bytes(os.path.getsize(os.path.join(export, rel)))}")
         say(f"dry run: commit message: {message}")
         say("dry run: commit description:\n" + description.rstrip())
-        record = {"repo": repo, "pr_url": "", "uploaded": now_iso(), "export_sha": sha}
+        record = {"repo": repo, "pr_url": "", "uploaded": now_iso(), "export_sha": sha, "status": "done"}
         say(f"dry run: would record in session.json's uploads: {json.dumps(record)}")
         tell("done", "Dry run: nothing was uploaded", 1.0)
         return dict(plan, dry_run=True, pr_url="", record=record)
@@ -293,18 +313,43 @@ def upload(store, session, dry_run=False, again=False, progress=None, log=None):
         api.auth_check(repo, repo_type="dataset")
     except Exception as e:
         raise explain(e, repo) from None
-    tell("upload", f"Uploading {len(files)} files ({takes.human_bytes(report.bytes)}) and opening a pull request",
-         None)
+    # The pull request first, so its link shows while the files go (and the person can plug the
+    # headset in and leave it). A retry of this export goes on in its pull request if it's open.
+    tell("open", "Opening your pull request", None)
+    pr = None
+    before = unfinished_upload(store, session, sha, repo)
+    if before:
+        try:
+            d = api.get_discussion_details(repo, int(before["pr_num"]), repo_type="dataset")
+            if d.is_pull_request and d.status in ("draft", "open"):
+                pr = d
+        except Exception:
+            pr = None
+    if pr is None:
+        try:
+            pr = api.create_pull_request(repo, message, description=description, repo_type="dataset")
+        except Exception as e:
+            raise explain(e, repo) from None
+    pr_url = getattr(pr, "url", "") or f"{dataset_url(repo)}/discussions/{pr.num}"
+    record = {"repo": repo, "pr_url": pr_url, "pr_num": pr.num, "started": now_iso(), "export_sha": sha,
+              "status": "started"}
+    record_upload(store, session, record)
+    tell("opened", f"Pull request #{pr.num} is open. Uploading {len(files)} files ({takes.human_bytes(report.bytes)})",
+         None, pr_url=pr_url)
     try:
-        info = api.upload_folder(repo_id=repo, repo_type="dataset", folder_path=export, path_in_repo=path_in_repo,
-                                 create_pr=True, commit_message=message, commit_description=description)
+        api.upload_folder(repo_id=repo, repo_type="dataset", folder_path=export, path_in_repo=path_in_repo,
+                          revision=f"refs/pr/{pr.num}", commit_message=message, commit_description=description)
     except Exception as e:
         raise explain(e, repo) from None
-    pr_url = getattr(info, "pr_url", None) or ""
-    record = {"repo": repo, "pr_url": pr_url, "uploaded": now_iso(), "export_sha": sha}
+    try:   # a pull request opened through the API stays a draft until it's marked open
+        if api.get_discussion_details(repo, pr.num, repo_type="dataset").status == "draft":
+            api.change_discussion_status(repo, pr.num, "open", repo_type="dataset")
+    except Exception:
+        pass   # the maintainer can open it
+    record = dict(record, uploaded=now_iso(), status="done")
     record_upload(store, session, record)
     tell("done", "Uploaded", 1.0)
-    return dict(plan, dry_run=False, pr_url=pr_url, user=who.get("name", ""), record=record)
+    return dict(plan, dry_run=False, pr_url=pr_url, pr_num=pr.num, user=who.get("name", ""), record=record)
 
 
 # ---------------------------------------------------------------- the command line
@@ -334,15 +379,17 @@ def main():
                 print(f"logged in as {who['name']} (token role: {who['role'] or 'unknown'})")
             return 0
         if a.json:
-            def progress(phase, text, fraction=None):
-                emit({"phase": phase, "text": text, "fraction": fraction})
+            def progress(phase, text, fraction=None, **extra):
+                emit(dict(extra, phase=phase, text=text, fraction=fraction))
 
             def log(text):
                 emit({"log": text})
         else:
             last = {}
 
-            def progress(phase, text, fraction=None):
+            def progress(phase, text, fraction=None, **extra):
+                if extra.get("pr_url"):
+                    print(f"pull request: {extra['pr_url']}", flush=True)
                 line = text if fraction is None else f"{fraction * 100:5.1f}% {text}"
                 if (phase, text) != last.get("key") or fraction in (0.0, 1.0):
                     print(line, file=sys.stderr, flush=True)

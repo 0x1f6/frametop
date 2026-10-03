@@ -1353,11 +1353,11 @@ Kirigami.ApplicationWindow {
                 DraftBanner { Layout.fillWidth: true }
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
-                    visible: exportView.worn
+                    visible: exportView.worn && backend.exporting
                     position: Kirigami.InlineMessage.Position.Header
-                    type: Kirigami.MessageType.Warning
-                    text: "Someone seems to be wearing the headset. Exporting keeps the processor busy for a "
-                          + "while, which can make VR stutter: export when the headset is off, or go ahead anyway."
+                    type: Kirigami.MessageType.Information
+                    text: "Exporting keeps the processor busy for a few minutes, so VR may stutter a little until "
+                          + "it's done. You can keep using the headset meanwhile."
                 }
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
@@ -1455,7 +1455,8 @@ Kirigami.ApplicationWindow {
                 opacity: 0.7
                 text: "Export leaves out the ranges you deleted, compresses the rest and adds a manifest and "
                       + "checksums, in " + backend.exportsDir + ". It runs at the lowest priority "
-                      + "and takes a few minutes per round. Nothing is uploaded until you press Upload on the Upload page."
+                      + "and takes a few minutes per round; the headset stays awake until it's done. Nothing is "
+                      + "uploaded until you press Upload on the Upload page."
             }
         }
     }
@@ -1694,6 +1695,29 @@ Kirigami.ApplicationWindow {
                     text: uploadView.up.text || ""
                 }
 
+                // The pull request is open and the files are on their way: time to plug in.
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: backend.uploading && uploadView.mine && (uploadView.up.pr_url || "") !== ""
+                    type: Kirigami.MessageType.Positive
+                    text: "Your pull request is open: " + (uploadView.up.pr_url || "") + ". The files are uploading "
+                          + "to it now, which can take a while. Plug in the headset and leave it plugged in until "
+                          + "this page says Uploaded. You can take the headset off: it stays awake until the upload "
+                          + "is done. Keep the Hand Recorder open."
+                    actions: [openOpenedPr, copyOpenedPr]
+                    Kirigami.Action {
+                        id: openOpenedPr
+                        text: "Open"
+                        icon.name: "internet-services"
+                        onTriggered: Qt.openUrlExternally(uploadView.up.pr_url)
+                    }
+                    Kirigami.Action {
+                        id: copyOpenedPr
+                        text: "Copy link"
+                        icon.name: "edit-copy"
+                        onTriggered: backend.copy(uploadView.up.pr_url)
+                    }
+                }
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
                     visible: !backend.uploading && uploadView.mine && uploadView.up.phase === "done"

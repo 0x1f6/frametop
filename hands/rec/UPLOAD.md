@@ -10,6 +10,8 @@ Your export is ready:
 
 Uploads go to the Hugging Face dataset [@DATASET@](https://huggingface.co/datasets/@DATASET@), from your own Hugging Face account. Nothing is uploaded until you press Upload (or run the command below). The upload opens a pull request, so nothing is published until the maintainer has looked at it.
 
+You can do every step below in the headset: the web pages in a browser window, the login in a terminal window. Once your pull request is open, you plug the headset in and leave it to finish.
+
 ## 1. Make a Hugging Face account
 
 Sign up at <https://huggingface.co/join>, if you don't have an account. Your username shows on your pull request, but the dataset credits your contributor id, not your name.
@@ -38,11 +40,11 @@ If the page says `huggingface_hub` isn't installed, update the dev container fir
 
 ## 5. Upload
 
-Press **Upload** on this page. It first checks the export (that every file is complete and matches its checksum, and that nothing identifying is left in), then uploads it to `contributions/@CONTRIBUTOR@/@SESSION@` in the dataset and opens a pull request. Large uploads take a while, and Cancel stops it. When it's done, the page shows your pull request's link.
+Press **Upload** on this page. It first checks the export (that every file is complete and matches its checksum, and that nothing identifying is left in). Then it opens your pull request and shows its link, and starts uploading the files to it, into `contributions/@CONTRIBUTOR@/@SESSION@` in the dataset.
 
-If it fails partway, press Upload again: files already sent usually aren't sent twice. If a pull request was opened anyway, that's fine: the maintainer closes the incomplete one.
+**Once the link shows, plug in the headset and leave it plugged in until the page says Uploaded.** A round is several gigabytes, so this can take a while. You can take the headset off: the Hand Recorder keeps it awake until the upload is done. Keep the Hand Recorder open, since closing it stops the upload.
 
-Keep the headset on its charger or plugged in while it uploads.
+If it stops partway (Cancel, or the network drops), press Upload again: it carries on in the same pull request, and files already sent aren't sent twice.
 
 ### Or upload from a terminal
 

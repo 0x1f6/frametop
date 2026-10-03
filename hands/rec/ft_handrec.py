@@ -57,6 +57,7 @@ UPLOAD_PATH = hub.UPLOAD_PATH
 HUB_PATH = os.path.join(HERE, "hub.py")
 VALIDATE_PATH = os.path.join(HERE, "validate.py")
 # What `hf auth login` needs: run in a terminal, where the token is typed (never in this window).
+AWAKE_UNIT = "frametop-handrec-awake.service"
 LOGIN_COMMAND = "distrobox enter dev -- hf auth login"
 SCRIPT_PATH = os.path.join(HERE, "script.json")
 # The headset counts as worn while vrcompositor runs and a display panel is lit: SteamVR turns
@@ -243,6 +244,8 @@ class Backend(QObject):
         self._lighting_measured = ""
         self._lighting_busy = False
         self._camd_started = False   # ft-camd started for the light check: stopped on quit
+        self._awake = set()          # what keeps the Frame awake now: "export", "upload"
+        self._awake_lock = threading.Lock()
         self._export_cancel = None
         self._export_thread = None
         self._export_fraction = 0.0
@@ -644,6 +647,11 @@ class Backend(QObject):
         if self._upload_proc:
             self.cancelUpload()
             self._upload_thread.join(10)
+        if self._awake and self._session_mod:
+            try:
+                self._session_mod.stop_unit(AWAKE_UNIT)
+            except Exception:
+                pass
         if self._camd_started and self._session_mod:
             try:
                 self._session_mod.stop_unit(self._session_mod.CAMD_UNIT)
@@ -780,6 +788,30 @@ class Backend(QObject):
         return self._export_session
 
     @Slot(str, bool)
+    def _stay_awake(self, why, on):
+        """Hold off sleep while an export or upload runs, so the headset can be taken off and
+        left plugged in: a host unit running systemd-inhibit, started with the first reason
+        and stopped with the last."""
+        mod = self._runner()
+        if not mod or self._hub_dry_run:
+            return
+
+        def run():
+            with self._awake_lock:
+                had = bool(self._awake)
+                (self._awake.add if on else self._awake.discard)(why)
+                try:
+                    if self._awake and not had:
+                        mod.start_unit(AWAKE_UNIT, "keeps the Frame awake while exporting or uploading",
+                                       ["systemd-inhibit", "--what=sleep:idle", "--mode=block",
+                                        "--who=Frametop Hand Recorder", "--why=Exporting or uploading hand recordings",
+                                        "sleep", "infinity"])
+                    elif had and not self._awake:
+                        mod.stop_unit(AWAKE_UNIT)
+                except Exception as e:
+                    print(f"keeping the Frame awake: {e}", file=sys.stderr, flush=True)
+        self._thread(run)
+
     def exportSession(self, session, keep_notes):
         if self.exporting or self._active_guard(session):
             return
@@ -789,6 +821,7 @@ class Backend(QObject):
         self._export_fraction = 0.0
         self._export_text = "Starting"
         self.exportChanged.emit()
+        self._stay_awake("export", True)
 
         def run():
             try:
@@ -815,6 +848,7 @@ class Backend(QObject):
 
     def _on_export_finished(self, path, error):
         self._export_cancel = None
+        self._stay_awake("export", False)
         if error == "cancelled":
             self._export_text = "Cancelled: nothing was kept"
         elif error:
@@ -968,8 +1002,9 @@ class Backend(QObject):
         self._upload_proc = proc
         self._upload_cancelled = False
         self._upload = {"session": session, "phase": "check", "text": "Starting", "fraction": 0.0, "log": "",
-                        "result": {}, "error": {}}
+                        "result": {}, "error": {}, "pr_url": ""}
         self.uploadChanged.emit()
+        self._stay_awake("upload", True)
 
         def run():
             last = {}
@@ -1009,11 +1044,14 @@ class Backend(QObject):
         if "phase" in obj:
             f = obj.get("fraction")
             up.update(phase=obj["phase"], text=obj.get("text", ""), fraction=-1.0 if f is None else float(f))
+        if obj.get("pr_url"):
+            up["pr_url"] = obj["pr_url"]   # the pull request is open: the files are on their way
         self._upload = up
         self.uploadChanged.emit()
 
     def _on_upload_finished(self, last):
         self._upload_proc = None
+        self._stay_awake("upload", False)
         up = dict(self._upload)
         if "done" in last:
             result = last["done"]
@@ -1025,8 +1063,8 @@ class Backend(QObject):
             e = last.get("error") or {}
             cancelled = e.get("kind") == "cancelled"
             up.update(error=e, result={}, phase="failed", fraction=0.0,
-                      text=("Cancelled. If it had got as far as opening the pull request, check the dataset's "
-                            "Community tab: an incomplete one can be closed there.") if cancelled else e.get("text", ""))
+                      text=("Cancelled. Its pull request stays open: press Upload again to finish it there."
+                            if up.get("pr_url") else "Cancelled") if cancelled else e.get("text", ""))
             if not cancelled:
                 self.message.emit("Upload failed", True)
         self._upload = up

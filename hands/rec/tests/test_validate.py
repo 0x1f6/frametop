@@ -384,6 +384,62 @@ class HubTest(unittest.TestCase):
         with open(os.path.join(export, "manifest.json")) as f:
             self.assertNotIn("uploads", json.load(f)["session"])
 
+    def test_pull_request_first(self):
+        """The pull request opens before the files go; a retry goes on in it."""
+        calls = []
+
+        class Pr:
+            def __init__(self, num, status="draft"):
+                self.num, self.status, self.is_pull_request = num, status, True
+                self.url = f"https://huggingface.co/datasets/a/b/discussions/{num}"
+
+        class Api:
+            fail = True
+            status = "draft"
+
+            def whoami(self):
+                return {"name": "someone", "auth": {"accessToken": {"role": "write"}}}
+
+            def auth_check(self, repo, repo_type=None):
+                pass
+
+            def create_pull_request(self, repo, title, description=None, repo_type=None):
+                calls.append("create")
+                return Pr(7)
+
+            def get_discussion_details(self, repo, num, repo_type=None):
+                return Pr(num, Api.status)
+
+            def upload_folder(self, **kw):
+                calls.append(("upload", kw["revision"], kw.get("create_pr")))
+                if Api.fail:
+                    raise ConnectionResetError("reset")
+
+            def change_discussion_status(self, repo, num, status, repo_type=None):
+                calls.append(("status", num, status))
+
+        fake = mock.Mock(HfApi=Api)
+        seen = []
+        env = {hub.DATASET_ENV: "a/b", hub.ALLOW_ENV: "1"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(hub, "_hf", return_value=fake):
+            with self.assertRaises(hub.HubError):
+                hub.upload(self.store, SESSION, progress=lambda phase, text, fraction=None, **extra: seen.append(
+                    (phase, extra.get("pr_url"))))
+            self.assertIn(("opened", "https://huggingface.co/datasets/a/b/discussions/7"), seen)
+            [rec] = hub.uploads(self.store, SESSION)
+            self.assertEqual((rec["status"], rec["pr_num"]), ("started", 7))
+            self.assertIsNone(hub.previous_upload(self.store, SESSION, rec["export_sha"]))   # not a duplicate
+            Api.fail = False
+            result = hub.upload(self.store, SESSION)
+        self.assertEqual(calls, ["create", ("upload", "refs/pr/7", None), ("upload", "refs/pr/7", None),
+                                 ("status", 7, "open")])   # the retry reused #7
+        self.assertEqual(result["pr_url"], "https://huggingface.co/datasets/a/b/discussions/7")
+        [rec] = hub.uploads(self.store, SESSION)
+        self.assertEqual(rec["status"], "done")
+        with mock.patch.dict(os.environ, env), self.assertRaises(hub.HubError) as cm:
+            hub.upload(self.store, SESSION, dry_run=True)
+        self.assertEqual(cm.exception.kind, "duplicate")
+
     def test_explain(self):
         try:
             import httpx
