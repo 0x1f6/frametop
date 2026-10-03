@@ -690,7 +690,10 @@ int main(int argc, char **argv) {
             break;
         }
         if (stdinClosed) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        // 250 passes a second: a new sample is printed within 4 ms (2 on average) of appearing,
+        // and the pose history has a pose within 2 ms of any sample's time (a 0.2 degree head
+        // turn at 100 degrees a second). Every 2 ms read the pose and the events twice as often.
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
     screens.Stop();
     vr::VR_Shutdown();
