@@ -15,7 +15,7 @@ to the input relay over its control socket (@frametop_relay):
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
-  - Games: pausing Frametop while a VR game runs, so it leaves the CPU and GPU to the game
+  - Game optimization: pausing Frametop while a VR game runs, so it leaves the CPU and GPU to the game
     (input/game_pause.py, in the relay: "pause on|off|?"): pause now, pause by itself during VR
     games, the controller gesture that pauses and resumes, what happens to the desktop, a sound.
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
