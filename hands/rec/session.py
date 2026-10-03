@@ -109,11 +109,14 @@ def in_container():
 
 def host_command(*cmd):
     """argv to run a command on the SteamOS host from the dev container (as in
-    display-settings: distrobox-host-exec needs the user's real session bus)."""
+    display-settings: distrobox-host-exec needs the user's real session bus). It runs from the
+    home folder: host-spawn starts the command in the caller's folder, and a container-only
+    one such as /run/host/tmp doesn't exist on the host (every command then exits 127)."""
     exe = shutil.which("distrobox-host-exec")
     if not in_container() or not exe:
         return list(cmd)
-    return ["env", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus" % os.getuid(), exe] + list(cmd)
+    return ["env", "-C", os.path.expanduser("~"), "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus" % os.getuid(),
+            exe] + list(cmd)
 
 
 def host_path(path):

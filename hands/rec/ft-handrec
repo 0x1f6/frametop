@@ -11,6 +11,9 @@ case $wl in /*) ;; *) wl="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$wl" ;; esac
 session_bus=${DBUS_SESSION_BUS_ADDRESS:-}
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+# From the home folder: the app's host commands (distrobox-host-exec) run in its folder on the
+# host, and a folder only the container has, such as /run/host/tmp, makes them all fail.
+cd "$HOME" || exit 1
 "$here/../../scripts/container-up.sh"
 exec "$HOME/.local/bin/distrobox" enter dev -- env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \
   XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="$session_bus" \
