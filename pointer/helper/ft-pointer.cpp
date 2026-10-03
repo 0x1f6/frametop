@@ -36,6 +36,13 @@
 // pointer is off the helper also stops listing overlays with vrcmd, whose connection every
 // second kept SteamVR from going to standby.
 //
+// Idle: while the pointer is off (and hand gestures are off), the main loop waits for a command
+// on its socket for up to 250 ms instead of running every 8 ms, or 20 ms while it reads mapped
+// Frame controller buttons (vrbuttons.h), which have no event to wait for. What has to go on
+// meanwhile still does: the headset's activity level, the game check and the relay's "vrgame"
+// and "gazeawake" repeats, and a mouse command wakes it at once. The overlay lookups (the 50 ms
+// visibility poll, the once-a-second handles) wait for the pointer to wake, and run right then.
+//
 // Last used wins: when a real controller moves (picked up), the pointer is released
 // (driver "hide", which also drops its hand role hint), so the controller gets
 // its role and laser back. The next mouse input reconnects and claims the laser again.
@@ -329,6 +336,7 @@ extern "C" {
 #include <fcntl.h>
 #include <fnmatch.h>
 
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -859,6 +867,8 @@ int main() {
     std::map<std::string, bool> sceneGraph;  // no texture: plane test instead of ComputeOverlayIntersection
     std::map<std::string, bool> visible;     // refreshed every 50 ms
     auto lastVisible = std::chrono::steady_clock::now();
+    auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    unsigned listGeneration = 0;  // the overlay list the handles were looked up from
     // The plane of the last panel the cursor was on, and the last point on it (panel edges).
     Vec3 edgePoint, edgeNormal, edgeLast;
     std::string edgeKey;
@@ -901,6 +911,8 @@ int main() {
         wokeAt = t;
         active = true;
         recenter = true;
+        // Overlay handles and visibility weren't looked at while it was off (see "Idle" at the top).
+        lastSlow = lastVisible = t - std::chrono::seconds(10);
         SendTo(out, "ft_pointer", "role " + role);  // POINTER_ROLE, before it takes it
         SendTo(out, "ft_pointer", "show");
         claimPending = true;  // take the laser without clicking, once SteamVR has bound the device
@@ -1127,8 +1139,6 @@ int main() {
         return gazeOn && gazeMouseHeld && !inGame && !headsetOff && Clock::now() - gz.at < std::chrono::seconds(1) &&
                !aimHeld && !leftHeld && !tilting && hold.src == Src::None && !clickPress && !clickRelease;
     };
-    auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-    unsigned listGeneration = 0;  // the overlay list the handles were looked up from
 
     // --- Panel placement (see "Placement" at the top of the file) ---
     // Device pose, given in the standing universe, sent to the driver in raw space.
@@ -1669,7 +1679,7 @@ int main() {
         }
 
         // Hands (see the top): pinches and grips from ft-hands.
-        {
+        if (handsOn) {
             vr::TrackedDevicePose_t h0;
             sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &h0, 1);
             if (h0.bPoseIsValid) poses.Add(tnow, h0.mDeviceToAbsoluteTracking);
@@ -1968,9 +1978,10 @@ int main() {
         }
         followAt = tnow;
 
-        // Slow work, once a second and when the overlay list is new: overlay handles, our device index.
+        // Slow work, once a second and when the overlay list is new: overlay handles, our device
+        // index. Only while the pointer is awake (see "Idle" at the top).
         const auto now = std::chrono::steady_clock::now();
-        if (now - lastSlow > std::chrono::seconds(1) || overlays.Generation() != listGeneration) {
+        if (active && (now - lastSlow > std::chrono::seconds(1) || overlays.Generation() != listGeneration)) {
             lastSlow = now;
             listGeneration = overlays.Generation();
             handles.clear();
@@ -1992,16 +2003,16 @@ int main() {
                 sceneGraph[key] = (tw == 0 || th == 0) && tt == vr::VROverlayTransform_Absolute &&
                                   key.rfind("frametop.", 0) != 0;
             }
-            ours = vr::k_unTrackedDeviceIndexInvalid;
-            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+            // Our device keeps its index; it's looked for again when a device is activated or
+            // deactivated (the events below).
+            for (vr::TrackedDeviceIndex_t i = 0; ours == vr::k_unTrackedDeviceIndexInvalid && i < vr::k_unMaxTrackedDeviceCount; ++i) {
                 char type[64] = "";
                 sys->GetStringTrackedDeviceProperty(i, vr::Prop_ControllerType_String, type, sizeof type);
                 if (std::strcmp(type, "ft_pointer") == 0) ours = i;
             }
-
         }
 
-        if (now - lastVisible > std::chrono::milliseconds(50) || visible.size() != handles.size()) {
+        if (active && (now - lastVisible > std::chrono::milliseconds(50) || visible.size() != handles.size())) {
             lastVisible = now;
             visible.clear();
             for (const auto &[key, h] : handles) visible[key] = overlay->IsOverlayVisible(h);
@@ -2320,6 +2331,8 @@ int main() {
             if (ev.eventType == vr::VREvent_DashboardActivated || ev.eventType == vr::VREvent_DashboardDeactivated ||
                 ev.eventType == vr::VREvent_DashboardOverlayCreated || ev.eventType == vr::VREvent_SceneApplicationChanged)
                 overlays.Kick();
+            if (ev.eventType == vr::VREvent_TrackedDeviceActivated || ev.eventType == vr::VREvent_TrackedDeviceDeactivated)
+                ours = vr::k_unTrackedDeviceIndexInvalid;
             if (ev.eventType == vr::VREvent_Quit) {
                 sys->AcknowledgeQuit_Exiting();
 
@@ -2328,6 +2341,15 @@ int main() {
                 return 0;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        // Idle (see the top): wait for a command instead. Not with anything still to finish (the
+        // claim pulse, a click's release, a press).
+        const bool idle = !active && !handsOn && !claimPending && !claimHeld && !clickRelease && !leftHeld &&
+                          hold.src == Src::None;
+        if (idle) {
+            pollfd p{in, POLLIN, 0};
+            poll(&p, 1, controllerButtons.Watching(inGame) ? 20 : 250);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        }
     }
 }
