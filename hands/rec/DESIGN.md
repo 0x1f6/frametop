@@ -18,6 +18,7 @@ The plan this belongs to is `~/Desktop/Projects/frame-hands/notes/hands-plan.md`
 | `hands/rec/build.sh` | Builds `ft-handpanel` into `hands/rec/build/`, like `gaze/build.sh`. |
 | `hands/rec/CONSENT.md`, `hands/rec/UPLOAD.md` | The texts the window shows. |
 | ft-hands `--record-hz N` (done) | Records at most N frame sets a second. The recorder uses 10. |
+| `hands/camcheck.py` (shared, standard library) | Are all four mono cameras running? The recorder runs it before a session and when a step sees no hands (below; `hands/README.md`, "Camera check"). |
 
 Every part runs in the dev container, as ft-hands and Input Settings do. The host Python isn't used: it lacks PySide6 and zstd. `setup/dev-container.sh` gains `zstd`.
 
@@ -37,6 +38,7 @@ Test hooks:
 - `--next-after S` presses Next by itself after S seconds of waiting (real time), so a step-mode session runs unattended. Lines on stdin steer it too: `n` or an empty line is Next, `p` pause or resume, `r` redo, `s` skip the section, `q` stop.
 - `--no-headset-button` leaves the headset's button alone (`ft-handrec --no-headset-button` too). `--button-device PATH` reads it from PATH instead, an event device or a FIFO of `input_event` structs, also in a dry run: a simulated button for tests.
 - `--auto` runs the timed flow; `--poses DIR` takes the pose pictures from DIR; `--plan` prints the sections, their steps and length.
+- `--ignore-cameras` (`ft-handrec --ignore-cameras` too) starts even when the camera check fails. A dry run and `--ring` skip the check by themselves.
 
 ## Files
 
@@ -76,8 +78,11 @@ No name, email, or account. The contributor id is random, so several sessions fr
  "checklist": {"objects": ["pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small"], "own_objects": ["..."],
                "controllers": "straps|none", "sleeves": "short|long|", "rings": false, "watch": false, "notes": ""},
  "device": {"steamos": "<VERSION_ID from /etc/os-release>", "steamvr": "<version if known>", "cameras": [{"name", "width", "height"}]},
- "mode": "step|auto", "takes": ["01-hand-size", "..."]}
+ "mode": "step|auto", "takes": ["01-hand-size", "..."],
+ "camera": {"status": "ok|unknown|degraded", "reason": "..."}, "stop_reason": "..."}
 ```
+
+`camera` is the camera check's verdict at the start (no paths or log lines: those go to `session.log`). `stop_reason` is there when a session was stopped at the no-hands screen, with the check's result.
 
 A session started before step mode existed has no `mode`: it ran as `auto`.
 
@@ -112,6 +117,7 @@ One JSON object per line:
 {"t": 123, "event": "ready", "id": "static-poses/fist/left/near", "seconds": 3}
 {"t": 123, "event": "wait"}
 {"t": 123, "event": "redo", "id": "static-poses/fist/left/near", "from": 123, "to": 123}
+{"t": 123, "event": "nohands", "id": "hand-size/flat/both", "reads": 120, "published": 118}
 {"t": 123, "event": "end", "status": "complete|stopped|skipped"}
 ```
 
@@ -126,7 +132,7 @@ prompt     the hold: its labels start here
 wait       the hold is over: no labels from here; part N stops
 ```
 
-The touch-the-dot targets after the first follow straight on: no `ready` or `wait` between them. `redo` marks a try done again (R): `from` is that step's `ready` (or its `prompt` if it had none), `to` its end. Its prompt is skipped; the sets stay. In auto mode there's no `ready` or `wait`, and the intro is a recorded prompt `<section>/intro`. Readers that knew only `prompt` and `end` keep working, but they'd give the countdown to the step before: `hub_review.py` (frame-hands `train/hub`) shows it as "(countdown)" and redone prompts as "(redone)"; `FORMAT.md` in the dataset repo has the rules.
+The touch-the-dot targets after the first follow straight on: no `ready` or `wait` between them. `redo` marks a try done again (R): `from` is that step's `ready` (or its `prompt` if it had none), `to` its end. Its prompt is skipped; the sets stay. In auto mode there's no `ready` or `wait`, and the intro is a recorded prompt `<section>/intro`. `nohands` marks the first hand-size step stopped because no hand was seen (below, "Camera check"); a `redo` over the same range follows it, so the try gets no labels. Readers that knew only `prompt` and `end` keep working, but they'd give the countdown to the step before: `hub_review.py` (frame-hands `train/hub`) shows it as "(countdown)" and redone prompts as "(redone)"; `FORMAT.md` in the dataset repo has the rules.
 
 ### poses.jsonl
 
@@ -244,6 +250,14 @@ Before section 8: "Put on both controllers and tighten the straps". Before secti
 - **Hands seen:** from the hands file. A hand counts as seen if its flags match the side and the file is fresh (publish within 0.3 s). Prompts with `hands` set show the `hands` chips. If an asked-for hand is lost for more than 1.5 s, the note says "I can't see your left hand: bring it into view".
 - **Controller tracking:** in sections 8 and 9, `devices` is polled once a second. A result other than 200 for more than 1 s says "The left controller lost tracking: turn your palm slightly toward you". Each such stretch goes into `prompts.jsonl` as `feedback` with `"controller": {...}`.
 - **Lighting check at session start:** the mean of every mono camera's `mean` and `dark_mean` from the ring (`hands/tools/ring.py` layout; struct only, no numpy). It's compared with the person's earlier sessions. If the chosen lighting matches an earlier round's within 15%, the window says so before starting.
+
+### Camera check
+
+On 2026-10-02 a whole session showed "I can't see your hands": after the headset slept, SteamVR had failed to load the colour module's FPGA image, which left the upper cameras and the IR light off (`hands/README.md`, "Camera check"). Two checks keep that from wasting a session:
+
+- **Before the session.** The window runs `hands/camcheck.py` when the checklist page opens ("Tracking cameras:", with the evidence under Details and Check again), and again when Start is pressed; `session.py` runs it first thing, before it makes the session's folder or starts anything (`Session._preflight`). If it finds the cameras degraded, the session doesn't start. The window says: "The headset's upper cameras and IR light are off. SteamVR couldn't start the colour camera module (it happens sometimes after the headset sleeps). Restart SteamVR, or restart the headset if that doesn't fix it." (another `degraded:` reason gets a sentence naming it), and Start stays off. `unknown` (SteamVR not running, the cameras asleep) doesn't stop it: the session's own start fails clearly then. From the command line, `session.py` prints the check and exits with status 3.
+- **Restart SteamVR.** The message has a Restart SteamVR button. After a confirmation it runs `systemctl --user restart --no-block steamvr.service` on the host (through `distrobox-host-exec`), then checks the cameras every 3 s, for up to 2 minutes, until a new XRService has opened its cameras. The confirmation says what really happens: every VR app closes, and so does the Frametop desktop with all its windows, this one included, and it doesn't come back by itself (`hands/README.md`, "What a SteamVR restart does to Frametop"). So the check after the restart mostly happens when the recorder is opened again; it re-runs when the checklist page opens. `--no-block` lets the restart finish after the window is gone.
+- **No hands in the first step.** The first step of the hand-size section has both hands up, about 40 cm away. During its hold, the session counts the hands file's reads (about 20 a second). If the tracker published in at least half of at least 10 reads and never saw a hand, the step stops: a `wait` and the recording stops as usual, then a `nohands` event and a `redo` over the try. The session runs the camera check and shows "I can't see your hands" with its result (the camera text above when it's the VCINT failure, else "The camera check found nothing wrong"). The state is `nohands`, waiting: Next (the headset button, Space, Try again) or R starts the same step's countdown at once; Stop (Esc) ends the session with `stop_reason` set; S skips the section. One missed step costs a retry, not the session, and every hold of that step is logged ("hands check ...: a hand in N of M reads"). Without a tracker publishing the session can't tell, logs that, and goes on. Only that one step is checked: later steps have their notes ("I can't see your left hand") as before. Auto mode does the same; its recording pauses meanwhile.
 
 ### Controls
 

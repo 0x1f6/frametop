@@ -5,7 +5,9 @@ A Kirigami (QML) app with a Python backend. It runs in the dev container:
   - Welcome: the consent text (CONSENT.md), shown the first time and again when its version
     changes. Agreeing writes profile.json with a random contributor id.
   - Before you start: the checklist (objects, controller straps, lighting, sleeves, privacy,
-    free space) and what will happen. Start hands it to the session runner (session.py).
+    free space), the camera check (hands/camcheck.py: Start stays off while the upper cameras
+    are off, with a Restart SteamVR button; --ignore-cameras overrides it) and what will happen.
+    Start hands it to the session runner (session.py).
   - Session: the runner's live status with the step's pose picture and where-to diagram, Next,
     Pause/Resume, Redo, Skip section and Stop (Space: Next, P, R, S and Esc while the window has
     focus; the button on the headset's right side is Next, pause and resume). The prompts appear
@@ -33,6 +35,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
 from PySide6.QtCore import Property, QObject, Qt, QTimer, QUrl, Signal, Slot
@@ -68,7 +71,10 @@ LIGHTING = [("dim", "Dim: one lamp only"), ("room", "Normal room light"), ("dayl
 SLEEVES = [("short", "Short sleeves or bare arms"), ("long", "Long sleeves"), ("", "Rather not say")]
 HANDEDNESS = [("", "Rather not say"), ("right", "Right-handed"), ("left", "Left-handed"),
               ("both", "Both (ambidextrous)")]
-ACTIVE_STATES = ("starting", "intro", "ready", "countdown", "running", "paused", "between")
+ACTIVE_STATES = ("starting", "intro", "ready", "countdown", "running", "paused", "between", "nohands")
+# After Restart SteamVR: look at the cameras again this often, for at most this long.
+RECHECK_S = 3
+RECHECK_FOR_S = 120
 # Shown side by side in the viewer at this height; thumbnails are smaller.
 SET_HEIGHT = 480
 THUMB_HEIGHT = 96
@@ -208,8 +214,10 @@ class Backend(QObject):
     _loginArrived = Signal(dict)
     _uploadLine = Signal(dict)
     _uploadFinished = Signal(dict)
+    cameraChanged = Signal()
+    _cameraArrived = Signal(dict)
 
-    def __init__(self, store, session_options=None, hub_dry_run=False):
+    def __init__(self, store, session_options=None, hub_dry_run=False, ignore_cameras=False):
         super().__init__()
         self.store = store
         self._session_options = session_options or {}  # Session options: dry_run, speed, poses_dir (tests), button
@@ -233,6 +241,11 @@ class Backend(QObject):
         self._export_text = ""
         self._export_session = ""
         self._statusArrived.connect(self._on_status)
+        self._ignore_cameras = ignore_cameras
+        self._camera = {}            # the last camera check (session.camera_check)
+        self._camera_busy = False
+        self._restarting = False
+        self._cameraArrived.connect(self._on_camera)
         self._lightingArrived.connect(self._on_lighting)
         self._exportProgress.connect(self._on_export_progress)
         self._exportFinished.connect(self._on_export_finished)
@@ -373,6 +386,99 @@ class Backend(QObject):
         self._lighting_note = note
         self.lightingChanged.emit()
 
+    # --- the camera check (hands/camcheck.py through session.camera_check)
+    @Property(str, notify=cameraChanged)
+    def cameraState(self):
+        """ok, degraded, unknown; checking while it runs; "" before the first check."""
+        if self._camera_busy and not self._camera:
+            return "checking"
+        return self._camera.get("status", "")
+
+    @Property(str, notify=cameraChanged)
+    def cameraText(self):
+        """What to tell the person when the cameras aren't all running ("" otherwise)."""
+        mod = self._runner()
+        return mod.camera_text(self._camera) if mod and self._camera else ""
+
+    @Property(str, notify=cameraChanged)
+    def cameraSummary(self):
+        return self._camera.get("summary", "")
+
+    @Property(str, notify=cameraChanged)
+    def cameraEvidence(self):
+        return "\n".join(self._camera.get("evidence", []))
+
+    @Property(bool, constant=True)
+    def camerasIgnored(self):
+        return self._ignore_cameras
+
+    @Property(bool, notify=cameraChanged)
+    def cameraBusy(self):
+        return self._camera_busy
+
+    @Property(bool, notify=cameraChanged)
+    def restartingSteamVR(self):
+        return self._restarting
+
+    @Property(bool, notify=cameraChanged)
+    def camerasBlockStart(self):
+        """Start stays off: the check found the cameras degraded (unless --ignore-cameras)."""
+        return not self._ignore_cameras and self._camera.get("status") == "degraded"
+
+    def _check_now(self):
+        mod = self._runner()
+        if not mod or self._session_options.get("dry_run"):
+            return {"status": "unknown", "summary": "not checked (dry run)", "reason": "dry run", "evidence": []}
+        return mod.camera_check()
+
+    @Slot()
+    def checkCameras(self):
+        """Run the camera check off this thread (it reads the XRService log: a few MB)."""
+        if self._camera_busy:
+            return
+        self._camera_busy = True
+        self.cameraChanged.emit()
+        self._thread(lambda: self._cameraArrived.emit(self._check_now()))
+
+    def _on_camera(self, result):
+        self._camera = result
+        self._camera_busy = self._restarting
+        self.cameraChanged.emit()
+
+    @Slot()
+    def restartSteamVR(self):
+        """systemctl --user restart steamvr.service on the host (--no-block: the job runs in
+        systemd, so it finishes even when this window closes with the Frametop desktop), then
+        the camera check every few seconds until the new XRService has opened its cameras."""
+        mod = self._runner()
+        if not mod or self._restarting or self.sessionActive:
+            return
+        self._restarting = self._camera_busy = True
+        self.cameraChanged.emit()
+        before = self._camera.get("log", "") if self._camera else ""   # each XRService start writes a new log
+
+        def run():
+            result = None
+            try:
+                r = subprocess.run(mod.host_command("systemctl", "--user", "restart", "--no-block",
+                                                    "steamvr.service"), capture_output=True, text=True, timeout=60)
+                if r.returncode != 0:
+                    raise RuntimeError((r.stderr or r.stdout).strip() or "exit %d" % r.returncode)
+                end = time.monotonic() + RECHECK_FOR_S
+                time.sleep(RECHECK_S * 2)
+                while time.monotonic() < end:
+                    result = self._check_now()
+                    # Done once a new XRService (a new log) has opened its cameras, ok or not.
+                    if result.get("status") in ("ok", "degraded") and result.get("log") != before:
+                        break
+                    time.sleep(RECHECK_S)
+            except Exception as e:
+                result = {"status": "unknown", "summary": f"unknown: couldn't restart SteamVR ({e})",
+                          "reason": str(e), "evidence": []}
+            self._restarting = False
+            self._cameraArrived.emit(result or self._check_now())
+        self._thread(run)
+
     # --- the session
     @Property("QVariantMap", notify=statusChanged)
     def status(self):
@@ -410,6 +516,12 @@ class Backend(QObject):
         if self.needsConsent:
             self.message.emit("Agree to the consent text first (Welcome page)", True)
             return False
+        if not self._ignore_cameras and not self._session_options.get("dry_run"):
+            self._camera = self._check_now()   # fresh: it takes a fraction of a second
+            self.cameraChanged.emit()
+            if self._camera.get("status") == "degraded":
+                self.message.emit(mod.camera_text(self._camera), True)
+                return False
         checklist = dict(checklist)
         checklist["objects"] = [o for o in checklist.get("objects", []) if o in dict(OBJECTS)]
         checklist["own_objects"] = [o.strip() for o in checklist.get("own_objects", []) if str(o).strip()]
@@ -435,6 +547,9 @@ class Backend(QObject):
 
     def _on_status(self, status):
         self._status = status
+        if status.get("camera") and status.get("camera") is not self._camera:
+            self._camera = status["camera"]   # the session's own check (at its start, or after no hands)
+            self.cameraChanged.emit()
         if self._session is not None and not self._session_id:
             self._session_id = os.path.basename(str(getattr(self._session, "session_dir", "") or ""))
         self.statusChanged.emit()
@@ -927,6 +1042,8 @@ def main():
                     help="sessions don't read the headset's button (Next, pause, resume)")
     ap.add_argument("--hub-dry-run", action="store_true",
                     help="test: Upload checks the export and says what it would send, with no network calls")
+    ap.add_argument("--ignore-cameras", action="store_true",
+                    help="start sessions even if the camera check (hands/camcheck.py) finds the upper cameras off")
     a, qt_args = ap.parse_known_args()
     app = QGuiApplication([sys.argv[0]] + qt_args)
     app.setApplicationName("ft-handrec")
@@ -943,7 +1060,9 @@ def main():
         options["poses_dir"] = a.poses
     if a.no_headset_button:
         options["button"] = False
-    backend = Backend(store, options, hub_dry_run=a.hub_dry_run)
+    if a.ignore_cameras:
+        options["check_cameras"] = False
+    backend = Backend(store, options, hub_dry_run=a.hub_dry_run, ignore_cameras=a.ignore_cameras)
     app.aboutToQuit.connect(backend.shutdown)
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("startPage", a.page)

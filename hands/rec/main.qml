@@ -109,6 +109,41 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // Restart SteamVR (the camera check's fix). What it does to Frametop, read from the code
+    // (hands/README.md, "Camera check"): ft-screens quits when SteamVR does, which ends the
+    // desktop; its unit doesn't restart, and stopping it ends what was started in it.
+    function askRestartSteamVR() {
+        confirm.ask("Restart SteamVR?",
+                    "SteamVR starts its cameras again, and with them the colour camera module. This closes every "
+                    + "VR app. It also closes the Frametop desktop with all its windows, this one too: Frametop's "
+                    + "screens don't come back by themselves. Save your work first; programs started from the "
+                    + "desktop, such as terminals and what runs in them, stop too.\n\nOnce SteamVR is back, start "
+                    + "the desktop again (Desktop in the library) and open the Hand recorder: it checks the cameras "
+                    + "again. If they're still off, restart the headset.",
+                    () => backend.restartSteamVR())
+    }
+
+    // The camera check's problem, with its fix (a header message on the checklist and session pages).
+    component CameraMessage: Kirigami.InlineMessage {
+        position: Kirigami.InlineMessage.Position.Header
+        type: backend.restartingSteamVR ? Kirigami.MessageType.Information : Kirigami.MessageType.Error
+        text: backend.restartingSteamVR ? "Restarting SteamVR, then checking the cameras again…" : backend.cameraText
+        actions: [
+            Kirigami.Action {
+                text: "Restart SteamVR…"
+                icon.name: "system-reboot"
+                enabled: !backend.restartingSteamVR && !backend.sessionActive
+                onTriggered: root.askRestartSteamVR()
+            },
+            Kirigami.Action {
+                text: "Check again"
+                icon.name: "view-refresh"
+                enabled: !backend.cameraBusy
+                onTriggered: backend.checkCameras()
+            }
+        ]
+    }
+
     // Closing during a session asks first. Quitting closes the window again (Qt 6), so the
     // answer is remembered; the backend stops the session as the app quits.
     property bool quitting: false
@@ -250,7 +285,12 @@ Kirigami.ApplicationWindow {
                     text: "A session is running."
                     actions: [ Kirigami.Action { text: "Go to it"; onTriggered: root.show(sessionPage) } ]
                 }
+                CameraMessage {
+                    Layout.fillWidth: true
+                    visible: !backend.sessionActive && (backend.cameraText !== "" || backend.restartingSteamVR)
+                }
             }
+            Component.onCompleted: backend.checkCameras()
 
             Kirigami.FormLayout {
                 Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Within reach" }
@@ -379,6 +419,49 @@ Kirigami.ApplicationWindow {
                           + "or free up space, first."
                 }
 
+                Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Cameras" }
+                RowLayout {
+                    Kirigami.FormData.label: "Tracking cameras:"
+                    Controls.Label {
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 20
+                        wrapMode: Text.Wrap
+                        text: backend.camerasIgnored ? "Not checked (--ignore-cameras)"
+                              : backend.cameraState === "ok" ? "All four are running."
+                              : backend.cameraState === "degraded" ? "Not all running: see the message at the top."
+                              : backend.cameraState === "unknown" ? "Couldn't tell (" + backend.cameraSummary.replace(/^unknown: /, "")
+                                                                    + "). The session checks again when it starts."
+                              : "Checking…"
+                    }
+                    Controls.ToolButton {
+                        visible: backend.cameraEvidence !== ""
+                        icon.name: "documentinfo"
+                        text: "Details"
+                        checkable: true
+                        id: cameraDetails
+                        display: Controls.AbstractButton.IconOnly
+                        Controls.ToolTip.text: "What the check looked at"
+                        Controls.ToolTip.visible: hovered
+                    }
+                    Controls.ToolButton {
+                        icon.name: "view-refresh"
+                        text: "Check again"
+                        display: Controls.AbstractButton.IconOnly
+                        enabled: !backend.cameraBusy
+                        onClicked: backend.checkCameras()
+                        Controls.ToolTip.text: text
+                        Controls.ToolTip.visible: hovered
+                    }
+                }
+                Controls.Label {
+                    visible: cameraDetails.checked && backend.cameraEvidence !== ""
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 34
+                    wrapMode: Text.WrapAnywhere
+                    font: Kirigami.Theme.smallFont
+                    opacity: 0.7
+                    textFormat: Text.PlainText
+                    text: backend.cameraSummary + "\n" + backend.cameraEvidence
+                }
+
                 Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "What will happen" }
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 26
@@ -412,17 +495,18 @@ Kirigami.ApplicationWindow {
                 Controls.Button {
                     text: "Start"
                     icon.name: "media-record"
-                    enabled: checklist.ready
+                    enabled: checklist.ready && !backend.camerasBlockStart && !backend.restartingSteamVR
                     onClicked: {
                         if (backend.startSession(checklist.answers(), lighting.currentValue, autoAdvance.checked))
                             root.show(sessionPage)
                     }
                 }
                 Controls.Label {
-                    visible: !checklist.ready && !backend.sessionActive
+                    visible: (!checklist.ready || backend.camerasBlockStart) && !backend.sessionActive
                     opacity: 0.7
                     text: !checklist.privacyOk ? "Tick the three privacy checks to start."
-                          : lighting.currentIndex < 0 ? "Choose the lighting to start." : ""
+                          : lighting.currentIndex < 0 ? "Choose the lighting to start."
+                          : backend.camerasBlockStart ? "The headset's cameras aren't all running: see the message at the top." : ""
                 }
             }
         }
@@ -441,7 +525,7 @@ Kirigami.ApplicationWindow {
             readonly property var stateText: ({
                 starting: "Starting…", intro: "Get ready", ready: "Get ready", countdown: "Starting",
                 running: "Recording", paused: "Paused", between: "Between sections", done: "Done",
-                stopped: "Stopped", error: "Error"
+                stopped: "Stopped", error: "Error", nohands: "No hands seen"
             })
 
             // The keys while the window has focus (the panel in the headset lists them too).
@@ -594,11 +678,21 @@ Kirigami.ApplicationWindow {
                 }
             }
 
-            header: Kirigami.InlineMessage {
-                visible: backend.runnerError !== "" || sessionView.state === "error"
-                position: Kirigami.InlineMessage.Position.Header
-                type: Kirigami.MessageType.Error
-                text: backend.runnerError || ("The session stopped with an error: " + (sessionView.st.error || "unknown"))
+            header: ColumnLayout {
+                spacing: 0
+                Kirigami.InlineMessage {
+                    Layout.fillWidth: true
+                    visible: backend.runnerError !== "" || (sessionView.state === "error" && sessionView.st.error !== backend.cameraText)
+                    position: Kirigami.InlineMessage.Position.Header
+                    type: Kirigami.MessageType.Error
+                    text: backend.runnerError || ("The session stopped with an error: " + (sessionView.st.error || "unknown"))
+                }
+                // The camera check stopped the session (at its start, or after a step with no hands).
+                CameraMessage {
+                    Layout.fillWidth: true
+                    visible: (!backend.sessionActive && sessionView.state !== "" && backend.cameraText !== "")
+                             || backend.restartingSteamVR
+                }
             }
 
             Kirigami.PlaceholderMessage {
@@ -702,8 +796,8 @@ Kirigami.ApplicationWindow {
                         Controls.Button {
                             visible: sessionView.waiting && sessionView.state !== "paused"
                             focusPolicy: Qt.NoFocus
-                            text: "Next"
-                            icon.name: "go-next"
+                            text: sessionView.state === "nohands" ? "Try again" : "Next"
+                            icon.name: sessionView.state === "nohands" ? "edit-undo" : "go-next"
                             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.5
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 10
                             Layout.preferredHeight: Kirigami.Units.gridUnit * 3
@@ -712,8 +806,11 @@ Kirigami.ApplicationWindow {
                         Controls.Label {
                             visible: sessionView.waiting && sessionView.state !== "paused"
                             opacity: 0.7
-                            text: (sessionView.st.ready_text || "Ready? Press Space or click Next")
-                                  + ". A 3-2-1 countdown starts the recording."
+                            text: sessionView.state === "nohands"
+                                  ? "Try again starts the same step (Space or the headset button do too). Stop ends the session, "
+                                    + "keeping what's recorded."
+                                  : (sessionView.st.ready_text || "Ready? Press Space or click Next")
+                                    + ". A 3-2-1 countdown starts the recording."
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
                         }

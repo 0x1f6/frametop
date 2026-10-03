@@ -14,6 +14,10 @@ for testing (in the dev container):
   python3 hands/rec/session.py --dry-run --speed 20 --next-after 0.2   # no processes: prints the panel commands
   python3 hands/rec/session.py --ring /tmp/ring --base /tmp/hr        # ft-ringplay's frames, no headset needed
 
+Before anything starts it runs the camera check (hands/camcheck.py) and won't start while the
+upper cameras are off (--ignore-cameras overrides it). If the hand-size section's first step sees
+no hands at all, it stops that step and asks: try again, or stop (DESIGN.md, "Camera check").
+
 Step mode (the default) shows each step and waits for Next (Space in the window, n or Enter
 here); a 3-2-1 countdown, recorded, then the hold. Only the countdowns and holds are recorded:
 each is a part of the take's recording (sets-N.bin). --auto is the old timed flow.
@@ -41,6 +45,8 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 HANDS = os.path.join(REPO, "hands")
+sys.path.insert(0, HANDS)
+import camcheck  # noqa: E402  (hands/camcheck.py: are all four mono cameras running?)
 FT_HANDS = os.path.join(HANDS, "build", "ft-hands")
 FT_CAMD = os.path.join(HANDS, "build", "ft-camd")
 PANEL_BIN = os.path.join(HERE, "build", "ft-handpanel")
@@ -70,6 +76,18 @@ KEYS_AUTO = "Hand recorder window:  P pause  \u00b7  R redo  \u00b7  S skip sect
 KEYS_STEP_BUTTON = ("Headset button: next, pause  \u00b7  Window: Space next  \u00b7  P pause  \u00b7  R redo  "
                     "\u00b7  S skip  \u00b7  Esc stop")
 KEYS_AUTO_BUTTON = "Headset button: pause  \u00b7  Window: P pause  \u00b7  R redo  \u00b7  S skip section  \u00b7  Esc stop"
+# The early no-hands stop (DESIGN.md, "Camera check"): the first step of this section has both
+# hands up. If the live tracker publishes through its hold and never sees a hand, the session
+# stops that step and asks: try again, or stop. Only when the tracker published in at least
+# HANDS_CHECK_PUBLISHED of at least HANDS_CHECK_MIN_READS reads (about 20 a second): without
+# a tracker it can't tell.
+HANDS_CHECK_SECTION = "hand-size"
+HANDS_CHECK_MIN_READS = 10
+HANDS_CHECK_PUBLISHED = 0.5
+NO_HANDS_TITLE = "I can't see your hands"
+NO_HANDS_TEXT = "The hand tracker didn't see either of your hands during that whole step."
+NO_HANDS_RETRY = ("Try again: hold both hands up in front of you, about 40 cm away. To stop instead: "
+                  "Esc or Stop in the Hand recorder window.")
 
 
 def mono_ns():
@@ -921,6 +939,26 @@ def _steamvr_version():
     return ""
 
 
+def camera_check():
+    """camcheck.check() (the XRService log, its open cameras where readable, ft-camd's ring);
+    never raises: a failure is "unknown"."""
+    try:
+        return camcheck.check()
+    except Exception as e:
+        return {"status": "unknown", "summary": "unknown: the camera check failed (%s)" % e,
+                "reason": str(e), "evidence": []}
+
+
+def camera_text(result):
+    """What to tell the person about a camera check that isn't ok ("" if it's ok or unknown)."""
+    if not result or result.get("status") != "degraded":
+        return ""
+    if camcheck.is_vcint_failure(result):
+        return camcheck.USER_TEXT
+    return ("Not all of the headset's tracking cameras are running (%s). Restart SteamVR, or restart the "
+            "headset if that doesn't fix it." % result.get("reason", ""))
+
+
 class Session:
     """One recording session. start() runs it in its own thread; next_step(), pause(), resume(),
     redo(), skip() and stop() steer it from any thread. on_status(dict) is called from the
@@ -931,11 +969,14 @@ class Session:
     advancing by itself, one recording per take. next_after (a test hook): press Next by itself
     after that many seconds of waiting. poses_dir: the pose pictures (poses/). button: read the
     headset's button (not in a dry run unless button_device, a test hook, names the device or
-    a FIFO of input_event structs)."""
+    a FIFO of input_event structs). check_cameras: run the camera check first and don't start
+    if it fails (not in a dry run, nor with ring). hands_reader (a test hook): an object whose
+    read() stands in for the hands file, read in a dry run too."""
 
     def __init__(self, base_dir, profile, checklist, lighting_choice, script_path, *, ring=None,
                  start_processes=True, dry_run=False, speed=1.0, on_status=None, hands_dir=None, panel_bin=None,
-                 auto=False, next_after=None, poses_dir=None, button=True, button_device=None):
+                 auto=False, next_after=None, poses_dir=None, button=True, button_device=None,
+                 check_cameras=True, hands_reader=None):
         self.base_dir = os.path.abspath(os.path.expanduser(base_dir or BASE_DIR))
         self.profile = dict(profile or {})
         self.checklist = dict(checklist or {})
@@ -951,6 +992,9 @@ class Session:
         self.auto = bool(auto)
         self.next_after = next_after
         self.button, self.button_device = bool(button), button_device
+        self.check_cameras = bool(check_cameras)
+        # the camera check (a test hook: tests swap it); a dry run looks at no real cameras
+        self.camera_check_fn = (lambda: None) if dry_run else camera_check
         self.input_devices = INPUT_DEVICES   # where mice are looked for (a test hook)
         self._button = None                  # the ButtonReader
         self.print = print   # where dry-run panel commands go (the CLI's stdout)
@@ -971,7 +1015,8 @@ class Session:
                         "prompt": "", "seconds_left": 0.0, "note": "", "hands": {"left": None, "right": None},
                         "take": None, "error": "", "waiting": False, "countdown": 0, "big": "", "can_redo": False,
                         "image": "", "image_mode": "", "caption": "", "position": "", "distance": "",
-                        "ready_text": READY_TEXT, "button": False, "mouse": True}
+                        "ready_text": READY_TEXT, "button": False, "mouse": True,
+                        "camera": None, "nohands": False}
         self._last_emit = 0.0
         self._log_file = None
         self._panel = None
@@ -982,7 +1027,10 @@ class Session:
         self._recorder = None
         self._prompt = None        # the prompt shown: dict (hands, controllers)
         self._live = None          # the hands file's last read
-        self._hands_file = HandsFile(os.path.join(self.hands_dir, "hands"))
+        self._hands_file = hands_reader or HandsFile(os.path.join(self.hands_dir, "hands"))
+        self._read_hands = not dry_run or hands_reader is not None
+        self._hold_watch = None    # the no-hands check's counts during a hold
+        self._stop_note = ""       # why the session stopped, when it says more than "stopped"
         self._paused = False
         self._recording = False    # a recording part is running
         self._paused_recording = False
@@ -1083,6 +1131,8 @@ class Session:
     # --- the run
     def _run(self):
         try:
+            if self._preflight():
+                return
             self._make_dir()
             self._emit(state="starting")
             self._setup()
@@ -1097,6 +1147,20 @@ class Session:
         except Exception as e:
             self._log(traceback.format_exc())
             self._finish("error", "%s: %s" % (type(e).__name__, e))
+
+    def _preflight(self):
+        """The camera check, before anything is made or started (camcheck.py): with the upper
+        cameras off a session records nothing useful. True if it stopped the session (state
+        "error", no session folder)."""
+        if self.dry_run or self.ring or not self.check_cameras:
+            return False
+        r = self.camera_check_fn()
+        self._status["camera"] = r
+        text = camera_text(r)
+        if not text:
+            return False
+        self._emit(state="error", error=text, prompt=text, camera=r)
+        return True
 
     def _make_dir(self):
         sessions = os.path.join(self.base_dir, "sessions")
@@ -1117,6 +1181,13 @@ class Session:
                                                 self.script_path))
         for s in self.skipped:
             self._log("skipping %s: %s" % (s["section"], s["reason"]))
+        cam = self._status.get("camera")
+        if cam:
+            self._log("camera check: %s" % cam.get("summary", cam.get("status")))
+            for line in cam.get("evidence", []):
+                self._log("  " + line)
+        elif not self.check_cameras and not self.dry_run:
+            self._log("camera check skipped (--ignore-cameras)")
 
     def _setup(self):
         ring_path = self.ring or os.path.join(self.hands_dir, "cam-ring")
@@ -1149,6 +1220,9 @@ class Session:
             "script": {"version": self.script.get("version"), "sections": [s["id"] for s in self.plan],
                        "skipped": self.skipped},
             "mode": "auto" if self.auto else "step", "takes": [], "status": "recording"}
+        cam = self._status.get("camera")
+        if cam:
+            self._session_json["camera"] = {"status": cam.get("status"), "reason": cam.get("reason", "")}
         if self.dry_run:
             self._session_json["dry_run"] = True
         if self.speed != 1:
@@ -1325,8 +1399,12 @@ class Session:
             self._session_json["ended"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             if error:
                 self._session_json["error"] = error
+            if self._stop_note and state == "stopped":
+                self._session_json["stop_reason"] = self._stop_note
             self._save_session()
         self._log("%s%s" % (state, ": " + error if error else ""))
+        if self._stop_note and state == "stopped":
+            self._log(self._stop_note)
         self._stop_units()
         if self._button:
             self._button.stop()
@@ -1349,7 +1427,8 @@ class Session:
             self._log_file = None
         screen = {"done": self.script.get("done"), "stopped": self.script.get("stopped")}.get(state) or {}
         self._emit(state=state, error=error, seconds_left=0.0, note="", take=None, section="",
-                   prompt=error or screen.get("text", "").replace("|", "\n"), hands={"left": None, "right": None},
+                   prompt=error or (self._stop_note if state == "stopped" else "") or screen.get("text", "").replace("|", "\n"),
+                   hands={"left": None, "right": None}, nohands=False,
                    waiting=False, countdown=0, big="", can_redo=False, image="", image_mode="", caption="",
                    position="", distance="")
 
@@ -1455,8 +1534,15 @@ class Session:
             fb["disk"] = now
             if shutil.disk_usage(self.session_dir).free < MIN_FREE:
                 raise _Fail("The disk is nearly full: the session stopped")
-        live = None if self.dry_run else self._hands_file.read()
+        live = self._hands_file.read() if self._read_hands else None
         self._live = live
+        w = self._hold_watch
+        if w is not None:
+            w["reads"] += 1
+            if live is not None:
+                w["published"] += 1
+                if live["left"] or live["right"]:
+                    w["seen"] += 1
         p = self._prompt or {}
         asked = p.get("hands", "")
         # While a step waits for Next the chips show what's seen, with no notes yet.
@@ -1767,6 +1853,7 @@ class Session:
         steps = self._step_list(s)
         done = []      # the steps finished in this take: (index, id, from_ns, to_ns), for R
         again = set()  # steps to do again: they wait for Next too
+        retry = False  # after the no-hands stop: Next was pressed there, go straight to the countdown
         k = 0
         while k < len(steps):
             st, p = steps[k], steps[k]["p"]
@@ -1777,13 +1864,26 @@ class Session:
                 if not self.auto and (st["ready"] or k in again):
                     self._redo_ok = bool(done)
                     self._ready(s, st, where, can_redo=bool(done))
-                    self._await_next()
+                    if not retry:
+                        self._await_next()
+                    retry = False
                     self._redo_ok = True
                     started = self._countdown(i, s, st)
                 else:
+                    retry = False
                     self._redo_ok = True
                     self._emit(force=False, can_redo=True)
-                self._run_step(s, st, where)
+                check = self._read_hands and s["id"] == HANDS_CHECK_SECTION and k == 0 and st["kind"] == "prompt"
+                self._hold_watch = {"reads": 0, "published": 0, "seen": 0} if check else None
+                try:
+                    self._run_step(s, st, where)
+                finally:
+                    watch, self._hold_watch = self._hold_watch, None
+                if check and self._no_hands_seen(p, watch):
+                    self._no_hands(s, st, where, started if started is not None else self._step_t0, watch)
+                    again.add(k)
+                    retry = True
+                    continue
                 done.append((k, p["id"], started if started is not None else self._step_t0, mono_ns()))
                 if not self.auto and (k + 1 == len(steps) or steps[k + 1]["ready"] or k + 1 in again):
                     self._hold_end()
@@ -1808,6 +1908,66 @@ class Session:
                     self._event("redo", id=pid, **{"from": a, "to": b})
                     self._log("    redo %s" % pid)
                     again.add(k)
+
+    def _no_hands_seen(self, p, w):
+        """The no-hands check's verdict on a hold (logged either way): True if the tracker
+        published through it and never saw a hand."""
+        enough = w["reads"] >= HANDS_CHECK_MIN_READS and w["published"] >= HANDS_CHECK_PUBLISHED * w["reads"]
+        if not enough:
+            self._log("    hands check %s: the tracker published in %d of %d reads: can't tell"
+                      % (p["id"], w["published"], w["reads"]))
+            return False
+        self._log("    hands check %s: a hand in %d of %d reads (%d published)"
+                  % (p["id"], w["seen"], w["reads"], w["published"]))
+        return w["seen"] == 0
+
+    def _no_hands(self, s, st, where, from_ns, w):
+        """The first step saw no hands at all: stop it (its range marked as redone, so it gets
+        no labels), run the camera check, say so, and wait. Next or R tries the step again; Stop
+        (Esc) ends the session with the camera check's result; S skips the section."""
+        p = st["p"]
+        if not self.auto:
+            self._hold_end()
+        elif self._recording:
+            self._stop_recording()
+            self._event("pause")
+        self._event("nohands", id=p["id"], reads=w["reads"], published=w["published"])
+        if from_ns is not None:
+            self._event("redo", id=p["id"], **{"from": from_ns, "to": mono_ns()})
+        cam = self.camera_check_fn() if self.check_cameras else None
+        cam_text = camera_text(cam)
+        summary = (cam or {}).get("summary", "not run")
+        self._log("    no hands seen in %s: asking to try again or stop; camera check: %s" % (p["id"], summary))
+        for line in (cam or {}).get("evidence", []):
+            self._log("      " + line)
+        text = "%s|%s|%s" % (NO_HANDS_TEXT, cam_text or "The camera check found nothing wrong (%s)." % summary,
+                             NO_HANDS_RETRY)
+        self._stop_note = "Stopped: no hands were seen in the first step. Camera check: %s." % summary
+        if cam_text:
+            self._stop_note += " " + cam_text
+        self._prompt = None
+        self._view()
+        self._show(NO_HANDS_TITLE, where, text)
+        for key, c in (("big", "big "), ("countdown", "countdown off"), ("bar", "bar off"), ("target", "target off"),
+                       ("note", "note "), ("hands", "hands off off")):
+            self._panel.set(key, c)
+        self._emit(state="nohands", prompt=text.replace("|", "\n"), camera=cam, nohands=True, can_redo=True,
+                   big="", countdown=0, seconds_left=0.0)
+        self._redo_ok = True
+        try:
+            self._await_next()
+        except _Redo:
+            pass   # R here is the same as Next: try again
+        except _Skip:
+            self._stop_note = ""
+            self._emit(nohands=False)
+            raise
+        self._stop_note = ""
+        self._log("    trying %s again" % p["id"])
+        self._emit(nohands=False)
+        if self.auto and self._take and not self._recording:
+            self._event("resume")
+            self._start_recording()
 
     def _ready(self, s, st, where, can_redo):
         """Step mode: show the step (text, picture, diagram) with "Ready?"."""
@@ -2002,6 +2162,8 @@ def main():
                     help="don't read the headset's button (gpio-keys KEY_SELECT: Next, pause, resume)")
     ap.add_argument("--button-device", metavar="PATH",
                     help="test: read the button from this event device or FIFO of input_event structs (also in a dry run)")
+    ap.add_argument("--ignore-cameras", action="store_true",
+                    help="start even if the camera check (hands/camcheck.py) finds the upper cameras off")
     a = ap.parse_args()
 
     known = ("pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small")
@@ -2049,7 +2211,7 @@ def main():
     s = Session(base, profile, checklist, a.lighting, a.script, ring=a.ring, start_processes=not a.no_start,
                 dry_run=a.dry_run, speed=a.speed, on_status=on_status, hands_dir=a.hands_dir, panel_bin=a.panel,
                 auto=a.auto, next_after=a.next_after, poses_dir=a.poses, button=not a.no_headset_button,
-                button_device=a.button_device)
+                button_device=a.button_device, check_cameras=not a.ignore_cameras)
     est = plan_seconds(s.script, s.plan, auto=a.auto)
     worst = plan_seconds(s.script, s.plan, worst=True, auto=a.auto)
     print("%d sections, %s mode: about %.1f min%s (at most %.1f)%s" % (
@@ -2065,6 +2227,16 @@ def main():
             print("  %-18s %-9s %3d prompts %3d steps %5.0f s" % (sec["id"], sec["kind"], len(sec["prompts"]),
                                                                 section_steps(sec), section_seconds(sec, auto=a.auto)))
         return 0
+    if not a.dry_run and not a.ring:
+        cam = camera_check()
+        print("cameras: %s" % cam["summary"])
+        for line in cam.get("evidence", []):
+            print("  " + line)
+        if camera_text(cam):
+            print(camera_text(cam))
+            if not a.ignore_cameras:
+                print("Not starting (--ignore-cameras starts anyway).")
+                return 3
     if not a.dry_run:
         light = ring_lighting(a.ring)
         match = similar_lighting(base, {"chosen": a.lighting, "ring": light}) if light else None

@@ -207,6 +207,49 @@ Python, with NumPy and OpenCV. `setup/dev-container.sh` doesn't install them, be
 
 To try the hand cutouts without restarting the desktop, `screens/build/ft-handtest [--distance m] [--width m] [--seconds s]` (built by `screens/build.sh`, run in the dev container, with hand tracking on) shows a test panel of its own, a light grid 1 m wide and 0.8 m ahead by default, and cuts your hands out of it the way ft-screens cuts them out of the screens.
 
+## Camera check
+
+Hand tracking needs all four mono cameras and the headset's IR light. With the Arcturus colour module attached, SteamVR's XRService loads an FPGA image ("VCINT") onto the module every time it opens the cameras: when SteamVR starts and after every wake. When that load fails, XRService runs only the two side cameras, the frames come out darker and noisier, and ft-hands finds no hands at all. It happened on 2026-10-02 at 17:02, after the headset slept; the hand recorder then said "I can't see your hands" for a whole session.
+
+`hands/camcheck.py` (system Python, standard library) tells whether the four cameras run: `ok`, `degraded: upper cameras and IR light off (VCINT FPGA failed to load)` (or another `degraded:` reason), or `unknown` (SteamVR not running, the cameras closed while the headset sleeps). It prints the log lines and other evidence it used; `--json` is for programs; the exit status is 0, 1 or 2. It reads:
+- the running XRService's log (`~/.local/share/Steam/logs/xrservice.txt`): the last camera start (from the FPGA check to the next "Closing tracking camera interfaces"), its VCINT result, `Upper cameras FPGA interleaving support: N`, `Created N tasks (T tracking, P passthrough)` and the `TrackingCameraInit` lines. A wake that works prints no "Created N tasks", so an older one doesn't count;
+- which `/dev/video*` XRService has open (`/proc/PID/fd`; video9 and video13 are the side pair, video6 and video7 the upper pair). Only on the host: the dev container can't read another process's open files, so there it's skipped;
+- ft-camd's ring header, when it runs: how many mono cameras it publishes.
+
+The hand recorder runs it before a session (DESIGN.md, "Camera check"). `hands/tests/test_camcheck.py` runs it on the 2026-10-02 log cut at several points, and on made-up logs.
+
+### The watcher (off by default)
+
+`hands/ft-camwatch` follows the XRService log (a stat every 2 s, reading only what's new). On a VCINT failure it posts a notification in the Frametop desktop, on the desktop's own D-Bus, found through its plasmashell as `decoration/apply.sh` does. With `CAMWATCH_AUTO_RESTART=1` in `~/.config/frametop.conf` it also restarts SteamVR, but only:
+- while the headset isn't worn (frame-job's check: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` is over 0), and after it has been off for `CAMWATCH_IDLE_S` (60);
+- with no app Steam launched (`SteamLaunch AppId=N` in a process's arguments; `CAMWATCH_IGNORE_APPIDS` lists ids that don't count) and nobody on the remote desktop (an established connection to the VNC port, `VNC_PORT`, 5900);
+- once per failure, and not again within `CAMWATCH_COOLDOWN_MIN` (30) of the last automatic restart. It remembers both in `~/.local/state/frametop/camwatch.json`, so its own restart doesn't reset them.
+
+It logs every decision to the journal. `ft-camwatch --once` prints the state and what it would do, and does nothing; `--dry-run` keeps watching without acting. `hands/frametop-camwatch.service` is the unit (a template, `@REPO@` as in the others; nothing installs or enables it yet). It isn't `PartOf=steamvr.service`, so it outlives the restart it asks for. `CAMWATCH_NOTIFY=0` turns the notification off. `hands/tests/test_camwatch.py` tests its decisions with made-up inputs.
+
+### What a SteamVR restart does to Frametop
+
+Read from the code on the experimental branch, not tried live:
+- ft-screens quits when SteamVR does: on `VREvent_Quit` it ends its Wayland display (`screens/vr.cpp`, `ft_vr_poll`; `screens/compositor.c`, `handle_vr_event`). It never connects to SteamVR again: `ft_vr_init` runs once, at its start.
+- KWin runs nested in ft-screens, so the Frametop desktop ends with it, every window in it too (the hand recorder's as well). Its unit, `frametop-desktop`, is a transient `systemd-run` unit with `Restart=no`, so the desktop doesn't come back by itself: start it again (Desktop in the library, or `desktops.sh start`).
+- When the unit stops, systemd ends what's left in it. `session/keep-apps.sh` moves programs started in the desktop out of the unit first, but only `desktops.sh stop` runs it; here they stop too. Programs in the dev container (ft-screens, the hand recorder) are in the container's cgroup and end when their Wayland connection goes.
+- The units that are `PartOf=steamvr.service` restart with it: `frametop-camd`, `frametop-hands`, the pointer helper, gaze and power, and the hand recorder's own transient ft-camd and ft-hands units.
+
+### Verified, and what's a guess
+
+Verified, from the XRService logs of 2026-10-01 and 2026-10-02 and the running system:
+- The failure's log lines and its effect: "Failed to load VCINT FPGA image when passthrough cameras are connected", interleaving support 0, "Created 4 tasks (2 tracking, 2 passthrough)", and only video9 and video13 opened. At 19:38-19:59 XRService held only those two of the four (plus video0 and video3), and ft-camd published two mono cameras.
+- A wake's load can work and can fail. Both wakes in the logs started from an FPGA that answered nothing ("ERROR/UNKNOWN"): the one at 2026-10-01 16:39 loaded VCINT, the one at 2026-10-02 17:02 failed ("FPGA config_done signal did not assert").
+- After a reboot the FPGA reads PASSTHRU and SteamVR's start loads VCINT (2026-10-01 21:53, 2026-10-02 13:39).
+- A SteamVR restart within a boot found VCINT still loaded and loaded nothing (2026-10-01 15:27): XRService checks the FPGA when it starts and loads only when it must.
+
+Guesses, not tested:
+- **Whether a SteamVR restart fixes it.** After a failed load the FPGA doesn't answer, so a new XRService would run the same load a wake runs, which has worked once and failed once. It's never been tried after a failure. If it doesn't help, only a reboot is known to work (the FPGA comes up as PASSTHRU, and the load at SteamVR's start has worked both times).
+- That the IR light is off because of the FPGA: the frames are darker and the illuminator ring isn't seen, and the FPGA loader lists a `room_led_en` pin, but nothing shows the light's state directly.
+- That a sleep and wake (taking the headset off long enough) would retry the load too: it should, since every wake loads VCINT, but no failure has been followed by a wake yet.
+- How the Frametop desktop behaves on a SteamVR restart (above): read from the code only.
+- That Steam-launched apps carry `SteamLaunch AppId=N`: from Steam on other Linux systems; no VR game has run on the Frame to confirm it.
+
 ## Build
 
 `hands/build.sh` builds in the dev container on the Frame, into `hands/build/`, with `hands/Makefile`. The first build fetches ncnn at a pinned tag (`NCNN_TAG` in the Makefile) and builds it into `hands/build/ncnn`, which takes a few minutes; `NCNN=DIR` points at an ncnn install already built instead. ft-camd is linked statically, because it runs on the host, which has an older glibc than the container.
@@ -218,4 +261,5 @@ To try the hand cutouts without restarting the desktop, `screens/build/ft-handte
 - **The colour calibration mapping isn't settled.** Which colour camera is `passthrough_left` (`HANDS_COLOR_LEFT`) and how the module's crop applies (`HANDS_COLOR_CROP`) still need `tools/check_color.py` on a recording with a lit, textured view.
 - **Depth when one camera loses the hand.** A hand seen in one camera drifts 10% per update toward the one-camera depth guess (`kMonoDepthGain`, 0.1, in `track/tracker.cpp`). In the 2026-09-30 replays that was worse than keeping the last distance (see "3D" above). A smaller gain, such as 0.02, is the next thing to try.
 - **Pinches aren't reliable enough for everyday use yet.** That's why hand tracking stays off until `ft-handsctl on`, and `POINTER_HANDS` is 0 by default.
+- **SteamVR can leave the upper cameras and the IR light off after a wake**, and then no hands are found. See "Camera check" above: `camcheck.py` tells, the hand recorder won't start a session, and the fix is a SteamVR restart or a reboot.
 - **Floating windows don't get hand cutouts.** Their panels show crops of the client buffer, which the cutouts' side-by-side buffer doesn't match (`screens/vr.cpp`, `UpdateCutouts`).
