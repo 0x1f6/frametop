@@ -785,7 +785,8 @@ def main():
     # pointer: the 3D mouse while it's in use, pointer_conf: the one the config asks for (they
     # differ while Frametop is paused).
     state = {"pointer": None, "pointer_conf": None, "rules": {}, "share_keys": False,
-             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0, "vr_bind_retry": False}
+             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0, "vr_bind_retry": False,
+             "pointer_holding": False}
 
     def pause_changed(paused):
         """Frametop paused or resumed (game_pause.py): the relay's own part."""
@@ -1292,6 +1293,12 @@ def main():
             if added:
                 apply_roles()
 
+        # The 3D mouse connecting or letting go moves a hand role, so the pause gesture's reader
+        # looks the controllers up again (game_pause.py).
+        holding = bool(state["pointer_conf"] and state["pointer_conf"].active)
+        if holding != state["pointer_holding"]:
+            state["pointer_holding"] = holding
+            pause.controllers_changed()
         ready, _, _ = select.select(list(nodes) + [control], [], [],
                                     min(volume.timeout(now, pointer.timeout() if pointer else 0.5), pause.timeout(now)))
         now = time.monotonic()
