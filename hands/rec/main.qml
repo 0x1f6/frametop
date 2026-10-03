@@ -1494,7 +1494,7 @@ Kirigami.ApplicationWindow {
                 if (backend.uploading) return ""
                 if (backend.hubDryRun) return ""
                 if (!backend.uploadAllowed) return "Contributions aren't open yet"
-                if (!loggedIn) return "Log in to Hugging Face first (below)"
+                if (!loggedIn) return "Log in first (step 2)"
                 return ""
             }
 
@@ -1555,262 +1555,285 @@ Kirigami.ApplicationWindow {
                     }
                 }
 
-                Kirigami.FormLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
                     visible: uploadView.exported.length > 0
-                    Controls.ComboBox {
-                        id: exportBox
-                        Kirigami.FormData.label: "Export:"
-                        model: uploadView.exported
-                        textRole: "label"
-                        valueRole: "id"
-                        enabled: !backend.uploading
-                        Component.onCompleted: currentIndex = Math.max(0, indexOfValue(root.chosenSession))
-                        onActivated: root.chosenSession = currentValue
-                    }
+                    spacing: Kirigami.Units.largeSpacing
+
                     Controls.Label {
-                        Kirigami.FormData.label: "Size:"
-                        text: uploadView.chosen ? uploadView.chosen.exportText : ""
-                    }
-                    Controls.Label {
-                        Kirigami.FormData.label: "Goes to:"
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
                         textFormat: Text.StyledText
-                        text: "<a href=\"" + backend.datasetUrl + "\">" + backend.dataset + "</a>, as a pull request"
+                        text: "Your export goes to <a href=\"" + backend.datasetUrl + "\">" + backend.dataset + "</a> as a "
+                              + "pull request from your own Hugging Face account. Nothing is published until the "
+                              + "maintainer has checked it."
                         onLinkActivated: link => Qt.openUrlExternally(link)
                     }
+
+                    // 1. The export
+                    Kirigami.Heading { level: 3; text: "1. Choose the export" }
                     RowLayout {
-                        Kirigami.FormData.label: "Hugging Face:"
-                        Controls.Label {
+                        Layout.fillWidth: true
+                        Controls.ComboBox {
+                            id: exportBox
+                            Layout.fillWidth: true
                             Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+                            model: uploadView.exported
+                            textRole: "label"
+                            valueRole: "id"
+                            enabled: !backend.uploading
+                            Component.onCompleted: currentIndex = Math.max(0, indexOfValue(root.chosenSession))
+                            onActivated: root.chosenSession = currentValue
+                        }
+                        Controls.Label {
+                            opacity: 0.7
+                            text: uploadView.chosen ? uploadView.chosen.exportText : ""
+                        }
+                    }
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: uploadView.chosen !== null && uploadView.chosen.export_stale
+                        type: Kirigami.MessageType.Warning
+                        text: "This session changed since it was exported. Export it again so the upload has your latest deletions."
+                    }
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: uploadView.session !== "" && uploadView.info.previous.export_sha !== undefined
+                        type: Kirigami.MessageType.Information
+                        text: "This export was uploaded on " + (uploadView.info.previous.uploaded || "") + ": "
+                              + (uploadView.info.previous.pr_url || "") + ". There's no need to upload it again."
+                    }
+
+                    // 2. The login: Log in opens Hugging Face in the browser, where the person approves
+                    // it. The token goes from there to hub.py, never into this window.
+                    Kirigami.Heading { level: 3; text: "2. Log in to Hugging Face" }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: loginState !== "waiting"
+                        readonly property string loginState: backend.login.state
+                        Kirigami.Icon {
+                            visible: parent.loginState === "ok"
+                            source: "checkmark"
+                            implicitWidth: Kirigami.Units.iconSizes.small
+                            implicitHeight: implicitWidth
+                        }
+                        Controls.BusyIndicator {
+                            visible: ["checking", "starting", "unknown"].indexOf(parent.loginState) >= 0
+                            running: visible
+                            implicitWidth: Kirigami.Units.gridUnit * 1.5
+                            implicitHeight: implicitWidth
+                        }
+                        Controls.Label {
+                            Layout.fillWidth: true
+                            visible: parent.loginState !== "waiting"
                             wrapMode: Text.Wrap
-                            text: backend.login.state === "dry" ? "not checked in a dry run"
-                                  : backend.login.state === "unknown" ? "not checked yet"
-                                  : backend.login.state === "none" ? "not logged in"
+                            text: parent.loginState === "dry" ? "Not needed for a dry run."
+                                  : parent.loginState === "unknown" ? "Checking your login"
+                                  : parent.loginState === "none"
+                                    ? "Press Log in. Hugging Face opens in your browser: sign in, or make a free "
+                                      + "account, then enter the code this page shows."
                                   : backend.login.text || ""
                         }
                         Controls.Button {
-                            visible: backend.login.state !== "dry"
+                            visible: ["none", "read", "error", "ok"].indexOf(parent.loginState) >= 0
+                            text: parent.loginState === "ok" ? "Use another account" : "Log in"
+                            icon.name: parent.loginState === "ok" ? "system-switch-user" : "im-user-online"
+                            flat: parent.loginState === "ok"
+                            enabled: !backend.uploading
+                            onClicked: backend.logIn()
+                        }
+                        Controls.Button {
+                            visible: parent.loginState === "error"
                             text: "Check again"
                             icon.name: "view-refresh"
-                            enabled: backend.login.state !== "checking"
                             onClicked: backend.checkLogin()
                         }
                     }
-                }
-
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: uploadView.chosen !== null && uploadView.chosen.export_stale
-                    type: Kirigami.MessageType.Warning
-                    text: "This session changed since it was exported. Export it again so the upload has your latest deletions."
-                }
-
-                // Not logged in: how to log in, in a terminal. The token never goes into this window.
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== "" && ["none", "read", "error", "missing"].indexOf(backend.login.state) >= 0
-                    type: backend.login.state === "error" ? Kirigami.MessageType.Error : Kirigami.MessageType.Warning
-                    text: backend.login.state === "none"
-                          ? "You're not logged in to Hugging Face. Open a terminal (Konsole) and run the command below. "
-                            + "Paste a token with the Write role when it asks (steps 1 to 3 below say how to make one). "
-                            + "The token goes only into that terminal, never into this window. Then press Check again."
-                          : backend.login.text || ""
-                    actions: backend.login.link ? [linkAction] : []
-                    Kirigami.Action {
-                        id: linkAction
-                        text: "Open"
-                        icon.name: "internet-services"
-                        onTriggered: Qt.openUrlExternally(backend.login.link)
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== "" && ["none", "read"].indexOf(backend.login.state) >= 0
-                    Controls.TextField {
-                        id: loginCommand
+                    Kirigami.InlineMessage {
                         Layout.fillWidth: true
-                        readOnly: true
-                        font.family: "monospace"
-                        text: backend.loginCommand + (backend.login.state === "read" ? " --force" : "")
-                    }
-                    Controls.Button {
-                        text: "Copy command"
-                        icon.name: "edit-copy"
-                        onClicked: backend.copy(loginCommand.text)
-                    }
-                }
-
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== "" && uploadView.info.previous.export_sha !== undefined
-                    type: Kirigami.MessageType.Information
-                    text: "This export was uploaded on " + (uploadView.info.previous.uploaded || "") + ": "
-                          + (uploadView.info.previous.pr_url || "") + ". There's no need to upload it again."
-                }
-
-                RowLayout {
-                    visible: uploadView.session !== ""
-                    Controls.Button {
-                        text: backend.uploading ? "Uploading…" : backend.hubDryRun ? "Upload (dry run)" : "Upload"
-                        icon.name: "cloud-upload"
-                        enabled: uploadView.blocked === "" && !backend.uploading
-                        onClicked: uploadView.startUpload()
-                    }
-                    Controls.BusyIndicator {
-                        visible: backend.uploading
-                        running: visible
-                        implicitWidth: Kirigami.Units.gridUnit * 1.5
-                        implicitHeight: implicitWidth
-                    }
-                    Controls.Button {
-                        visible: backend.uploading
-                        text: "Cancel"
-                        icon.name: "dialog-cancel"
-                        onClicked: backend.cancelUpload()
-                    }
-                    Controls.Label {
-                        visible: !backend.uploading && uploadView.blocked !== ""
-                        opacity: 0.7
-                        text: uploadView.blocked
-                    }
-                }
-
-                // Progress: a share while the export is checked, a sweeping bar while it's sent
-                // (huggingface_hub doesn't report progress). Drawn here, as on the Export page.
-                Rectangle {
-                    id: track
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 20
-                    implicitHeight: Kirigami.Units.smallSpacing * 2
-                    visible: backend.uploading
-                    radius: height / 2
-                    clip: true
-                    color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.15)
-                    readonly property bool unknown: uploadView.up.fraction === undefined || uploadView.up.fraction < 0
-                    Rectangle {
-                        id: fill
-                        height: parent.height
-                        radius: parent.radius
-                        color: Kirigami.Theme.highlightColor
-                        width: track.unknown ? parent.width / 4 : parent.width * Math.max(0, Math.min(1, uploadView.up.fraction))
-                        x: 0
-                        SequentialAnimation on x {
-                            running: track.visible && track.unknown
-                            loops: Animation.Infinite
-                            onRunningChanged: if (!running) fill.x = 0
-                            NumberAnimation { from: -fill.width; to: track.width; duration: 1600 }
+                        visible: backend.login.state === "waiting"
+                        type: Kirigami.MessageType.Information
+                        text: "Hugging Face is open in your browser (" + (backend.login.url || "") + "). Sign in, or "
+                              + "make a free account, enter the code below and approve the login. If it asks about "
+                              + "organizations, leave them unticked. The code works for "
+                              + Math.round((backend.login.expires_in || 300) / 60) + " minutes; this page carries on "
+                              + "by itself once you've approved."
+                        actions: [openLogin, copyLogin, cancelLogin]
+                        Kirigami.Action {
+                            id: openLogin
+                            text: "Open again"
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(backend.login.url)
+                        }
+                        Kirigami.Action {
+                            id: copyLogin
+                            text: "Copy code"
+                            icon.name: "edit-copy"
+                            onTriggered: backend.copy(backend.login.code)
+                        }
+                        Kirigami.Action {
+                            id: cancelLogin
+                            text: "Cancel"
+                            icon.name: "dialog-cancel"
+                            onTriggered: backend.cancelLogin()
                         }
                     }
-                }
-                Controls.Label {
-                    Layout.fillWidth: true
-                    visible: uploadView.mine && (uploadView.up.text || "") !== ""
-                             && (backend.uploading || uploadView.up.phase === "failed" && uploadView.upError.kind === "cancelled")
-                    wrapMode: Text.Wrap
-                    text: uploadView.up.text || ""
-                }
+                    Controls.Label {
+                        visible: backend.login.state === "waiting"
+                        Layout.leftMargin: Kirigami.Units.gridUnit
+                        text: backend.login.code || ""
+                        font.family: "monospace"
+                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 2.5
+                        font.letterSpacing: 4
+                    }
 
-                // The pull request is open and the files are on their way: time to plug in.
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: backend.uploading && uploadView.mine && (uploadView.up.pr_url || "") !== ""
-                    type: Kirigami.MessageType.Positive
-                    text: "Your pull request is open: " + (uploadView.up.pr_url || "") + ". The files are uploading "
-                          + "to it now, which can take a while. Plug in the headset and leave it plugged in until "
-                          + "this page says Uploaded. You can take the headset off: it stays awake until the upload "
-                          + "is done. Keep the Hand Recorder open."
-                    actions: [openOpenedPr, copyOpenedPr]
-                    Kirigami.Action {
-                        id: openOpenedPr
-                        text: "Open"
-                        icon.name: "internet-services"
-                        onTriggered: Qt.openUrlExternally(uploadView.up.pr_url)
-                    }
-                    Kirigami.Action {
-                        id: copyOpenedPr
-                        text: "Copy link"
-                        icon.name: "edit-copy"
-                        onTriggered: backend.copy(uploadView.up.pr_url)
-                    }
-                }
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: !backend.uploading && uploadView.mine && uploadView.up.phase === "done"
-                    type: Kirigami.MessageType.Positive
-                    text: uploadView.upResult.dry_run
-                          ? "Dry run: the export passed its checks. It would go to " + uploadView.upResult.repo + "/"
-                            + uploadView.upResult.path_in_repo + " (" + uploadView.upResult.files + " files). Nothing was sent."
-                          : "Uploaded. Your pull request: " + (uploadView.upResult.pr_url || "")
-                            + ". The maintainer reviews it before it joins the dataset."
-                    actions: uploadView.upResult.pr_url ? [openPr, copyPr] : []
-                    Kirigami.Action {
-                        id: openPr
-                        text: "Open"
-                        icon.name: "internet-services"
-                        onTriggered: Qt.openUrlExternally(uploadView.upResult.pr_url)
-                    }
-                    Kirigami.Action {
-                        id: copyPr
-                        text: "Copy link"
-                        icon.name: "edit-copy"
-                        onTriggered: backend.copy(uploadView.upResult.pr_url)
-                    }
-                }
-                Kirigami.InlineMessage {
-                    Layout.fillWidth: true
-                    visible: !backend.uploading && uploadView.mine && uploadView.up.phase === "failed"
-                             && uploadView.upError.kind !== "cancelled"
-                    type: Kirigami.MessageType.Error
-                    text: (uploadView.upError.text || "")
-                          + ((uploadView.upError.errors || []).length ? "\n\n• " + uploadView.upError.errors.join("\n• ") : "")
-                    actions: uploadView.upError.link ? [openErrorLink] : []
-                    Kirigami.Action {
-                        id: openErrorLink
-                        text: "Open"
-                        icon.name: "internet-services"
-                        onTriggered: Qt.openUrlExternally(uploadView.upError.link)
-                    }
-                }
-                Controls.TextArea {
-                    Layout.fillWidth: true
-                    visible: uploadView.mine && (uploadView.up.log || "") !== ""
-                    readOnly: true
-                    selectByMouse: true
-                    wrapMode: Text.WrapAnywhere
-                    font.family: "monospace"
-                    text: uploadView.up.log || ""
-                }
-
-                Kirigami.Separator {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== ""
-                }
-                Kirigami.Heading {
-                    level: 3
-                    visible: uploadView.session !== ""
-                    text: "Or upload from a terminal"
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== ""
-                    Controls.TextArea {
-                        id: command
+                    // 3. The upload
+                    Kirigami.Heading { level: 3; text: "3. Upload" }
+                    Controls.Label {
                         Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        textFormat: Text.StyledText
+                        text: "The first time, accept the dataset's terms on <a href=\"" + backend.datasetUrl
+                              + "\">its page</a>. Upload checks the export, opens your pull request, then sends the files."
+                        onLinkActivated: link => Qt.openUrlExternally(link)
+                    }
+                    RowLayout {
+                        Controls.Button {
+                            text: backend.uploading ? "Uploading…" : backend.hubDryRun ? "Upload (dry run)" : "Upload"
+                            icon.name: "cloud-upload"
+                            enabled: uploadView.blocked === "" && !backend.uploading
+                            onClicked: uploadView.startUpload()
+                        }
+                        Controls.BusyIndicator {
+                            visible: backend.uploading
+                            running: visible
+                            implicitWidth: Kirigami.Units.gridUnit * 1.5
+                            implicitHeight: implicitWidth
+                        }
+                        Controls.Button {
+                            visible: backend.uploading
+                            text: "Cancel"
+                            icon.name: "dialog-cancel"
+                            onClicked: backend.cancelUpload()
+                        }
+                        Controls.Label {
+                            visible: !backend.uploading && uploadView.blocked !== ""
+                            opacity: 0.7
+                            text: uploadView.blocked
+                        }
+                    }
+
+                    // Progress: a share while the export is checked, a sweeping bar while it's sent
+                    // (huggingface_hub doesn't report progress). Drawn here, as on the Export page.
+                    Rectangle {
+                        id: track
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                        implicitHeight: Kirigami.Units.smallSpacing * 2
+                        visible: backend.uploading
+                        radius: height / 2
+                        clip: true
+                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.15)
+                        readonly property bool unknown: uploadView.up.fraction === undefined || uploadView.up.fraction < 0
+                        Rectangle {
+                            id: fill
+                            height: parent.height
+                            radius: parent.radius
+                            color: Kirigami.Theme.highlightColor
+                            width: track.unknown ? parent.width / 4 : parent.width * Math.max(0, Math.min(1, uploadView.up.fraction))
+                            x: 0
+                            SequentialAnimation on x {
+                                running: track.visible && track.unknown
+                                loops: Animation.Infinite
+                                onRunningChanged: if (!running) fill.x = 0
+                                NumberAnimation { from: -fill.width; to: track.width; duration: 1600 }
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        visible: uploadView.mine && (uploadView.up.text || "") !== ""
+                                 && (backend.uploading || uploadView.up.phase === "failed" && uploadView.upError.kind === "cancelled")
+                        wrapMode: Text.Wrap
+                        text: uploadView.up.text || ""
+                    }
+
+                    // The pull request is open and the files are on their way: time to plug in.
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: backend.uploading && uploadView.mine && (uploadView.up.pr_url || "") !== ""
+                        type: Kirigami.MessageType.Positive
+                        text: "Your pull request is open: " + (uploadView.up.pr_url || "") + ". The files are uploading "
+                              + "to it now, which can take a while. Plug in the headset and leave it plugged in until "
+                              + "this page says Uploaded. You can take the headset off: it stays awake until the upload "
+                              + "is done. Keep the Hand Recorder open."
+                        actions: [openOpenedPr, copyOpenedPr]
+                        Kirigami.Action {
+                            id: openOpenedPr
+                            text: "Open"
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(uploadView.up.pr_url)
+                        }
+                        Kirigami.Action {
+                            id: copyOpenedPr
+                            text: "Copy link"
+                            icon.name: "edit-copy"
+                            onTriggered: backend.copy(uploadView.up.pr_url)
+                        }
+                    }
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: !backend.uploading && uploadView.mine && uploadView.up.phase === "done"
+                        type: Kirigami.MessageType.Positive
+                        text: uploadView.upResult.dry_run
+                              ? "Dry run: the export passed its checks. It would go to " + uploadView.upResult.repo + "/"
+                                + uploadView.upResult.path_in_repo + " (" + uploadView.upResult.files + " files). Nothing was sent."
+                              : "Uploaded. Your pull request: " + (uploadView.upResult.pr_url || "")
+                                + ". The maintainer reviews it before it joins the dataset."
+                        actions: uploadView.upResult.pr_url ? [openPr, copyPr] : []
+                        Kirigami.Action {
+                            id: openPr
+                            text: "Open"
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(uploadView.upResult.pr_url)
+                        }
+                        Kirigami.Action {
+                            id: copyPr
+                            text: "Copy link"
+                            icon.name: "edit-copy"
+                            onTriggered: backend.copy(uploadView.upResult.pr_url)
+                        }
+                    }
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: !backend.uploading && uploadView.mine && uploadView.up.phase === "failed"
+                                 && uploadView.upError.kind !== "cancelled"
+                        type: Kirigami.MessageType.Error
+                        text: (uploadView.upError.text || "")
+                              + ((uploadView.upError.errors || []).length ? "\n\n• " + uploadView.upError.errors.join("\n• ") : "")
+                        actions: uploadView.upError.link ? [openErrorLink] : []
+                        Kirigami.Action {
+                            id: openErrorLink
+                            text: "Open"
+                            icon.name: "internet-services"
+                            onTriggered: Qt.openUrlExternally(uploadView.upError.link)
+                        }
+                    }
+                    Controls.TextArea {
+                        Layout.fillWidth: true
+                        visible: uploadView.mine && (uploadView.up.log || "") !== ""
                         readOnly: true
                         selectByMouse: true
                         wrapMode: Text.WrapAnywhere
                         font.family: "monospace"
-                        text: backend.uploadCommand(uploadView.session)
+                        text: uploadView.up.log || ""
                     }
-                    Controls.Button {
-                        text: "Copy command"
-                        icon.name: "edit-copy"
-                        onClicked: backend.copy(command.text)
+
+                    Kirigami.Separator { Layout.fillWidth: true; visible: uploadView.session !== "" }
+                    MarkdownText {
+                        Layout.fillWidth: true
+                        visible: uploadView.session !== ""
+                        markdown: backend.uploadText(uploadView.session)
                     }
-                }
-                MarkdownText {
-                    Layout.fillWidth: true
-                    visible: uploadView.session !== ""
-                    markdown: backend.uploadText(uploadView.session)
                 }
             }
         }

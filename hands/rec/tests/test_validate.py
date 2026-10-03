@@ -315,6 +315,43 @@ class SessionFilesTest(unittest.TestCase):
         self.assertEqual(validate.validate(path).errors, [])
 
 
+class LoginTest(unittest.TestCase):
+    """hub.login: the link and code go out first, the token is saved by huggingface_hub and never
+    passed on, and a refused login is a "login" error. huggingface_hub's helpers are faked."""
+
+    def setUp(self):
+        try:
+            import huggingface_hub._login
+            import huggingface_hub.utils._oauth_device
+        except ImportError as e:
+            self.skipTest(f"no huggingface_hub browser login: {e}")
+        self.login_mod = huggingface_hub._login
+        self.device = huggingface_hub.utils._oauth_device
+
+    def test_code_then_saved(self):
+        told, saved = [], []
+        info = {"verification_uri_complete": "https://hf.co/oauth/device", "user_code": "ABCD-1234", "expires_in": 300}
+        with mock.patch.object(self.device, "request_device_code", return_value=info), \
+                mock.patch.object(self.device, "poll_device_token", return_value={"access_token": "secret"}), \
+                mock.patch.object(self.login_mod, "_save_oauth_token", side_effect=saved.append), \
+                mock.patch.object(hub, "whoami", return_value={"name": "someone", "role": ""}):
+            who = hub.login(lambda phase, text, **extra: told.append(dict(extra, phase=phase)))
+        self.assertEqual(told, [{"phase": "code", "url": info["verification_uri_complete"], "code": "ABCD-1234",
+                                 "expires_in": 300}])
+        self.assertEqual(saved, [{"access_token": "secret"}])
+        self.assertEqual(who["name"], "someone")
+        self.assertNotIn("secret", json.dumps(told) + json.dumps(who))
+
+    def test_refused(self):
+        from huggingface_hub.errors import DeviceCodeError
+        info = {"verification_uri_complete": "u", "user_code": "c", "expires_in": 300}
+        with mock.patch.object(self.device, "request_device_code", return_value=info), \
+                mock.patch.object(self.device, "poll_device_token", side_effect=DeviceCodeError("access_denied")):
+            with self.assertRaises(hub.HubError) as cm:
+                hub.login()
+        self.assertEqual(cm.exception.kind, "login")
+
+
 class HubTest(unittest.TestCase):
     """hub.py without the network: the dry run, the draft gate, upload records."""
 

@@ -31,7 +31,6 @@ import datetime
 import json
 import os
 import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -40,7 +39,7 @@ import time
 import uuid
 
 from PySide6.QtCore import Property, QObject, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPalette
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QImage, QPainter, QPalette
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -57,10 +56,6 @@ UPLOAD_PATH = hub.UPLOAD_PATH
 HUB_PATH = os.path.join(HERE, "hub.py")
 VALIDATE_PATH = os.path.join(HERE, "validate.py")
 AWAKE_UNIT = "frametop-handrec-awake.service"
-# What `hf auth login` needs: run in a terminal, where the token is typed (never in this window).
-# Frametop's Konsole has XDG_RUNTIME_DIR=/run/user/UID/frametop, where podman finds no container
-# state ("crun: error opening file .../status"), so the command sets the real one.
-LOGIN_COMMAND = "XDG_RUNTIME_DIR=/run/user/$(id -u) distrobox enter dev -- hf auth login"
 SCRIPT_PATH = os.path.join(HERE, "script.json")
 # The headset counts as worn while vrcompositor runs and a display panel is lit: SteamVR turns
 # the panels off 5 s after the headset comes off (frame-job's check; the proximity sensor's
@@ -220,6 +215,7 @@ class Backend(QObject):
     loginChanged = Signal()
     uploadChanged = Signal()
     _loginArrived = Signal(dict)
+    _loginLine = Signal(dict)
     _uploadLine = Signal(dict)
     _uploadFinished = Signal(dict)
     cameraChanged = Signal()
@@ -232,6 +228,8 @@ class Backend(QObject):
         self._hub_dry_run = hub_dry_run
         self._login = {"state": "dry" if hub_dry_run else "unknown"}
         self._login_busy = False
+        self._login_proc = None      # hub.py login: waiting for the browser
+        self._login_cancelled = False
         self._upload_proc = None
         self._upload_thread = None
         self._upload_cancelled = False
@@ -263,6 +261,7 @@ class Backend(QObject):
         self._exportProgress.connect(self._on_export_progress)
         self._exportFinished.connect(self._on_export_finished)
         self._loginArrived.connect(self._on_login)
+        self._loginLine.connect(self._on_login_line)
         self._uploadLine.connect(self._on_upload_line)
         self._uploadFinished.connect(self._on_upload_finished)
         self.disk_timer = QTimer(interval=30000, timeout=self.diskChanged.emit)
@@ -646,6 +645,7 @@ class Backend(QObject):
         if self._export_cancel:
             self._export_cancel.set()  # and wait, so export can remove its half-written copy
             self._export_thread.join(15)
+        self.cancelLogin()
         if self._upload_proc:
             self.cancelUpload()
             self._upload_thread.join(10)
@@ -901,17 +901,14 @@ class Backend(QObject):
     def allowUploadSet(self):
         return os.environ.get(hub.ALLOW_ENV) == "1"
 
-    @Property(str, constant=True)
-    def loginCommand(self):
-        return LOGIN_COMMAND
-
     def _hub_argv(self, *args):
         return [sys.executable, HUB_PATH, "--base", self.store.base, *args]
 
     # The login: hub.py whoami in a child process (it asks huggingface.co)
     @Property("QVariantMap", notify=loginChanged)
     def login(self):
-        """{"state": unknown|checking|ok|none|read|error|missing|dry, "name", "role", "text", "link"}."""
+        """{"state": unknown|checking|ok|none|read|error|missing|dry|starting|waiting, "name", "role",
+        "text", "link"}; while waiting, "url" and "code" (the browser login's)."""
         return self._login
 
     @Slot()
@@ -946,13 +943,18 @@ class Backend(QObject):
 
     def _on_login(self, result):
         self._login_busy = False
+        self._login_proc = None
+        if result.get("cancelled"):
+            self._login = {"state": "unknown"}
+            self.checkLogin()   # whatever was saved before is still there
+            return
         if "done" in result:
             who = result["done"]
             role = who.get("role", "")
             if role == "read":
                 self._login = {"state": "read", "name": who.get("name", ""), "role": role, "link": hub.TOKENS_URL,
-                               "text": f"Logged in as {who.get('name', '')}, but with a read-only token: uploads "
-                                       "need a token with the Write role. Log in again with one."}
+                               "text": f"Logged in as {who.get('name', '')}, but with a read-only token, which "
+                                       "can't upload. Log in again."}
             else:
                 self._login = {"state": "ok", "name": who.get("name", ""), "role": role,
                                "text": f"Logged in as {who.get('name', '')}"}
@@ -961,6 +963,62 @@ class Backend(QObject):
             state = {"login": "none", "missing": "missing"}.get(e.get("kind"), "error")
             self._login = {"state": state, "text": e.get("text", "The login check failed"), "link": e.get("link", "")}
         self.loginChanged.emit()
+
+    # The browser login: hub.py login --json in a child process. It gets a link and a short code;
+    # the link opens in the browser, the person types the code there (Hugging Face doesn't fill it
+    # in, 2026-10-03) and approves, and hub.py saves the token. The token never reaches this process.
+    @Slot()
+    def logIn(self):
+        if self._hub_dry_run or self._login_proc or self._login_busy:
+            return
+        try:
+            proc = subprocess.Popen(self._hub_argv("login", "--json"), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        except OSError as e:
+            self._on_login({"error": {"kind": "hub", "text": f"Couldn't start the login: {e}"}})
+            return
+        self._login_proc = proc
+        self._login_cancelled = False
+        self._login_busy = True
+        self._login = {"state": "starting", "text": "Getting a login link from Hugging Face"}
+        self.loginChanged.emit()
+
+        def run():
+            last = {}
+            for line in proc.stdout:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    if "done" in obj or "error" in obj:
+                        last = obj
+                    else:
+                        self._loginLine.emit(obj)
+            err = proc.stderr.read()
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+            if self._login_cancelled:
+                last = {"cancelled": True}
+            elif not last:
+                tail = (err.strip().splitlines() or [f"exit status {proc.returncode}"])[-1]
+                last = {"error": {"kind": "hub", "text": f"The login stopped: {tail}"}}
+            self._loginArrived.emit(last)
+        self._thread(run)
+
+    @Slot()
+    def cancelLogin(self):
+        if self._login_proc and self._login_proc.poll() is None:
+            self._login_cancelled = True
+            self._login_proc.terminate()
+
+    def _on_login_line(self, obj):
+        if obj.get("phase") == "code" and obj.get("url"):
+            self._login = {"state": "waiting", "url": obj["url"], "code": obj.get("code", ""),
+                           "expires_in": obj.get("expires_in", 0), "text": obj.get("text", "")}
+            self.loginChanged.emit()
+            QDesktopServices.openUrl(QUrl(obj["url"]))
 
     # The upload: hub.py upload --json in a child process; its lines say how it goes
     @Property(bool, notify=uploadChanged)
@@ -1073,31 +1131,18 @@ class Backend(QObject):
         self.uploadChanged.emit()
         self.sessionsChanged.emit()
 
-    # The manual way, for a terminal (UPLOAD.md)
-    @Slot(str, result=str)
-    def uploadCommand(self, session):
-        try:
-            path = self.store.export_dir(session)
-        except ValueError:
-            return ""
-        contributor = self.contributor or "CONTRIBUTOR"
-        check = " ".join(["python3", shlex.quote(VALIDATE_PATH), shlex.quote(path)])
-        upload = " ".join(["hf", "upload", self.dataset, shlex.quote(path), f"contributions/{contributor}/{session}",
-                           "--repo-type", "dataset", "--create-pr",
-                           "--commit-message", shlex.quote(f"Hands: session {session} from {contributor}")])
-        return check + " && " + upload
-
     @Slot(str, result=str)
     def uploadText(self, session):
-        """UPLOAD.md with this export's path, size and command filled in."""
+        """UPLOAD.md with this export's path and size filled in."""
         try:
             path = self.store.export_dir(session)
         except ValueError:
             return ""
         values = {"EXPORT_PATH": path, "EXPORT_SIZE": takes.human_bytes(takes.tree_bytes(path)),
-                  "CONTRIBUTOR": self.contributor or "CONTRIBUTOR", "SESSION": session, "DATASET": self.dataset,
-                  "COMMAND": self.uploadCommand(session), "LOGIN": LOGIN_COMMAND}
+                  "CONTRIBUTOR": self.contributor or "CONTRIBUTOR", "SESSION": session, "DATASET": self.dataset}
         text = read_text(UPLOAD_PATH) or "UPLOAD.md is missing."
+        if hub.is_draft(UPLOAD_PATH):
+            text = text.split("\n", 1)[-1]   # the page's banner says it already
         return re.sub(r"@([A-Z_]+)@", lambda m: values.get(m.group(1), m.group(0)), text)
 
     @Slot(QColor)

@@ -3,8 +3,13 @@
 
 The window runs this as a child process (so Cancel can end it, and huggingface_hub stays out
 of the window's process); it also runs from the command line. It uses huggingface_hub (in the
-dev container: python3-huggingface-hub, from setup/dev-container.sh) with the token that
-`hf auth login` saved. It never asks for or handles a token itself.
+dev container: python3-huggingface-hub, from setup/dev-container.sh) with the login that
+`hub.py login` (the window's Log in) or `hf auth login` saved. Nobody types a token anywhere.
+
+`login` is huggingface_hub's browser login (OAuth device code, as `hf auth login` does): it gets a
+link and a short code, the person enters the code in their browser and approves, and the token goes
+straight from Hugging Face into huggingface_hub's token file. This process saves it; it never
+prints it, and the window never sees it.
 
 An upload:
   1. checks the export with validate.py, and stops on errors;
@@ -23,10 +28,12 @@ it would upload.
 The dataset is HF_DATASET; FT_HANDREC_DATASET overrides it (a test repo, for rehearsals).
 
 usage: hub.py [--base DIR] whoami [--json]
+       hub.py [--base DIR] login [--json]
        hub.py [--base DIR] upload SESSION [--dry-run] [--again] [--json]
 With --json, each line of output is one JSON object: {"phase", "text", "fraction"} as it goes,
 with {"phase": "opened", "pr_url"} once the pull request exists, then {"done": {...}} or
-{"error": {"kind", "text", "link", "errors"}}. Exit status 0: done.
+{"error": {"kind", "text", "link", "errors"}}. login says {"phase": "code", "url", "code",
+"expires_in"} once it has the link, then {"done": {"name", "role"}}. Exit status 0: done.
 """
 import argparse
 import datetime
@@ -204,7 +211,7 @@ def explain(e, repo):
     url = dataset_url(repo)
     if hf is not None:
         if isinstance(e, hf.LocalTokenNotFoundError):
-            return HubError("login", "You're not logged in to Hugging Face. Log in with hf auth login (see below).")
+            return HubError("login", "You're not logged in to Hugging Face. Press Log in.")
         if isinstance(e, hf.GatedRepoError):
             return HubError("terms", f"Accept the dataset's terms first: open {url}, read them and accept them, "
                                      "then try again.", url)
@@ -215,12 +222,11 @@ def explain(e, repo):
             status = getattr(getattr(e, "response", None), "status_code", None)
             first = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
             if status == 401:
-                return HubError("login", "Hugging Face didn't accept your token (it may have been deleted or have "
-                                         "expired). Log in again with hf auth login.", TOKENS_URL)
+                return HubError("login", "Hugging Face didn't accept your login (it may have expired or been "
+                                         "revoked). Log in again.")
             if status == 403:
-                return HubError("permission", "Your token isn't allowed to open a pull request. Create a token with "
-                                              "the Write role and log in again with it: hf auth login --force.",
-                                TOKENS_URL)
+                return HubError("permission", "Your login isn't allowed to open a pull request. Log in again, "
+                                              "and allow everything the Hugging Face page asks for.")
             return HubError("hub", f"Hugging Face refused the upload ({status or 'no status'}): {first}")
     try:
         import httpx
@@ -243,6 +249,31 @@ def whoami():
         raise explain(e, dataset_id()) from None
     token = ((info.get("auth") or {}).get("accessToken") or {})
     return {"name": info.get("name", ""), "role": token.get("role", "")}
+
+
+def login(progress=None):
+    """The browser login: progress("code", text, url=, code=, expires_in=) once the link is ready,
+    then wait (up to the code's expiry: 5 minutes on 2026-10-03) for the person to approve it, and save
+    the token. Returns whoami(). Uses huggingface_hub's own device code helpers (1.x)."""
+    tell = progress or (lambda phase, text, **extra: None)
+    _hf()
+    try:
+        from huggingface_hub._login import _save_oauth_token
+        from huggingface_hub.errors import DeviceCodeError
+        from huggingface_hub.utils._oauth_device import poll_device_token, request_device_code
+    except ImportError:
+        raise HubError("missing", "This huggingface_hub has no browser login: update the dev container "
+                                  "(setup/dev-container.sh).") from None
+    try:
+        info = request_device_code()
+        tell("code", "Approve the login in your browser", url=info["verification_uri_complete"],
+             code=info["user_code"], expires_in=info["expires_in"])
+        _save_oauth_token(poll_device_token(info))
+    except DeviceCodeError as e:
+        raise HubError("login", f"The login didn't go through: {e}. Press Log in to try again.") from None
+    except Exception as e:
+        raise explain(e, dataset_id()) from None
+    return whoami()
 
 
 def upload(store, session, dry_run=False, again=False, progress=None, log=None):
@@ -305,9 +336,8 @@ def upload(store, session, dry_run=False, again=False, progress=None, log=None):
         raise explain(e, repo) from None
     role = ((who.get("auth") or {}).get("accessToken") or {}).get("role", "")
     if role == "read":
-        raise HubError("read-token", "Your saved token can only read, so it can't open a pull request. Create one "
-                                     "with the Write role and log in again with it: hf auth login --force.",
-                       TOKENS_URL)
+        raise HubError("read-token", "Your saved login is a read-only token, so it can't open a pull request. "
+                                     "Log in again.")
     tell("access", f"Checking access to {repo}", None)
     try:
         api.auth_check(repo, repo_type="dataset")
@@ -360,6 +390,8 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("whoami", help="show the saved Hugging Face login")
     w.add_argument("--json", action="store_true")
+    li = sub.add_parser("login", help="log in to Hugging Face in the browser")
+    li.add_argument("--json", action="store_true")
     u = sub.add_parser("upload", help="upload exports/SESSION as a pull request")
     u.add_argument("session")
     u.add_argument("--dry-run", action="store_true", help="no network: say what would be uploaded")
@@ -377,6 +409,18 @@ def main():
                 emit({"done": who})
             else:
                 print(f"logged in as {who['name']} (token role: {who['role'] or 'unknown'})")
+            return 0
+        if a.cmd == "login":
+            def code(phase, text, **extra):
+                if a.json:
+                    emit(dict(extra, phase=phase, text=text))
+                else:
+                    print(f"Open {extra['url']} and approve the code {extra['code']}. Waiting...", flush=True)
+            who = login(code)
+            if a.json:
+                emit({"done": who})
+            else:
+                print(f"logged in as {who['name']}")
             return 0
         if a.json:
             def progress(phase, text, fraction=None, **extra):
