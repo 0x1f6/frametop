@@ -78,12 +78,12 @@
 
   {"id": "controller-push", "title": "Depth with controllers", "kind": "bar", "requires": ["controllers"],
    "before": {"text": "Put on both controllers and tighten the straps. Take your time.", "seconds": 25},
-   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. The marker on the bar shows how far: right is arm out, left is at your chest.",
+   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. Follow the hollow circle on the bar: right is arm out, left is at your chest. The blue dot is the current hand tracking's guess at how far your hands are. It's only an approximation and often wrong, so ignore it.",
    "defaults": {"hands": "both", "pose": "open", "picture": "push-controller", "controller": true, "controllers": ["left", "right"]},
    "near_m": 0.2, "far_m": 0.6, "near_label": "At your chest", "far_label": "Arm out", "period_s": 6, "lead_s": 3, "reps": 3,
    "heights": [
-    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the marker."},
-    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the marker."}
+    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the hollow circle, not the blue dot."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the hollow circle, not the blue dot."}
    ],
    "prompts": [
     {"text": "Controllers on: slowly turn your wrists, and open and close your hands, a few times.", "seconds": 10, "pose": "open-close", "distance": "mid"}
@@ -101,12 +101,12 @@
 
   {"id": "bare-push", "title": "Depth, bare hands", "kind": "bar", "requires": [],
    "before": {"when": "controllers", "text": "Take the controllers off and put them out of view.", "seconds": 15},
-   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. The marker on the bar shows how far: right is arm out, left is at your chest.",
+   "intro": "Push both hands straight out in front of you, away from the headset, then pull them back toward it. Only nearer and farther, not sideways. Follow the hollow circle on the bar: right is arm out, left is at your chest. The blue dot is the current hand tracking's guess at how far your hands are. It's only an approximation and often wrong, so ignore it.",
    "defaults": {"hands": "both", "pose": "open", "picture": "push"},
    "near_m": 0.2, "far_m": 0.6, "near_label": "At your chest", "far_label": "Arm out", "period_s": 6, "lead_s": 3, "reps": 3,
    "heights": [
-    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the marker."},
-    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the marker."}
+    {"id": "chest", "text": "Chest height, palms out like a stop sign. Push straight out, away from the headset, then pull back to your chest. Follow the hollow circle, not the blue dot."},
+    {"id": "eye", "text": "Now at eye level, palms out. Push straight out, away from the headset, then pull back toward it. Follow the hollow circle, not the blue dot."}
    ]},
 
   {"id": "no-hands", "title": "No hands", "requires": [], "quick": true,
