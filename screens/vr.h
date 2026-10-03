@@ -38,6 +38,14 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max);
 bool ft_vr_screens_shown(void);
 // Frametop is paused for a VR game ("pause on"): everything is hidden, and KWin slows down.
 bool ft_vr_paused(void);
+// How much of a screen you see, for its frame rate (compositor.c): hidden (or out of view),
+// in view, or focused (you look at it, or a laser or the mouse is on it). Focused without
+// SteamVR (--no-vr) or for an unknown screen.
+enum ft_attention { FT_HIDDEN, FT_IN_VIEW, FT_FOCUSED };
+enum ft_attention ft_vr_screen_attention(int index);
+// The display's refresh rate and the time since its last vsync, in seconds. False without
+// them (no SteamVR, or the headset isn't reporting).
+bool ft_vr_vsync(double *since, double *hz);
 // A panel for screen `index`, width in metres, placed in a row in front of the head.
 void ft_vr_screen_create(int index, double metres, int count);
 void ft_vr_screen_destroy(int index);
