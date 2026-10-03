@@ -56,9 +56,11 @@ CONSENT_PATH = hub.CONSENT_PATH
 UPLOAD_PATH = hub.UPLOAD_PATH
 HUB_PATH = os.path.join(HERE, "hub.py")
 VALIDATE_PATH = os.path.join(HERE, "validate.py")
-# What `hf auth login` needs: run in a terminal, where the token is typed (never in this window).
 AWAKE_UNIT = "frametop-handrec-awake.service"
-LOGIN_COMMAND = "distrobox enter dev -- hf auth login"
+# What `hf auth login` needs: run in a terminal, where the token is typed (never in this window).
+# Frametop's Konsole has XDG_RUNTIME_DIR=/run/user/UID/frametop, where podman finds no container
+# state ("crun: error opening file .../status"), so the command sets the real one.
+LOGIN_COMMAND = "XDG_RUNTIME_DIR=/run/user/$(id -u) distrobox enter dev -- hf auth login"
 SCRIPT_PATH = os.path.join(HERE, "script.json")
 # The headset counts as worn while vrcompositor runs and a display panel is lit: SteamVR turns
 # the panels off 5 s after the headset comes off (frame-job's check; the proximity sensor's
