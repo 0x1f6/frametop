@@ -10,7 +10,9 @@ directions: look at each one.
           once every QUICK_COOLDOWN, and on "quickcal" (Frametop Input Settings, or a mouse
           button or key combination mapped to Gaze quick check), and when a click's correction
           was past POINTER_GAZE_NUDGE_MAX (55 degrees; the helper's "recheck"): the tracker is
-          far off. Ignored, it closes after QUICK_TIMEOUT and changes nothing.
+          far off. Ignored, it closes after QUICK_TIMEOUT and changes nothing. The headset going
+          on is seen only while the gaze service is awake (gaze mode on, someone wearing it: see
+          ft-gazed), so it also opens when gaze mode comes on after the service idled.
   five    the middle and four around it, when the first FIVE_COUNT lessons after a quick check
           were all over FIVE_LIMIT degrees off: the quick check didn't fix it.
   full    the calibration, as the gaze probe's: three rounds, dark, medium and bright (pupil
@@ -29,6 +31,9 @@ directions: look at each one.
           seen) and hints, from the gaze probe's Headset fit (gaze/fitcheck.py), while you
           adjust the headset. A left click or Meta+J runs its guided check (dots, then looks
           down, up, left and right); a right click or Meta+K closes it, as does FIT_TIMEOUT.
+
+A check asked for while the gaze service idles (quickcal, calibrate, fitcheck) wakes it and
+waits until the tracker sends, at most ft-gazed's WAKE_SETTLE; then it opens, or logs why not.
 
 The quick check's dot captures itself: from CHECK_SETTLE after it shows (the eyes getting
 there), once the gaze has held within CHECK_SPREAD for CHECK_WINDOW (the probe's max spread and
@@ -209,7 +214,9 @@ class Checks:
         sel.register(self.out, selectors.EVENT_READ, "checks")
         self.check = None
         self.gaze_on = None
+        self.headset = None      # someone wears it (the helper's "worn"), False "away", None unknown
         self.gaze_heard = 0.0
+        self.pending = None      # (command words, when): asked for while the gaze service idled
         self.full_armed = True    # gaze mode on without a calibration opens the full one (need_full)
         self.full_blocked = None  # why it can't open now
         self.full_retry_at = 0.0
@@ -294,17 +301,22 @@ class Checks:
             pass
 
     def on_readable(self):
-        """Replies on our socket: the helper's "ok on|off" to "gaze ?"; the panel's are dropped."""
+        """Replies on our socket: the helper's "ok on|off [worn|away]" to "gaze ? headset" (an
+        older helper leaves the headset out); the panel's are dropped."""
         while True:
             try:
-                data = self.out.recv(4096).decode("utf-8", "replace")
+                words = self.out.recv(4096).decode("utf-8", "replace").split()
             except (BlockingIOError, OSError):
                 return
-            if data in ("ok on", "ok off"):
-                on = data == "ok on"
-                was, self.gaze_on, self.gaze_heard = self.gaze_on, on, time.monotonic()
-                if on and was is False:
+            if words[:1] == ["ok"] and len(words) in (2, 3) and words[1] in ("on", "off"):
+                on = words[1] == "on"
+                headset = None if len(words) == 2 else words[2] == "worn"
+                was = (self.gaze_on, self.headset)
+                self.gaze_on, self.headset, self.gaze_heard = on, headset, time.monotonic()
+                if on and was[0] is False:
                     self.on_gaze_on()
+                if was != (on, headset):
+                    self.svc.update_awake()
 
     # --- State ---
 
@@ -341,6 +353,8 @@ class Checks:
             self.full_blocked = None
             return
         now = time.monotonic()
+        if not self.can_run() and self.svc.waking():
+            return  # the tracker is still starting (the service idled)
         if not self.can_run():
             why = ("the eye tracker isn't sending" if now - self.svc.last_sample >= 2
                    else "no eyes seen (is the headset on?)")
@@ -490,6 +504,8 @@ class Checks:
 
     def on_sample(self, s):
         self.sample_at = time.monotonic()
+        if self.pending:
+            self.run_pending()
         unc = (s["src"].get("mmap1") or {}).get("unc")
         if unc and min(unc) <= EYE_LOST:
             self.seen_at = time.monotonic()
@@ -742,9 +758,28 @@ class Checks:
 
     # --- From the service ---
 
-    def command(self, words):
+    def run_pending(self):
+        """A check asked for while the service idled: once the tracker sends (and our tracker has
+        said whether it's calibrated), or WAKE_SETTLE after waking, when its error is the real one."""
+        svc = self.svc
+        words, _ = self.pending
+        ready = (time.monotonic() - svc.last_sample < 2 if words[0] == "fitcheck" else self.can_run()) \
+            and (svc.kind != "own" or self.calibrated() is not None)
+        if not ready and svc.waking():
+            return
+        self.pending = None
+        reply = self.command(words, queue=False)
+        if reply != "ok":
+            log(f"{words[0]}, asked for while idle: {reply.removeprefix('error ')}")
+
+    def command(self, words, queue=True):
         """quickcal, calibrate, calaccept, calquit -> a reply."""
         cmd = words[0]
+        if cmd in ("quickcal", "calibrate", "fitcheck") and queue and self.svc.waking() and not self.check:
+            # The tracker isn't running (or only just started): wake it, and do this once it sends.
+            self.pending = (words, time.monotonic())
+            self.svc.update_awake()
+            return "ok waking the eye tracker first"
         if cmd == "quickcal":
             return self.start("full" if self.calibrated() is False else "quick", "asked for")
         if cmd == "calibrate":
@@ -820,9 +855,11 @@ class Checks:
         now = time.monotonic()
         if not self.panel_proc and now >= self.panel_restart_at:
             self.start_panel()
-        self.to_helper("gaze ?")
+        self.to_helper("gaze ? headset")
         if now - self.gaze_heard > 5:
-            self.gaze_on = None  # the helper isn't answering
+            self.gaze_on = self.headset = None  # the helper isn't answering
+        if self.pending:
+            self.run_pending()
         if self.check:
             self.to_helper("calpanel 1")
         if not self.eyes_seen(AWAY_MIN):
@@ -844,7 +881,8 @@ class Checks:
 
     def status(self):
         c = self.check
-        st = {"check": None, "gaze_mode": self.gaze_on, "calibrated": self.calibrated(), "eyes": self.eyes_seen(),
+        st = {"check": None, "gaze_mode": self.gaze_on, "headset_worn": self.headset, "pending": self.pending[0][0]
+              if self.pending else None, "calibrated": self.calibrated(), "eyes": self.eyes_seen(),
               "problem": self.problem(),
               "panel": self.panel_proc is not None,
               "last_quick_s": round(time.monotonic() - self.last_quick) if self.last_quick else None}

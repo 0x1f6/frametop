@@ -32,7 +32,8 @@ keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the de
 pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
 window back (both to ft-floatd, @frametop_float), profile:NAME = switch to that profile (ft-layout
 use NAME: its screens and apps; docs/profiles.md), steam_menu = open the SteamVR dashboard on
-Steam's menu, or close the dashboard (steam/ft-steam menu, through Steam's UI), command:CMD = run
+Steam's menu, or close the dashboard (steam/ft-steam menu, through Steam's UI), pause_toggle =
+pause Frametop for a VR game, or resume it (game_pause.py), command:CMD = run
 CMD with sh -c (on the host, as this service: its environment, output to its log, and
 COMMAND_PATH, so ft-layout, ft-float and ft-steam need no path), key = pass through as a key, none).
 
@@ -45,8 +46,8 @@ A modifier on its own ("125": Meta) is a tap: pressed and released with no other
 button, or scroll in between; the desktop gets an F24 press before its release, so Plasma's
 launcher doesn't open on a Meta tap that's bound. A rules file without "key_bindings" gets
 DEFAULT_KEY_BINDINGS (Meta tap: steam_menu, Meta+J: gaze_left, Meta+K: gaze_right, Meta+Shift+F:
-float_toggle); one with its own, even an empty one, doesn't. The float, profile, Steam menu and
-command actions work without pointer mode too. A combination with Meta also sends the desktop an
+float_toggle); one with its own, even an empty one, doesn't. The float, profile, Steam menu,
+pause and command actions work without pointer mode too. A combination with Meta also sends the desktop an
 F24 press and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and
 a gaze click isn't Meta+click (KWin's window move and resize). Another key while Meta is still
 held gives the desktop Meta back. While typing goes to Steam, keyboards aren't grabbed, so Steam
@@ -92,6 +93,12 @@ keyboards) get their volume entries remapped to unused stand-in codes, so their
 other keys keep working for SteamVR; a device without a keymap that has only volume
 keys (the headset's pmic_resin) is grabbed. The keymaps go back when the relay exits.
 
+Frametop can pause for VR games (game_pause.py: by hand, with a controller gesture, or by itself
+while a game runs). Paused, it stops the services that cost the game CPU and GPU, and the relay
+plays a plain one: the pointer devices feed the virtual mouse and keyboard as without pointer
+mode, typing goes to Steam, and mapped buttons and key combinations do only pause_toggle,
+steam_menu and command:CMD (game_pause.PAUSED_ACTIONS).
+
 Pointer mode (POINTER=1 in ~/.config/frametop.conf) sends pointer devices to
 the ft-pointer helper (pointer/helper), which drives the ft_pointer
 SteamVR driver. With POINTER=0, pointer devices go to the virtual mouse and
@@ -104,7 +111,10 @@ Control socket (abstract datagram @frametop_relay, JSON replies to the sender):
   vrcapture <s>     take every controller button for s seconds (0: stop), so the settings
                     app can capture one; watchers see them as events with id frame_controller
   vrbtn, vrhello, gazeawake   from the pointer helper (above)
+  vrgame 1|0        from the pointer helper: a VR game runs (on a change and every 5 s), for pausing
   textfield 1|0     from the desktop's input method (above)
+  pause on|off|toggle [reason]   pause Frametop or resume it (input/ft-pause; the gesture reader)
+  pause ?           the pause state, as {"t": "pause", ...}
 
 Runs on the Frame host as a user service (frametop-input-relay.service). The
 virtual devices are parked in systemd's file descriptor store, so a relay
@@ -129,6 +139,8 @@ import struct
 import subprocess
 import sys
 import time
+
+import game_pause
 
 # Linux input constants (include/uapi/linux/input-event-codes.h, input.h, uinput.h).
 EV_SYN, EV_KEY, EV_REL, EV_MSC = 0x00, 0x01, 0x02, 0x04
@@ -196,7 +208,7 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right",
            "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "float_toggle",
-           "dock_all", "steam_menu", "key", "none")
+           "dock_all", "steam_menu", "pause_toggle", "key", "none")
 # Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
 # Key combinations a rules file without "key_bindings" gets: a Meta tap opens Steam's menu, Meta+J
@@ -229,7 +241,17 @@ def known_action(a):
 
 
 def needs_pointer(a):
-    return a not in FLOAT_ACTIONS and a != "steam_menu" and not a.startswith((PROFILE, COMMAND))
+    return a not in FLOAT_ACTIONS and a not in ("steam_menu", "pause_toggle") and not a.startswith((PROFILE, COMMAND))
+
+
+def works_paused(a):
+    """An action that still does something while Frametop is paused (game_pause.py)."""
+    return a in game_pause.PAUSED_ACTIONS or a.startswith(COMMAND)
+
+
+# What pressed pause_toggle, for the log (do_action's source).
+PAUSE_SOURCES = {"mouse": "mouse button", "keyboard": "key combination", "left": "controller button",
+                 "right": "controller button"}
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FT_LAYOUT = os.path.join(REPO, "layout", "ft-layout")
@@ -605,6 +627,22 @@ class Pointer:
         pending = (self.scroll_until, self.claim_at, self.claim_release, self.system_at, self.system_release)
         return 0.02 if any(t is not None for t in pending) else 0.5
 
+    def stand_down(self):
+        """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
+        if self.system_release is not None:
+            self.send("btn system 0")
+        if self.claim_release is not None:
+            self.send("btn a 0")
+        if self.scroll_until is not None:
+            self.send("scroll 0 0")
+        self.system_at = self.system_release = self.claim_at = self.claim_release = self.scroll_until = None
+        self.dx = self.dy = self.pending = 0
+        self.gaze_awake_until = 0.0
+        if self.active:
+            self.send("hide")
+            self.active = False
+            log("pointer off (paused)")
+
 
 class Node:
     """One input event node: a candidate device (mouse or keyboard, USB or Bluetooth),
@@ -688,23 +726,42 @@ def main():
     # desktop_until: typing goes to the Frametop desktop until then (ft-screens says so
     # every second); typing_applied: the grabs match that as of the last apply_roles().
     # vr_capture_until: every controller button is taken until then (the settings app capturing one).
-    state = {"pointer": None, "rules": {}, "share_keys": False,
+    # pointer: the 3D mouse while it's in use, pointer_conf: the one the config asks for (they
+    # differ while Frametop is paused).
+    state = {"pointer": None, "pointer_conf": None, "rules": {}, "share_keys": False,
              "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0}
+
+    def pause_changed(paused):
+        """Frametop paused or resumed (game_pause.py): the relay's own part."""
+        p = state["pointer_conf"]
+        if paused:
+            if p:
+                p.stand_down()
+            state["pointer"] = None
+            state["desktop_until"] = 0.0  # typing goes to Steam
+        else:
+            state["pointer"] = p
+        apply_roles()
+        vr_bind(time.monotonic())
+
+    pause = game_pause.GamePause(log, pause_changed, VR_BUTTONS)
 
     def load_config():
         conf = read_config()
         state["rules"] = read_rules()
         state["share_keys"] = conf.get("SHARE_KEYS", "0") == "1"
         if conf.get("POINTER", "0") == "1":
-            p = state["pointer"] or Pointer(0.03, 30)
+            p = state["pointer_conf"] or Pointer(0.03, 30)
             p.sensitivity = float(conf.get("POINTER_SENSITIVITY", "0.03"))
             p.idle = float(conf.get("POINTER_IDLE", "30"))
             p.wake_counts = int(conf.get("POINTER_WAKE_COUNTS", "40"))
-            state["pointer"] = p
+            state["pointer_conf"] = p
             log(f"pointer mode: {p.sensitivity} deg/count, idle {p.idle} s, wake {p.wake_counts} counts")
         else:
-            state["pointer"] = None
+            state["pointer_conf"] = None
             log("pointer mode off: pointer devices feed the virtual mouse and keyboard")
+        state["pointer"] = None if pause.paused else state["pointer_conf"]
+        pause.configure(state["rules"])
 
     load_config()
     tap = None  # the modifier (folded, MODIFIERS) pressed alone, with nothing since: its release is a tap
@@ -719,7 +776,7 @@ def main():
             state["vr_capture_until"] = 0.0
             buttons = " ".join(b for b, a in state["rules"]["controller_buttons"].items()
                                if b in VR_BUTTONS and known_action(a) and a not in ("key", "none")
-                               and a not in GAZE_ACTIONS) or "-"
+                               and a not in GAZE_ACTIONS and (not pause.paused or works_paused(a))) or "-"
             if state["rules"].get("controller_in_games"):
                 buttons = "+games " + buttons
         try:
@@ -764,6 +821,12 @@ def main():
     def do_action(action, value, now, source="mouse"):
         """A mapped mouse or controller button, or key combination (pointer mode only, but
         for the actions needs_pointer() says don't)."""
+        if action == "pause_toggle":
+            if value == 1:
+                pause.toggle(PAUSE_SOURCES.get(source, source), now)
+            return
+        if pause.paused and not works_paused(action):
+            return
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
@@ -832,7 +895,7 @@ def main():
             return value == 2 and code in combos_down
         combo = "+".join(str(c) for c in sorted(held_modifiers) + [code])
         action = state["rules"]["key_bindings"].get(combo)
-        if not known_action(action) or action in ("key", "none"):
+        if not known_action(action) or action in ("key", "none") or (pause.paused and not works_paused(action)):
             return False
         combos_down[code] = action
         if held_meta - meta_hidden:
@@ -853,7 +916,7 @@ def main():
     def modifier_tap(mod, now):
         """A modifier pressed and released alone: its binding, if it has one ("125": Meta tap)."""
         action = state["rules"]["key_bindings"].get(str(mod))
-        if not known_action(action) or action in ("key", "none"):
+        if not known_action(action) or action in ("key", "none") or (pause.paused and not works_paused(action)):
             return
         # The desktop gets a key in between before the release goes there, so the tap isn't one
         # there too: a Meta tap would open Plasma's launcher.
@@ -1054,7 +1117,7 @@ def main():
             try:
                 if cmd == "keyboard":
                     # From ft-screens (unbound, no reply): where typing goes, repeated every second.
-                    desktop = len(words) > 1 and words[1] == "desktop"
+                    desktop = len(words) > 1 and words[1] == "desktop" and not pause.paused
                     state["desktop_until"] = now + 3.0 if desktop else 0.0
                     continue
                 if cmd == "vrbtn" and len(words) == 3 and words[1] in VR_BUTTONS and words[2] in ("0", "1"):
@@ -1062,6 +1125,20 @@ def main():
                     continue
                 if cmd == "vrhello":
                     vr_bind(now)
+                    pause.helper_started()
+                    continue
+                if cmd == "vrgame" and len(words) == 2:
+                    pause.game_state(words[1] == "1", now)
+                    continue
+                if cmd == "pause" and len(words) >= 2 and words[1] in ("on", "off", "toggle", "?"):
+                    # From input/ft-pause, the settings app, or the gesture reader (unbound, no reply).
+                    reason = words[2] if len(words) > 2 else "command"
+                    if words[1] == "toggle":
+                        pause.toggle(reason, now)
+                    elif words[1] != "?":
+                        pause.set(words[1] == "on", reason, now)
+                    if addr:
+                        reply(addr, pause.status())
                     continue
                 if cmd == "textfield" and len(words) == 2:
                     text_field(words[1] == "1")
@@ -1073,7 +1150,8 @@ def main():
                 if not addr:
                     continue  # unbound sender, nowhere to reply
                 if cmd == "devices":
-                    reply(addr, {"t": "devices", "pointer_mode": state["pointer"] is not None,
+                    reply(addr, {"t": "devices", "pointer_mode": state["pointer_conf"] is not None,
+                                 "paused": pause.paused,
                                  "actions": ACTIONS,
                                  "nodes": [n.describe() for n in nodes.values() if n.candidate]})
                 elif cmd == "watch":
@@ -1156,16 +1234,18 @@ def main():
                 apply_roles()
 
         ready, _, _ = select.select(list(nodes) + [control], [], [],
-                                    volume.timeout(now, pointer.timeout() if pointer else 0.5))
+                                    min(volume.timeout(now, pointer.timeout() if pointer else 0.5), pause.timeout(now)))
         now = time.monotonic()
         if pointer:
             pointer.tick(now)
         volume.tick(now)
+        pause.tick(now)
         if state["vr_capture_until"] and now >= state["vr_capture_until"]:
             vr_bind(now)  # capture over: back to the mapped buttons
         if (now < state["desktop_until"]) != state["typing_applied"] or waiting:
             waiting = apply_roles()
         for fd in ready:
+            pointer = state["pointer"]  # (a pause or resume in this batch changes it)
             if fd is control:
                 handle_control(now)
                 continue
@@ -1220,7 +1300,7 @@ def main():
                     continue
                 if etype == EV_KEY:
                     action = buttons.get(str(code), DEFAULT_BUTTONS.get(code, "key"))
-                    if pointer and action not in ("key", "none"):
+                    if (pointer or action == "pause_toggle") and action not in ("key", "none"):
                         do_action(action, value, now)
                         continue
                     if action == "none":

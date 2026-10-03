@@ -3,8 +3,9 @@
 
 Runs the relay's main() against a fake pass-through keyboard and a fake mouse (pipes), with
 every socket it sends to renamed, no uinput devices, no grabs, and ft-steam swapped for a
-logger. Nothing reaches the live desktop, SteamVR, or the running relay, so it's safe next
-to them. Rules come from the test, not ~/.config/frametop-input.json.
+logger. Pausing (game_pause.py) is a stub: no threads, state file, or services. Nothing reaches
+the live desktop, SteamVR, or the running relay, so it's safe next to them. Rules come from the
+test, not ~/.config/frametop-input.json.
 
   input/test/keys-test.py [RELAY]   (default: input/input-relay.py next to this folder)
 """
@@ -26,7 +27,40 @@ with open(relay_path) as f:
     src = f.read().replace('"\\0frametop_relay"', f'"\\0{tag}_relay"')
 relay = importlib.util.module_from_spec(importlib.util.spec_from_loader("relay", loader=None))
 relay.__file__ = os.path.abspath(relay_path)
+sys.path.insert(0, os.path.dirname(os.path.abspath(relay_path)))  # its game_pause and vrws
 exec(compile(src, relay_path, "exec"), relay.__dict__)
+
+
+class StubPause:
+    """game_pause.GamePause without its threads, state file, or services."""
+    paused = False
+
+    def __init__(self, log, on_change, buttons):
+        self.on_change = on_change
+        stub["pause"] = self
+
+    def toggle(self, reason, now):
+        self.paused = not self.paused
+        self.on_change(self.paused)
+
+    def set(self, on, reason, now):
+        if on != self.paused:
+            self.toggle(reason, now)
+
+    def status(self):
+        return {"t": "pause", "paused": self.paused}
+
+    def timeout(self, now):
+        return 3600.0
+
+    def configure(self, *args):
+        pass
+
+    game_state = tick = helper_started = configure
+
+
+stub = {}
+relay.game_pause.GamePause = StubPause
 
 for name in ("SCREENS", "HELPER", "FLOAT", "GAZED", "KEYS"):
     setattr(relay, name, f"\0{tag}_{name.lower()}")
@@ -80,6 +114,7 @@ fake_os = type(os)("os")
 fake_os.__dict__.update(os.__dict__)
 fake_os.listdir = lambda path: ["event900", "event901"] if path == "/dev/input" else os.listdir(path)
 fake_os.stat = lambda path, *a, **k: Inode() if path in FAKE else os.stat(path, *a, **k)
+fake_os.access = lambda path, mode, *a, **k: path in FAKE or os.access(path, mode, *a, **k)
 relay.os = fake_os
 
 
@@ -143,6 +178,15 @@ def use(key_bindings):
     typed()
 
 
+def pause(cmd):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    c.bind("")
+    c.settimeout(2)
+    c.sendto(f"pause {cmd} test".encode(), f"\0{tag}_relay")
+    c.recv(4096)
+    time.sleep(0.05)
+
+
 def lines(path, wait=0.3):
     time.sleep(wait)
     try:
@@ -162,7 +206,7 @@ def check(label, got, want):
         failures.append(label)
 
 
-META, RMETA, SHIFT, CTRL, RCTRL, A, F, J = 125, 126, 42, 29, 97, 30, 33, 36
+META, RMETA, SHIFT, CTRL, RCTRL, A, F, J, P = 125, 126, 42, 29, 97, 30, 33, 36, 25
 F24 = ["key 194 1", "key 194 0"]
 
 
@@ -206,9 +250,25 @@ def tests():
     check("right Ctrl tap runs its command, which finds Frametop's tools", lines(cmd_log), ["combo", "3"])
     check("Ctrl tap: F24 before Ctrl's release", typed(), ["key 97 1"] + F24 + ["key 97 0"])
 
+    use({"125+36": "gaze_left", "29": f"command:echo paused >> {cmd_log}", "42+125+25": "pause_toggle"})
+    pause("on")
+    check("pause on: paused", stub["pause"].paused, True)
+    key(META, 1); key(J, 1); key(J, 0); key(META, 0)
+    check("paused: Meta+J (gaze click) does nothing and is typed as is", typed(),
+          ["key 125 1", "key 36 1", "key 36 0", "key 125 0"])
+    key(RCTRL, 1); key(RCTRL, 0)
+    check("paused: a command still runs", lines(cmd_log), ["combo", "3", "paused"])
+    typed()
+    key(SHIFT, 1); key(META, 1); key(P, 1); key(P, 0); key(META, 0); key(SHIFT, 0)
+    check("paused: Meta+Shift+P (pause_toggle) resumes", stub["pause"].paused, False)
+    check("Meta+Shift+P isn't typed", [k for k in typed() if k.startswith("key 25 ")], [])
+    key(META, 1); key(J, 1); key(J, 0); key(META, 0)
+    check("resumed: Meta+J is a combination again", typed(), ["key 125 1"] + F24 + ["key 125 0"])
+
     check("an empty command isn't an action", relay.known_action("command:  "), False)
-    check("steam_menu and commands work without pointer mode",
-          (relay.needs_pointer("steam_menu"), relay.needs_pointer("command:ls")), (False, False))
+    check("steam_menu, pause_toggle and commands work without pointer mode",
+          (relay.needs_pointer("steam_menu"), relay.needs_pointer("pause_toggle"), relay.needs_pointer("command:ls")),
+          (False, False, False))
     print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)
     shutil.rmtree(OUT, ignore_errors=True)
     os._exit(1 if failures else 0)

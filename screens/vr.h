@@ -36,6 +36,8 @@ void ft_vr_shutdown(void);
 int ft_vr_modifiers(uint32_t format, uint64_t *out, int max);
 // The screens are showing (by the visibility mode; not counting a wrist-pinned screen).
 bool ft_vr_screens_shown(void);
+// Frametop is paused for a VR game ("pause on"): everything is hidden, and KWin slows down.
+bool ft_vr_paused(void);
 // A panel for screen `index`, width in metres, placed in a row in front of the head.
 void ft_vr_screen_create(int index, double metres, int count);
 void ft_vr_screen_destroy(int index);

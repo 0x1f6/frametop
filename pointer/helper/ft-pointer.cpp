@@ -267,7 +267,8 @@
 //
 // Commands (datagrams on @ft_pointer_helper): show, hide, recenter, move <dyaw> <dpitch>,
 // follow on|off|toggle (head follow, until the next restart or a change to POINTER_FOLLOW),
-// gaze on|off|toggle|? (gaze mode, likewise with POINTER_GAZE; ? only asks), gz ... (the gaze, from ft-gazed),
+// gaze on|off|toggle|? (gaze mode, likewise with POINTER_GAZE; ? only asks, and "? headset" adds
+// worn|away to the reply), gz ... (the gaze, from ft-gazed),
 // reload (re-read the settings below), debug (toggle a twice-a-second state log),
 // overlays (replies with the overlay list as JSON, see OverlayList),
 // vrbind/vrglobal/vrstatus (Frame controller buttons, see vrbuttons.h),
@@ -931,8 +932,8 @@ int main() {
     Clock::time_point handUsed{};  // a gesture began then (keeps the pointer, like gaze mode)
     Clock::time_point lastTyping{};  // the relay's last "typing": a key on a keyboard
     // Gaze mode outside games, and its dot (see the top): lastMove/lastHeld/pulseAt.
-    bool inGame = false, gazeAwake = false;
-    Clock::time_point inGameAt{}, gazeAwakeAt{};
+    bool inGame = false, gazeAwake = false, gameSent = false;
+    Clock::time_point inGameAt{}, gazeAwakeAt{}, gameSentAt{};
     Clock::time_point lastMove{}, lastHeld{}, pulseAt{};
     // The left button, as sent to the driver; pressRight: the next press is the right button
     // instead (gaze_right), heldButton: the one pressed.
@@ -1283,6 +1284,13 @@ int main() {
                 gazeAwakeAt = t;
                 SendTo(out, "frametop_relay", awake ? "gazeawake 1" : "gazeawake 0");
             }
+            // The relay pauses Frametop for VR games (input/game_pause.py). Repeated, so a relay
+            // that restarts learns it, and silence (SteamVR gone) ends the game there.
+            if (inGame != gameSent || t - gameSentAt > std::chrono::seconds(5)) {
+                gameSent = inGame;
+                gameSentAt = t;
+                SendTo(out, "frametop_relay", inGame ? "vrgame 1" : "vrgame 0");
+            }
         }
 
         // Commands from the relay.
@@ -1380,7 +1388,12 @@ int main() {
                     std::printf("gaze mode %s\n", gazeOn ? "on" : "off");
                     std::fflush(stdout);
                 }
-                reply(gazeOn ? "ok on" : "ok off");
+                // "gaze ? headset" (the gaze service, which idles while nobody wears the headset)
+                // also says whether someone does.
+                if (std::strstr(arg, "headset"))
+                    reply(gazeOn ? (headsetOff ? "ok on away" : "ok on worn") : (headsetOff ? "ok off away" : "ok off worn"));
+                else
+                    reply(gazeOn ? "ok on" : "ok off");
                 continue;
             }
             const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||

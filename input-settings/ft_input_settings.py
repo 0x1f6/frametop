@@ -15,6 +15,9 @@ to the input relay over its control socket (@frametop_relay):
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
+  - Games: pausing Frametop while a VR game runs, so it leaves the CPU and GPU to the game
+    (input/game_pause.py, in the relay: "pause on|off|?"): pause now, pause by itself during VR
+    games, the controller gesture that pauses and resumes, what happens to the desktop, a sound.
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
     (gaze/ft-gazed, @ft_gazed: status, forget, reload), with its eye tracker (SteamVR's or
     our own) and eye bias (GAZE_TRACKER, GAZE_EYE in frametop.conf).
@@ -73,6 +76,7 @@ ACTION_LABELS = {
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
     "float_toggle": "Float window in VR / put it back", "dock_all": "Put all floating windows back",
+    "pause_toggle": "Pause/resume Frametop (for VR games)",
     "key": "Pass through as key",
     "none": "Do nothing",
 }
@@ -95,6 +99,13 @@ CONTROLLER_BUTTONS = {
     "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
     "right/thumbstick": "Right stick click",
 }
+# Pausing for VR games (input/game_pause.py): the gesture a rules file without "pause_gesture" gets,
+# both thumbsticks clicked together twice, and what can happen to the desktop.
+DEFAULT_PAUSE_GESTURE = {"buttons": ["left/thumbstick", "right/thumbstick"], "presses": 2}
+PAUSE_DESKTOP_MODES = {"hide": "Hide it and slow it down (windows stay open)",
+                       "close": "Close it (windows close; it starts again when you resume)"}
+PAUSE_REASONS = {"game": "a VR game started", "gesture": "controller gesture", "command": "ft-pause",
+                 "settings": "from here"}
 # Gaze mode is a mouse and keyboard feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
 CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none") + GAZE_ACTIONS]
@@ -293,6 +304,7 @@ class Backend(QObject):
     gazeChanged = Signal()
     driverChanged = Signal()
     panelsChanged = Signal()
+    pauseChanged = Signal()
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
     capturedController = Signal(str, str)  # button, label
@@ -320,6 +332,8 @@ class Backend(QObject):
         self._check_asked = 0.0  # when quickcal or calibrate went to the gaze service (its errors)
         self._driver_block = ""  # set by _check_driver
         self._panels = None  # SteamVR's overlays, from the helper; None until it answers
+        self._pause = {}  # the relay's pause state ("pause ?"), {} when it doesn't answer
+        self._pause_at = 0.0
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.sock.bind("")  # autobind an abstract address the relay can reply to
         self.sock.setblocking(False)
@@ -352,6 +366,7 @@ class Backend(QObject):
 
     def _refresh(self):
         self._send("devices")
+        self._send("pause ?")
         self._send("vrstatus", HELPER)
         self._send("gaze ?", HELPER)
         if not self._send("status", GAZED) and self._gaze:
@@ -365,6 +380,9 @@ class Backend(QObject):
         if self._gaze_mode is not None and now - self._gaze_at > 5:
             self._gaze_mode = None
             self.gazeChanged.emit()
+        if self._pause and now - self._pause_at > 5:
+            self._pause = {}
+            self.pauseChanged.emit()
 
     def _check_driver(self):
         block = driver_block()
@@ -403,13 +421,20 @@ class Backend(QObject):
             if t == "devices":
                 self._nodes = msg.get("nodes", [])
                 self._pointer_mode = bool(msg.get("pointer_mode"))
-                self._relay_ok = True
+                was_ok, self._relay_ok = self._relay_ok, True
+                if not was_ok:
+                    self.pauseChanged.emit()  # (pauseStatus' "old")
                 self.devicesChanged.emit()
             elif t == "overlays":
                 panels = [o for o in msg.get("list", []) if isinstance(o, dict) and isinstance(o.get("key"), str)]
                 if panels != self._panels:
                     self._panels = panels
                     self.panelsChanged.emit()
+            elif t == "pause":
+                self._pause_at = time.monotonic()
+                if msg != self._pause:
+                    self._pause = msg
+                    self.pauseChanged.emit()
             elif t == "vrstatus":
                 self._vr = msg
                 self._vr_at = time.monotonic()
@@ -817,6 +842,108 @@ class Backend(QObject):
         else:
             self.message.emit("The pointer helper isn't running (frametop-pointer.service)", True)
 
+    # --- pausing for VR games ---
+    @Property("QVariantMap", notify=pauseChanged)
+    def pauseStatus(self):
+        """The relay's pause state, and a line saying it ("relay": False when it doesn't answer)."""
+        st = self._pause
+        if not st:
+            # "old": the relay answers, but not about pausing (it predates it).
+            return {"relay": False, "old": self._relay_ok, "paused": False,
+                    "summary": "Unknown: the input relay " + ("can't pause" if self._relay_ok else "isn't answering")}
+        if st.get("paused"):
+            reason = PAUSE_REASONS.get(st.get("reason"), st.get("reason") or "")
+            summary = f"Paused since {time.strftime('%H:%M', time.localtime(st.get('since') or time.time()))}"
+            summary += f" ({reason})" if reason else ""
+            if st.get("ends_with_game"):
+                summary += ", until the game ends"
+        else:
+            summary = "Running" + (", with a VR game" if st.get("game") else "")
+        if st.get("busy"):
+            summary += "; working on it…"
+        return {"relay": True, "paused": bool(st.get("paused")), "summary": summary,
+                "gestureReader": bool(st.get("gesture_reader"))}
+
+    @Slot(bool)
+    def setPaused(self, on):
+        if self._send(f"pause {'on' if on else 'off'} settings"):
+            QTimer.singleShot(300, self._refresh)
+        else:
+            self.message.emit("The input relay isn't running (frametop-input-relay.service)", True)
+
+    def _set_rule(self, key, value, text):
+        rules = read_json(RULES_PATH)
+        rules[key] = value
+        self._save_rules(rules)
+        self.message.emit(text, False)
+
+    @Property(bool, notify=mappingsChanged)
+    def pauseAuto(self):
+        return read_json(RULES_PATH).get("pause_auto", True) is not False
+
+    @Slot(bool)
+    def setPauseAuto(self, on):
+        self._set_rule("pause_auto", bool(on), "VR games pause Frametop" if on else "VR games no longer pause Frametop")
+
+    @Property("QVariantList", constant=True)
+    def pauseDesktopModes(self):
+        return [{"value": k, "text": v} for k, v in PAUSE_DESKTOP_MODES.items()]
+
+    @Property(str, notify=mappingsChanged)
+    def pauseDesktop(self):
+        mode = read_json(RULES_PATH).get("pause_desktop")
+        return mode if mode in PAUSE_DESKTOP_MODES else "hide"
+
+    @Slot(str)
+    def setPauseDesktop(self, mode):
+        if mode in PAUSE_DESKTOP_MODES:
+            self._set_rule("pause_desktop", mode, "Paused, the desktop: " + PAUSE_DESKTOP_MODES[mode].split(" (")[0].lower())
+
+    @Property(bool, notify=mappingsChanged)
+    def pauseSound(self):
+        return read_json(RULES_PATH).get("pause_sound", True) is not False
+
+    @Slot(bool)
+    def setPauseSound(self, on):
+        self._set_rule("pause_sound", bool(on), "A sound on pause and resume" if on else "No sound on pause and resume")
+
+    @Property("QVariantList", constant=True)
+    def gestureButtons(self):
+        return [{"value": "", "text": "None"}] + [{"value": b, "text": label} for b, label in CONTROLLER_BUTTONS.items()]
+
+    @Property("QVariantMap", notify=mappingsChanged)
+    def pauseGesture(self):
+        """{"first", "second" ("" for none), "presses"} (the relay's game_pause.gesture_of)."""
+        spec = read_json(RULES_PATH).get("pause_gesture", DEFAULT_PAUSE_GESTURE)
+        buttons = [b for b in (spec or {}).get("buttons", []) if b in CONTROLLER_BUTTONS][:2] \
+            if isinstance(spec, dict) and isinstance(spec.get("buttons"), list) else []
+        presses = 1 if len(buttons) == 2 and spec.get("presses") == 1 else 2
+        return {"first": buttons[0] if buttons else "", "second": buttons[1] if len(buttons) > 1 else "",
+                "presses": presses}
+
+    @Slot(str, str, int)
+    def setPauseGesture(self, first, second, presses):
+        """No first button: no gesture. One button always takes two presses."""
+        buttons = list(dict.fromkeys(b for b in (first, second) if b in CONTROLLER_BUTTONS))
+        if not buttons:
+            self._set_rule("pause_gesture", None, "No controller gesture pauses Frametop")
+            return
+        presses = 1 if len(buttons) == 2 and presses == 1 else 2
+        self._set_rule("pause_gesture", {"buttons": buttons, "presses": presses},
+                       "Pause gesture: " + self.gestureText(buttons, presses))
+
+    @staticmethod
+    def gestureText(buttons, presses):
+        names = " and ".join(CONTROLLER_BUTTONS[b] for b in buttons)
+        together = " together" if len(buttons) == 2 else ""
+        return f"{names}{together}, {'twice' if presses == 2 else 'once'}"
+
+    @Property(str, notify=mappingsChanged)
+    def pauseGestureText(self):
+        g = self.pauseGesture
+        buttons = [b for b in (g["first"], g["second"]) if b]
+        return self.gestureText(buttons, g["presses"]) if buttons else "None"
+
     # --- gaze ---
     def _gaze_status(self, status):
         now = time.monotonic()
@@ -1035,6 +1162,12 @@ class Backend(QObject):
             self.message.emit("The gaze service read the calibration again", False)
         else:
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def keepGazeAwake(self):
+        """The Gaze page is open: the gaze service doesn't idle meanwhile (its status stays live,
+        and a check opens without waiting for the tracker). The page renews this every 10 s."""
+        self._send("wake 30", GAZED)
 
     @Slot()
     def gazeQuickCheck(self):
