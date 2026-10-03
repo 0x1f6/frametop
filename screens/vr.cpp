@@ -966,6 +966,19 @@ void SendFloat(const std::string &msg) {
         std::printf("to ft-floatd: %s\n", msg.c_str());
 }
 
+// A new panel: the pointer helper reads SteamVR's list of panels only every 20 s, so it's told
+// at once ("overlay <key>"), or the mouse couldn't click a menu until then.
+void AnnounceOverlay(const char *key) {
+    static const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const char name[] = "ft_pointer_helper";
+    std::memcpy(addr.sun_path + 1, name, sizeof name - 1);
+    const std::string msg = std::string("overlay ") + key;
+    sendto(fd, msg.data(), msg.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&addr),
+           socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1));
+}
+
 // Where a device's ray meets the screen's plane, in the screen's x (right) and y (up),
 // metres from its centre.
 bool RayOnPlane(const Mat &p, const Mat &d, double *x, double *y) {
@@ -1313,6 +1326,7 @@ void SetSub(Screen &s, int index, int k, int x, int y, int w, int h) {
         vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
         vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, s.lasers);
         vr::VROverlay()->SetOverlaySortOrder(sub.overlay, 5);
+        AnnounceOverlay(key);
         it = s.subs.emplace(k, sub).first;
         if (s.shown) {
             auto imp = g_imports.find(s.shown);
@@ -1573,7 +1587,7 @@ void UpdateSteamInFront() {
         g_keyboardAside = true;
     } else if (!front && g_keyboardAside) {
         g_keyboardAside = false;
-        keyboard::Show(g_asidePose);
+        if (keyboard::Show(g_asidePose)) AnnounceOverlay("frametop.keyboard");
     }
 }
 
@@ -2020,7 +2034,9 @@ bool ft_vr_keyboard_show(int index) {
         std::printf("keyboard: waiting for Steam to close\n");
         return true;
     }
-    return keyboard::Show(FacingPose(at, head));
+    if (!keyboard::Show(FacingPose(at, head))) return false;
+    AnnounceOverlay("frametop.keyboard");
+    return true;
 }
 
 void ft_vr_keyboard_hide(void) {

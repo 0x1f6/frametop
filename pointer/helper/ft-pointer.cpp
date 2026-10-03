@@ -582,6 +582,17 @@ public:
         for (const auto &e : entries_) keys.push_back(e.key);
         return keys;
     }
+    // A panel just made by another Frametop program (ft-screens: a floating window's menu, the
+    // keyboard): known at once, without waiting for the next read ("overlay <key>").
+    void Add(const std::string &key) {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            for (const auto &e : entries_)
+                if (e.key == key) return;
+            entries_.push_back({key, key, true});
+        }
+        ++generation_;
+    }
     // Goes up by one each time the list is read, so the main loop knows to look the keys up again.
     unsigned Generation() const { return generation_; }
     // Answer `to` with {"t":"overlays","list":[{"key","name","visible"}...]} after the next refresh.
@@ -1520,6 +1531,10 @@ int main() {
             }
             if (std::strncmp(buf, "vrstatus", 8) == 0) {
                 reply(controllerButtons.Status());
+                continue;
+            }
+            if (std::strncmp(buf, "overlay ", 8) == 0 && std::strncmp(buf + 8, "frametop.", 9) == 0) {
+                overlays.Add(buf + 8);
                 continue;
             }
             if (std::strncmp(buf, "overlays", 8) == 0) {
