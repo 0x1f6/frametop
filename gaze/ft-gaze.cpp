@@ -4,7 +4,14 @@
 // Every eye tracker sample (90 Hz) becomes one JSON line on stdout with each gaze source
 // hit-tested against the Frametop screens:
 //
-// Options: -v (log action errors), --watch-stdin (quit when stdin closes).
+// Options: -v (log action errors), --watch-stdin (quit when stdin closes; until then, a line
+// "sources LIST" on stdin switches the sources as --sources does), --sources LIST (comma-
+// separated: action, mmap1, mmap2, left, right, own, and eye for EYE; or all, the default).
+// Sources left out are read not at all and print as {"ok":0} ("eye" as null), so every line
+// keeps the same keys. The gaze service asks for the ones it uses (own and mmap1 with our
+// tracker), and all of them while a check or the calibration runs. Only the action costs
+// SteamVR anything (two calls into vrserver per sample), and a line with every source is
+// about 1.5 KB, 130 KB a second through podman's relay.
 //
 //   {"t":<sample time, CLOCK_MONOTONIC_RAW s>,"age":<ms old when read>,"n":<sample counter>,
 //    "head":{"yaw":..,"pitch":..,"hit":HIT},          head forward ray (for head nudging)
@@ -391,6 +398,30 @@ std::string SrcJson(const std::vector<Screen> &screens, const vr::HmdMatrix34_t 
     return buf + extra + "\"hit\":" + HitJson(screens, head, yaw, pitch) + "}";
 }
 
+// Sources (--sources, "sources LIST" on stdin): a bit each.
+enum : unsigned { kAction = 1, kMmap1 = 2, kMmap2 = 4, kLeft = 8, kRight = 16, kOwn = 32, kEye = 64, kAll = 127 };
+
+bool ParseSources(const std::string &list, unsigned &mask) {
+    static const struct {
+        const char *name;
+        unsigned bit;
+    } names[] = {{"action", kAction}, {"mmap1", kMmap1}, {"mmap2", kMmap2}, {"left", kLeft},
+                 {"right", kRight},   {"own", kOwn},     {"eye", kEye},     {"all", kAll}};
+    unsigned m = 0;
+    size_t at = 0;
+    while (at <= list.size()) {
+        const size_t comma = std::min(list.find(',', at), list.size());
+        const std::string name = list.substr(at, comma - at);
+        bool known = false;
+        for (const auto &n : names)
+            if (name == n.name) m |= n.bit, known = true;
+        if (!known) return false;
+        at = comma + 1;
+    }
+    mask = m;
+    return true;
+}
+
 // Head poses of the last half second, so a sample can use the pose at its own time.
 class PoseHistory {
 public:
@@ -428,9 +459,17 @@ std::string ExeDir() {
 
 int main(int argc, char **argv) {
     bool verbose = false, watchStdin = false;
+    std::atomic<unsigned> sources{kAll};
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-v") == 0) verbose = true;
         if (std::strcmp(argv[i], "--watch-stdin") == 0) watchStdin = true;
+        if (std::strcmp(argv[i], "--sources") == 0 && i + 1 < argc) {
+            unsigned m;
+            if (ParseSources(argv[++i], m))
+                sources = m;
+            else
+                std::fprintf(stderr, "ft-gaze: --sources %s: unknown source (all used)\n", argv[i]);
+        }
     }
     // Nice 5, before any thread starts (they inherit it): we run in the dev container's podman
     // scope, beside vrcompositor and vrserver at nice 0, and the gaze service's unit doesn't
@@ -442,11 +481,20 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "ft-gaze: nice: %s\n", std::strerror(errno));
     // --watch-stdin: quit when stdin closes. The probe runs us through distrobox, which
     // passes neither its signals nor a closed stdout on to us, but does pass stdin's end.
+    // Lines on stdin until then: "sources LIST".
     std::atomic<bool> stdinClosed{false};
     if (watchStdin)
-        std::thread([&stdinClosed] {
+        std::thread([&stdinClosed, &sources] {
             char c[256];
-            while (read(0, c, sizeof c) > 0) {
+            std::string line;
+            ssize_t n;
+            while ((n = read(0, c, sizeof c)) > 0) {
+                line.append(c, size_t(n));
+                for (size_t nl; (nl = line.find('\n')) != std::string::npos; line.erase(0, nl + 1)) {
+                    unsigned m;
+                    if (line.compare(0, 8, "sources ") == 0 && ParseSources(line.substr(8, nl - 8), m)) sources = m;
+                }
+                if (line.size() > 4096) line.clear();  // no newline in sight: not ours
             }
             stdinClosed = true;
         }).detach();
@@ -519,6 +567,7 @@ int main(int argc, char **argv) {
 
         if (fresh && hp.bPoseIsValid) {
             lastEmit = now;
+            const unsigned want = sources;
             const auto list = screens.Get();
             const vr::HmdMatrix34_t &headNow = hp.mDeviceToAbsoluteTracking;
             vr::HmdMatrix34_t headThen = headNow;
@@ -527,7 +576,7 @@ int main(int argc, char **argv) {
             // SteamVR's action: a room-space origin and fixation point, turned into the head
             // frame so every source reports the same kind of angles.
             std::string action = "{\"ok\":0}";
-            if (!inGame) {
+            if (!inGame && (want & kAction)) {
                 vr::VRActiveActionSet_t active{};
                 active.ulActionSet = set;
                 active.nPriority = vr::k_nActionSetOverlayGlobalPriorityMin;
@@ -570,26 +619,33 @@ int main(int argc, char **argv) {
                     return std::string(b);
                 };
                 char extra[256];
-                std::snprintf(extra, sizeof extra, "\"dist\":%.3f,\"open\":[%.3f,%.3f],\"lr\":%.3f,", Length(s.fix1),
-                              s.open[0], s.open[1], lr(s.left1, s.right1));
-                m1 = SrcJson(list, headThen, s.left1 + s.right1, extra + eyes(s.left1, s.right1) + unc(s.var1));
-                std::snprintf(extra, sizeof extra, "\"lr\":%.3f,", lr(s.left2, s.right2));
-                m2 = SrcJson(list, headThen, s.left2 + s.right2, extra + eyes(s.left2, s.right2) + unc(s.var2));
-                left = SrcJson(list, headThen, s.left2);
-                right = SrcJson(list, headThen, s.right2);
+                if (want & kMmap1) {
+                    std::snprintf(extra, sizeof extra, "\"dist\":%.3f,\"open\":[%.3f,%.3f],\"lr\":%.3f,", Length(s.fix1),
+                                  s.open[0], s.open[1], lr(s.left1, s.right1));
+                    m1 = SrcJson(list, headThen, s.left1 + s.right1, extra + eyes(s.left1, s.right1) + unc(s.var1));
+                }
+                if (want & kMmap2) {
+                    std::snprintf(extra, sizeof extra, "\"lr\":%.3f,", lr(s.left2, s.right2));
+                    m2 = SrcJson(list, headThen, s.left2 + s.right2, extra + eyes(s.left2, s.right2) + unc(s.var2));
+                }
+                if (want & kLeft) left = SrcJson(list, headThen, s.left2);
+                if (want & kRight) right = SrcJson(list, headThen, s.right2);
+                // "new" compares with the last sample, so the last measurement is kept either way.
                 const float *m = s.meas;
                 const bool newL = m[0] != lastMeas[0] || m[1] != lastMeas[1];
                 const bool newR = m[2] != lastMeas[2] || m[3] != lastMeas[3];
                 std::memcpy(lastMeas, m, sizeof lastMeas);
-                std::snprintf(extra, sizeof extra, "{\"q\":[%.3g,%.3g],\"m\":[[%.4f,%.4f],[%.4f,%.4f]],\"new\":[%d,%d]}",
-                              (m[4] + m[5]) / 2, (m[6] + m[7]) / 2, m[0], m[1], m[2], m[3], int(newL), int(newR));
-                eye = extra;
+                if (want & kEye) {
+                    std::snprintf(extra, sizeof extra, "{\"q\":[%.3g,%.3g],\"m\":[[%.4f,%.4f],[%.4f,%.4f]],\"new\":[%d,%d]}",
+                                  (m[4] + m[5]) / 2, (m[6] + m[7]) / 2, m[0], m[1], m[2], m[3], int(newL), int(newR));
+                    eye = extra;
+                }
             }
 
             // Our tracker: its own sample time picks the head pose, like the mmap's.
             std::string own = "{\"ok\":0}";
             OwnSample o;
-            if (ownFile.Read(o) && now - o.t < 0.1) {
+            if ((want & kOwn) && ownFile.Read(o) && now - o.t < 0.1) {
                 vr::HmdMatrix34_t headOwn = headNow;
                 history.At(o.t, headOwn);
                 auto pair = [](bool ok, float a, float b) {
