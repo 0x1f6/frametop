@@ -103,6 +103,12 @@ watch() {
   fi || true
 }
 
+# What remote-view depends on: KWin's saved outputs (positions, scales, primary) and
+# Frametop's layout (screen sizes). It's read again only after one of these changes, and
+# once a minute in case a change didn't touch them, and only while FreeRDP runs.
+layout_files=("$HOME/.config/frametop/kwinoutputconfig.json" "$HOME/.config/frametop-layout.json")
+stamp() { stat -c %y "${layout_files[@]}" 2>/dev/null || true; }
+
 # Start FreeRDP inside the VNC screen, sized and shifted for $v.
 # /cert:ignore is fine here: the connection never leaves this host.
 start_rdp() {
@@ -134,7 +140,9 @@ idle_sec=${VNC_IDLE_SEC:-45}
 rdp=           # FreeRDP's job while it runs
 seen=0         # when a client was last seen ($SECONDS)
 watched=-99    # when "watch" was last sent
-next_view=0    # next time to read the layout
+stamp_v=       # stamp() when $v was read
+recheck=0      # read the layout every 2 seconds until then
+next_view=0    # next time to read it
 while kill -0 $xvnc 2>/dev/null; do
   if clients; then
     if [ $((SECONDS - watched)) -ge 5 ]; then watch; watched=$SECONDS; fi
@@ -142,7 +150,7 @@ while kill -0 $xvnc 2>/dev/null; do
     if [ -z "$rdp" ]; then
       echo "VNC client connected, starting the RDP client"
       now=$(view) && [ -n "$now" ] && v=$now
-      next_view=$((SECONDS + 5))
+      stamp_v=$(stamp) recheck=0 next_view=$((SECONDS + 60))
       start_rdp
     fi
   elif [ "$seen" -ne 0 ]; then
@@ -165,8 +173,12 @@ while kill -0 $xvnc 2>/dev/null; do
     continue
   fi
   if [ -n "$rdp" ]; then
+    # A layout change shows up in KWin's outputs a few seconds after the files change.
+    s=$(stamp)
+    [ "$s" = "$stamp_v" ] || { stamp_v=$s; recheck=$((SECONDS + 10)) next_view=$SECONDS; }
     if [ "$SECONDS" -ge "$next_view" ]; then
-      next_view=$((SECONDS + 5))
+      next_view=$((SECONDS + 60))
+      [ "$SECONDS" -ge "$recheck" ] || next_view=$((SECONDS + 2))
       now=$(view) || now=
       if [ -n "$now" ] && [ "$now" != "$v" ]; then
         echo "layout changed: $v -> $now"
