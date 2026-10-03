@@ -251,6 +251,23 @@ if [ "$(kreadconfig6 --file "$frametoprc" --group Defaults --key effects)" != 1 
   kwriteconfig6 --file "$frametoprc" --group Defaults --key effects 1
 fi
 
+# System autostart entries this desktop doesn't need, hidden for it alone by a copy with
+# Hidden=true in its own autostart folder, once and unless there's a file of that name
+# already. Discover's update notifier starts Discover itself to check for updates (about
+# 600 MB and a share of a core, with Flatpak's helper and AppStream behind it); updates
+# come with SteamOS and from Discover in the stock desktop. IBus can't reach the
+# desktop's apps: KWin's input method is ft-textinput, and the session drops the
+# variables that point apps at IBus or XIM. Deleting the copy brings an entry back.
+if [ "$(kreadconfig6 --file "$frametoprc" --group Defaults --key autostart)" != 1 ]; then
+  for entry in org.kde.discover.notifier ibus; do
+    src=/etc/xdg/autostart/$entry.desktop dst=$XDG_CONFIG_HOME/autostart/$entry.desktop
+    [ -r "$src" ] && [ ! -e "$dst" ] || continue
+    mkdir -p "$(dirname "$dst")"
+    sed '/^\[Desktop Entry\]$/a Hidden=true' "$src" > "$dst"
+  done
+  kwriteconfig6 --file "$frametoprc" --group Defaults --key autostart 1
+fi
+
 # Profiles reopen apps (docs/profiles.md), so Plasma's own session restore stays off here;
 # with both, apps would open twice.
 kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginMode emptySession
