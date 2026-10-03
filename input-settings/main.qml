@@ -19,7 +19,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: "Devices"; icon.name: "input-mouse"; onTriggered: root.show(devicesPage) },
             Kirigami.Action { text: "Buttons"; icon.name: "input-keyboard"; onTriggered: root.show(buttonsPage) },
             Kirigami.Action { text: "Controllers"; icon.name: "input-gamepad"; onTriggered: root.show(controllersPage) },
-            Kirigami.Action { text: "Games"; icon.name: "applications-games"; onTriggered: root.show(gamesPage) },
+            Kirigami.Action { text: "Game optimization"; icon.name: "applications-games"; onTriggered: root.show(gamesPage) },
             Kirigami.Action { text: "Keyboard"; icon.name: "input-keyboard-virtual"; onTriggered: root.show(keyboardPage) },
             Kirigami.Action { text: "Pointer"; icon.name: "transform-move"; onTriggered: root.show(pointerPage) },
             Kirigami.Action { text: "Ignored panels"; icon.name: "view-hidden"; onTriggered: root.show(ignorePage) },
@@ -57,7 +57,7 @@ Kirigami.ApplicationWindow {
         pageStack.push(page)
     }
 
-    // FT_INPUT_PAGE=buttons|controllers|games|keyboard|pointer|ignore|gaze|bluetooth opens the app on that page.
+    // FT_INPUT_PAGE=buttons|controllers|games (Game optimization)|keyboard|pointer|ignore|gaze|bluetooth opens the app on that page.
     pageStack.initialPage: ({ buttons: buttonsPage, controllers: controllersPage, games: gamesPage, keyboard: keyboardPage,
                               pointer: pointerPage, ignore: ignorePage, gaze: gazePage,
                               bluetooth: bluetoothPage })[startPage] || devicesPage
@@ -832,7 +832,7 @@ Kirigami.ApplicationWindow {
         id: gamesPage
         Kirigami.ScrollablePage {
             id: gmpage
-            title: "Games"
+            title: "Game optimization"
             property var st: backend.pauseStatus
 
             // The gesture's boxes follow the saved gesture (which may tidy what was picked).

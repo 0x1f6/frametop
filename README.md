@@ -105,7 +105,7 @@ Frametop pauses while a VR game runs, so the game gets the headset's CPU and GPU
 | Start a VR game | Frametop pauses, and comes back 5 seconds after the game ends. Bring it back during the game, and it stays on until that game ends |
 | Map Pause/resume Frametop to a mouse button, key combination, or controller button | The same, from that button (Frametop Input Settings) |
 
-The Games page of Frametop Input Settings turns the automatic pause off, changes the gesture, closes the desktop instead of hiding it (more for the game, but its windows close), and turns the sound off. From a terminal: `input/ft-pause on`, `off`, or `status`.
+The Game optimization page of Frametop Input Settings turns the automatic pause off, changes the gesture, closes the desktop instead of hiding it (more for the game, but its windows close), and turns the sound off. From a terminal: `input/ft-pause on`, `off`, or `status`.
 
 ### Gaze mode (experimental)
 
