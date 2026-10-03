@@ -393,18 +393,24 @@ def check_vr_socket():
                 report("FAIL", label, "vrserver refused the web socket; the pause gesture can't read the controllers")
                 return
             mailbox = f"frametop_check_{os.getpid()}"
-            for text in (f"mailbox_open {mailbox}", "mailbox_send input_server " + json.dumps(
-                    {"type": "request_input_state_updates", "device_path": found[0]["root_path"],
-                     "returnAddress": mailbox})):
+            # Every controller: one lying still (or asleep) may send nothing at all.
+            for text in [f"mailbox_open {mailbox}"] + ["mailbox_send input_server " + json.dumps(
+                    {"type": "request_input_state_updates", "device_path": d["root_path"], "returnAddress": mailbox})
+                    for d in found]:
                 payload, mask = text.encode(), os.urandom(4)
                 size = bytes([0x80 | len(payload)]) if len(payload) < 126 else bytes([0x80 | 126]) + struct.pack(">H", len(payload))
                 s.sendall(b"\x81" + size + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
             deadline = time.monotonic() + 3
-            while b"update_component_states" not in data and time.monotonic() < deadline:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
+            try:
+                while b"update_component_states" not in data and time.monotonic() < deadline:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            except socket.timeout:
+                report("skip", label, "it took the subscription, but no controller sent anything in 3 s "
+                       "(lying still or asleep?): pick one up and check again")
+                return
     except OSError as e:
         report("FAIL", label, f"{e}; the pause gesture can't read the controllers")
         return
