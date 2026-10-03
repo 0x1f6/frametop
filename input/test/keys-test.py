@@ -80,6 +80,7 @@ fake_os = type(os)("os")
 fake_os.__dict__.update(os.__dict__)
 fake_os.listdir = lambda path: ["event900", "event901"] if path == "/dev/input" else os.listdir(path)
 fake_os.stat = lambda path, *a, **k: Inode() if path in FAKE else os.stat(path, *a, **k)
+fake_os.access = lambda path, mode, *a, **k: path in FAKE or os.access(path, mode, *a, **k)
 relay.os = fake_os
 
 
