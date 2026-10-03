@@ -56,7 +56,7 @@ class StubPause:
     def configure(self, *args):
         pass
 
-    game_state = tick = helper_started = configure
+    game_state = tick = helper_started = controllers_changed = configure
 
 
 stub = {}

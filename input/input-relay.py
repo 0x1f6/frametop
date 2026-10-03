@@ -128,6 +128,7 @@ kernel's evdev and uinput interfaces.
 """
 import array
 import atexit
+import collections
 import errno
 import fcntl
 import json
@@ -459,14 +460,22 @@ class Pointer:
     CLAIM_PULSE = 0.06  # seconds the claim button (switchlaserhand, no click) is held
     RESUME_PAUSE = 1.5  # mouse idle this long, then moving again, re-claims the laser
     WAKE_WINDOW = 1.0  # seconds in which WAKE_COUNTS of motion must add up
+    QUEUE_MAX = 512  # commands kept while the helper is behind (see send)
+    MOVE_EVERY = 0.004  # mouse motion goes to the helper at most this often (see flush)
 
     def __init__(self, sensitivity, idle, wake_counts=40):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # Never blocks (see send): a stalled helper must not stall the keyboard, volume keys and pausing.
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+        # Commands the helper's full socket didn't take yet, in order: text, or [dyaw, dpitch] for
+        # mouse moves, which add up into one while they wait.
+        self.queue = collections.deque()
+        self.behind_logged = -60.0
         self.sensitivity = sensitivity  # degrees per mouse count
         self.idle = idle
         self.active = False
         self.last_used = 0.0
         self.dx = self.dy = 0
+        self.move_at = 0.0  # motion last went to the helper then
         self.scroll_until = None
         self.claim_at = None  # when to press the claim button
         self.claim_release = None
@@ -479,11 +488,59 @@ class Pointer:
         self.pending_since = 0.0
         self.gaze_awake_until = 0.0  # the helper's gaze mode keeps the pointer until then
 
-    def send(self, command):
-        try:
-            self.sock.sendto(command.encode(), HELPER)
-        except OSError:
-            pass  # helper not running (SteamVR not running)
+    def send(self, command, droppable=False):
+        """To the helper, in order, without blocking. While the helper doesn't keep up (place and
+        grabprobe hold it for seconds, and ft-gazed's 90 Hz gaze fills its socket meanwhile), commands
+        wait in the queue and go out from tick(). A droppable one (a scroll notch: scrolling seconds
+        late is no use) is dropped instead; presses, releases and the rest are kept, so no button
+        stays down. Moves add up (_move)."""
+        if not self.queue:
+            try:
+                self.sock.sendto(command.encode(), HELPER)
+                return
+            except BlockingIOError:
+                pass
+            except OSError:
+                return  # helper not running (SteamVR not running)
+        if not droppable:
+            self._queue(command)
+
+    def _move(self, dyaw, dpitch):
+        if self.queue and isinstance(self.queue[-1], list):
+            self.queue[-1][0] += dyaw
+            self.queue[-1][1] += dpitch
+            return
+        if not self.queue:
+            try:
+                self.sock.sendto(f"move {dyaw:.4f} {dpitch:.4f}".encode(), HELPER)
+                return
+            except BlockingIOError:
+                pass
+            except OSError:
+                return
+        self._queue([dyaw, dpitch])
+
+    def _queue(self, item):
+        if not self.queue and time.monotonic() - self.behind_logged > 60:
+            self.behind_logged = time.monotonic()
+            log("pointer helper is behind: holding its commands (logged once a minute)")
+        self.queue.append(item)
+        if len(self.queue) > self.QUEUE_MAX:
+            self.queue.popleft()  # stalled for long: the oldest goes
+
+    def drain(self):
+        """Send what waits, in order, as far as the helper takes it."""
+        while self.queue:
+            item = self.queue[0]
+            text = f"move {item[0]:.4f} {item[1]:.4f}" if isinstance(item, list) else item
+            try:
+                self.sock.sendto(text.encode(), HELPER)
+            except BlockingIOError:
+                return
+            except OSError:
+                self.queue.clear()  # the helper went away: nothing to deliver to
+                return
+            self.queue.popleft()
 
     def wake(self, now):
         if not self.active:
@@ -511,7 +568,7 @@ class Pointer:
         elif code == REL_Y:
             self.dy += value
         elif code == REL_WHEEL and value:
-            self.send(f"scroll 0 {1 if value > 0 else -1}")
+            self.send(f"scroll 0 {1 if value > 0 else -1}", droppable=True)
             self.scroll_until = now + self.SCROLL_PULSE
 
     def action(self, name, value, now, source="mouse"):
@@ -543,7 +600,7 @@ class Pointer:
             return  # the rest act on press
         elif name in ("scroll_up", "scroll_down"):
             self.wake(now)
-            self.send(f"scroll 0 {1 if name == 'scroll_up' else -1}")
+            self.send(f"scroll 0 {1 if name == 'scroll_up' else -1}", droppable=True)
             self.scroll_until = now + self.SCROLL_PULSE
         elif name == "dashboard":
             self.dashboard(now)
@@ -582,11 +639,16 @@ class Pointer:
             self.sensitivity *= 1.25 if name == "sens_up" else 0.8
             log(f"sensitivity {self.sensitivity:.4f} deg/count")
 
-    def flush(self):
-        if self.dx or self.dy:
-            # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
-            self.send(f"move {-self.dx * self.sensitivity:.4f} {-self.dy * self.sensitivity:.4f}")
-            self.dx = self.dy = 0
+    def flush(self, now=None):
+        """Send the motion so far. With now (a mouse's SYN_REPORT), only once MOVE_EVERY has passed
+        since the last: a 1000 Hz mouse sent the helper, which runs every 8 ms, 1000 datagrams a
+        second. tick() sends the rest when it's due; a button sends it first, so it lands there."""
+        if not (self.dx or self.dy) or (now is not None and now - self.move_at < self.MOVE_EVERY):
+            return
+        self.move_at = time.monotonic() if now is None else now
+        # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
+        self._move(-self.dx * self.sensitivity, -self.dy * self.sensitivity)
+        self.dx = self.dy = 0
 
     def dashboard(self, now=None):
         """Toggle the SteamVR dashboard with the virtual controller's system button.
@@ -601,6 +663,8 @@ class Pointer:
         self.system_at = now + (0.4 if woke else 0.0)
 
     def tick(self, now):
+        self.drain()
+        self.flush(now)
         if self.system_at is not None and now >= self.system_at:
             self.send("btn system 1")
             self.system_at = None
@@ -625,7 +689,10 @@ class Pointer:
 
     def timeout(self):
         pending = (self.scroll_until, self.claim_at, self.claim_release, self.system_at, self.system_release)
-        return 0.02 if any(t is not None for t in pending) else 0.5
+        wait = 0.02 if self.queue or any(t is not None for t in pending) else 0.5
+        if self.dx or self.dy:  # motion held back by flush
+            wait = max(0.0, min(wait, self.move_at + self.MOVE_EVERY - time.monotonic()))
+        return wait
 
     def stand_down(self):
         """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
@@ -729,7 +796,8 @@ def main():
     # pointer: the 3D mouse while it's in use, pointer_conf: the one the config asks for (they
     # differ while Frametop is paused).
     state = {"pointer": None, "pointer_conf": None, "rules": {}, "share_keys": False,
-             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0}
+             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0, "vr_bind_retry": False,
+             "pointer_holding": False}
 
     def pause_changed(paused):
         """Frametop paused or resumed (game_pause.py): the relay's own part."""
@@ -779,8 +847,11 @@ def main():
                                and a not in GAZE_ACTIONS and (not pause.paused or works_paused(a))) or "-"
             if state["rules"].get("controller_in_games"):
                 buttons = "+games " + buttons
+        state["vr_bind_retry"] = False
         try:
             screens_sock.sendto(f"vrbind {buttons}".encode(), HELPER)
+        except BlockingIOError:
+            state["vr_bind_retry"] = True  # the helper is behind: again on the next loop
         except OSError:
             pass  # helper not running; it says vrhello when it starts
 
@@ -1233,11 +1304,21 @@ def main():
             if added:
                 apply_roles()
 
+        # The 3D mouse connecting or letting go moves a hand role, so the pause gesture's reader
+        # looks the controllers up again (game_pause.py).
+        holding = bool(state["pointer_conf"] and state["pointer_conf"].active)
+        if holding != state["pointer_holding"]:
+            state["pointer_holding"] = holding
+            pause.controllers_changed()
         ready, _, _ = select.select(list(nodes) + [control], [], [],
                                     min(volume.timeout(now, pointer.timeout() if pointer else 0.5), pause.timeout(now)))
         now = time.monotonic()
         if pointer:
             pointer.tick(now)
+        elif state["pointer_conf"]:
+            state["pointer_conf"].drain()  # paused: what waited still goes, in order
+        if state["vr_bind_retry"]:
+            vr_bind(now)
         volume.tick(now)
         pause.tick(now)
         if state["vr_capture_until"] and now >= state["vr_capture_until"]:
@@ -1319,7 +1400,7 @@ def main():
                         mouse.emit(etype, code, value)
                 elif etype == EV_SYN and code == SYN_REPORT:
                     if pointer:
-                        pointer.flush()
+                        pointer.flush(now)
                     mouse.sync()
                     keyboard.sync()
 

@@ -63,6 +63,13 @@ reading only.
     frame when its camera starts the frame after next (no slot is rewritten sooner than three
     frames), ignores late writes to the frame just finished, and saves from a separate
     thread. fit1 may hold a few percent of torn frames.
+  - `--share` (2026-10-03) checks only the slot each camera writes next, from the two before
+    (the orders above, learned again if they change; all four slots for 2 s after a frame turns
+    up elsewhere), sleeps until 2.5 ms before the next frame is due, then looks every 1 ms with
+    0.5 ms of timer slack. Against the 0.3 ms poll of all eight slots, on simulated cameras:
+    207 wakeups a second instead of 1,486, 0.8% of a core instead of 3.6% (more on the real
+    DMA-BUF memory), no torn or skipped frames, and a frame's start seen 1.35 ms late on
+    average instead of 0.76. `--rec` still polls all slots every 0.3 ms, for its times.
   - Eye tracking stops when the headset is off ("HMD off, stopping eye tracking"), so
     recordings are empty then.
 - **Which camera is which eye** (capture fit1, 2026-09-29, closing one eye at a time):

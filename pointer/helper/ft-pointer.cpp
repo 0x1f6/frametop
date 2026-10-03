@@ -36,6 +36,22 @@
 // pointer is off the helper also stops listing overlays with vrcmd, whose connection every
 // second kept SteamVR from going to standby.
 //
+// Idle: while the pointer is off (and hand gestures are off), the main loop waits for a command
+// on its socket for up to 250 ms instead of running every 8 ms, or 20 ms while it reads mapped
+// Frame controller buttons (vrbuttons.h), which have no event to wait for. What has to go on
+// meanwhile still does: the headset's activity level, the game check and the relay's "vrgame"
+// and "gazeawake" repeats, and a mouse command wakes it at once. The overlay lookups (the 50 ms
+// visibility poll, the once-a-second handles) wait for the pointer to wake, and run right then.
+//
+// Unchanged frames: while the pointer is awake, a frame where nothing moved reuses the last one's
+// result. The collision passes (ComputeOverlayIntersection on every visible overlay, twice) run
+// again when the mouse or the anchor moved, the eye moved 5 mm, an overlay showed or hid, or
+// 100 ms have passed (overlays also move by themselves), and always while dragging. The dots'
+// setters go to SteamVR only when their value changes, and a dot's placement only when it moved
+// 0.2 mm or the eye 5 mm (its facing and size then change by well under 1%). The pose goes to the
+// driver, which keeps the last one, when the laser's origin moved 0.2 mm or its direction 0.04
+// deg (0.1 mm where it lands, 15 cm on), and at least every 100 ms.
+//
 // Last used wins: when a real controller moves (picked up), the pointer is released
 // (driver "hide", which also drops its hand role hint), so the controller gets
 // its role and laser back. The next mouse input reconnects and claims the laser again.
@@ -311,6 +327,7 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -328,6 +345,7 @@ extern "C" {
 #include <fcntl.h>
 #include <fnmatch.h>
 
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -500,29 +518,62 @@ std::string JsonQuote(const std::string &s) {
 // public call to enumerate other apps' overlays). Hidden ones are listed too: the
 // window controls under a floating panel only appear while something hovers the
 // panel, and the cursor has to find them the moment they do, not a second later.
+// Each vrcmd run is a shell and a new SteamVR client, about 30 ms of CPU, so the list is read
+// every 20 seconds (kEvery) while the pointer is awake, and at once when something says it may
+// have changed (Kick: the pointer waking, the dashboard opening or closing, a click that hit
+// nothing), at most once a second. Showing and hiding the overlays it knows doesn't need a new
+// list: the main loop polls their visibility (IsOverlayVisible) every 50 ms.
 // Paused while the pointer is off: each vrcmd run connects to SteamVR as a new app, and a new
 // app every second kept SteamVR (and the headset's displays) from going to standby.
 // "overlays" requests (Frametop Input Settings' Ignored panels page) refresh the list even
 // while paused, and are answered from this thread once it's fresh.
 class OverlayList {
 public:
+    static constexpr auto kEvery = std::chrono::seconds(20), kGap = std::chrono::seconds(1);
     void Start() {
         out_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         thread_ = std::thread([this] {
+            std::unique_lock<std::mutex> lk(lock_);
             while (running_) {
-                if (!paused_ || requested_) Refresh();
-                // Wait a second, or less when the pointer wakes (refresh right away then).
-                for (int i = 0; i < 10 && running_; ++i) {
-                    const bool wasPaused = paused_;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if ((wasPaused && !paused_) || requested_) break;
+                // Sleeps while paused (until a request or the wake); otherwise until it's time, or
+                // a kick once kGap has passed since the last read.
+                const auto due = std::max(last_ + kGap, kicked_ ? last_ : last_ + kEvery);
+                if (!waiting_.empty()) {
+                } else if (paused_) {
+                    cv_.wait(lk);
+                    continue;
+                } else if (std::chrono::steady_clock::now() < due) {
+                    cv_.wait_until(lk, due);
+                    continue;
                 }
+                kicked_ = false;
+                lk.unlock();
+                Refresh();
+                lk.lock();
+                last_ = std::chrono::steady_clock::now();
             }
         });
     }
-    void SetPaused(bool paused) { paused_ = paused; }
+    // Unpausing (the pointer woke) reads the list again at once.
+    void SetPaused(bool paused) {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (paused == paused_) return;
+        if (!paused) kicked_ = true, last_ = {};
+        paused_ = paused;
+        cv_.notify_one();
+    }
+    // The list may have changed: read it again soon (not while paused).
+    void Kick() {
+        std::lock_guard<std::mutex> guard(lock_);
+        kicked_ = true;
+        cv_.notify_one();
+    }
     void Stop() {
-        running_ = false;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            running_ = false;
+            cv_.notify_one();
+        }
         if (thread_.joinable()) thread_.join();
     }
     std::vector<std::string> Keys() {
@@ -531,12 +582,25 @@ public:
         for (const auto &e : entries_) keys.push_back(e.key);
         return keys;
     }
+    // A panel just made by another Frametop program (ft-screens: a floating window's menu, the
+    // keyboard): known at once, without waiting for the next read ("overlay <key>").
+    void Add(const std::string &key) {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            for (const auto &e : entries_)
+                if (e.key == key) return;
+            entries_.push_back({key, key, true});
+        }
+        ++generation_;
+    }
+    // Goes up by one each time the list is read, so the main loop knows to look the keys up again.
+    unsigned Generation() const { return generation_; }
     // Answer `to` with {"t":"overlays","list":[{"key","name","visible"}...]} after the next refresh.
     void Request(const sockaddr_un &to, socklen_t len) {
         if (len <= offsetof(sockaddr_un, sun_path)) return;
         std::lock_guard<std::mutex> guard(lock_);
         if (waiting_.size() < 8) waiting_.push_back({to, len});
-        requested_ = true;
+        cv_.notify_one();
     }
 
 private:
@@ -545,7 +609,6 @@ private:
         bool visible;
     };
     void Refresh() {
-        requested_ = false;
         FILE *p = popen("LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrcmd --overlays 2>/dev/null", "r");
         if (!p) return;
         std::vector<Entry> entries;
@@ -577,6 +640,7 @@ private:
             entries_ = std::move(entries);
             waiting.swap(waiting_);
         }
+        ++generation_;
         if (waiting.empty()) return;
         std::string msg = "{\"t\":\"overlays\",\"list\":[";
         for (size_t i = 0; i < entries_.size(); ++i)
@@ -589,10 +653,11 @@ private:
 
     std::thread thread_;
     int out_ = -1;
-    std::atomic<bool> paused_{false};
-    std::atomic<bool> running_{true};
-    std::atomic<bool> requested_{false};
-    std::mutex lock_;
+    std::mutex lock_;  // guards everything below
+    std::condition_variable cv_;
+    bool paused_ = false, running_ = true, kicked_ = false;
+    std::chrono::steady_clock::time_point last_{};  // the last read
+    std::atomic<unsigned> generation_{0};
     std::vector<Entry> entries_;  // written only by the thread; the lock guards readers
     std::vector<std::pair<sockaddr_un, socklen_t>> waiting_;
 };
@@ -619,6 +684,36 @@ bool Ignored(const std::vector<std::string> &patterns, const std::string &key) {
         if (fnmatch(p.c_str(), key.c_str(), FNM_NOESCAPE) == 0) return true;
     return false;
 }
+
+vr::HmdMatrix34_t Billboard(Vec3 at, Vec3 eye);
+
+// One of our dots, with what was last set on it: each setter goes to SteamVR only when its value
+// changes (see "Unchanged frames" at the top).
+struct DotOverlay {
+    vr::VROverlayHandle_t h = vr::k_ulOverlayHandleInvalid;
+    int shown = -1;  // unknown at first
+    float alpha = -1, width = -1;
+    bool placed = false;
+    Vec3 at, eye;
+    void Show(bool on) {
+        if (shown == int(on)) return;
+        shown = on;
+        if (on) vr::VROverlay()->ShowOverlay(h);
+        else vr::VROverlay()->HideOverlay(h);
+    }
+    void Alpha(float a) {
+        if (a != alpha) vr::VROverlay()->SetOverlayAlpha(h, alpha = a);
+    }
+    // Width w, at `to`, facing `from`: left as it is for a change under 0.5% in width, and while
+    // it moved less than 0.2 mm and the eye less than 5 mm.
+    void Place(Vec3 to, Vec3 from, float w) {
+        if (std::fabs(w - width) > 0.005f * width) vr::VROverlay()->SetOverlayWidthInMeters(h, width = w);
+        if (placed && Length(to - at) < 0.0002 && Length(from - eye) < 0.005) return;
+        placed = true, at = to, eye = from;
+        const auto m = Billboard(to, from);
+        vr::VROverlay()->SetOverlayTransformAbsolute(h, vr::TrackingUniverseStanding, &m);
+    }
+};
 
 vr::HmdMatrix34_t Billboard(Vec3 at, Vec3 eye) {
     // Overlay faces +Z; point +Z at the eye, keep +Y roughly up.
@@ -803,6 +898,8 @@ int main() {
     below.m[1][3] = -50;
     overlay->SetOverlayTransformTrackedDeviceRelative(laserMode, vr::k_unTrackedDeviceIndex_Hmd, &below);
     bool laserModeShown = false;
+    DotOverlay cursorDot, markerDot;  // the setters for `cursor` and `marker` (see "Unchanged frames" at the top)
+    cursorDot.h = cursor, markerDot.h = marker;
     // Controller beams keep the user's width; nothing here changes it any more.
     vr::VRSettings()->SetFloat("dashboard", "laserRayWidthScale", laserWidth);
 
@@ -822,12 +919,34 @@ int main() {
     std::map<std::string, bool> sceneGraph;  // no texture: plane test instead of ComputeOverlayIntersection
     std::map<std::string, bool> visible;     // refreshed every 50 ms
     auto lastVisible = std::chrono::steady_clock::now();
+    auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    unsigned listGeneration = 0;  // the overlay list the handles were looked up from
     // The plane of the last panel the cursor was on, and the last point on it (panel edges).
     Vec3 edgePoint, edgeNormal, edgeLast;
     std::string edgeKey;
 
     bool active = false, recenter = false, anchored = false;
     using Clock = std::chrono::steady_clock;
+    // Unchanged frames (see the top): visibleGen goes up when an overlay shows or hides or the
+    // handles change; pass is the last collision pass, posed the last plain pose sent.
+    unsigned visibleGen = 0;
+    struct Pass {
+        bool valid = false;
+        Clock::time_point at{};
+        unsigned gen = 0;
+        double yaw = 0, pitch = 0;
+        Vec3 anchor, eye;
+        double best = 1e9, distance = 0;
+        std::string key;
+        bool scene = false, onEdge = false, occluded = false;
+        Vec3 point;
+    } pass;
+    struct Posed {
+        bool valid = false;
+        Clock::time_point at{};
+        Vec3 origin;
+        double yaw = 0, pitch = 0;
+    } posed;
     Clock::time_point lastMouse{}, claimAt{}, claimRelease{}, wokeAt{}, noWakeUntil{};
     bool claimPending = false, claimHeld = false;
     // Last used wins: since when each controller has been moving (zero: it isn't).
@@ -864,6 +983,9 @@ int main() {
         wokeAt = t;
         active = true;
         recenter = true;
+        // Overlay handles and visibility weren't looked at while it was off (see "Idle" at the top).
+        lastSlow = lastVisible = t - std::chrono::seconds(10);
+        pass.valid = posed.valid = false;
         SendTo(out, "ft_pointer", "role " + role);  // POINTER_ROLE, before it takes it
         SendTo(out, "ft_pointer", "show");
         claimPending = true;  // take the laser without clicking, once SteamVR has bound the device
@@ -965,6 +1087,8 @@ int main() {
             if (debug) std::fflush(stdout);
         }
         nudging = confirmLesson = false;
+        // A click on nothing: maybe on an overlay that came up since the list was read.
+        if (lastHit.empty()) overlays.Kick();
         leftHeld = true;
         dragDistance = lastDistance;
         pressKey.clear();
@@ -1088,7 +1212,6 @@ int main() {
         return gazeOn && gazeMouseHeld && !inGame && !headsetOff && Clock::now() - gz.at < std::chrono::seconds(1) &&
                !aimHeld && !leftHeld && !tilting && hold.src == Src::None && !clickPress && !clickRelease;
     };
-    auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
     // --- Panel placement (see "Placement" at the top of the file) ---
     // Device pose, given in the standing universe, sent to the driver in raw space.
@@ -1104,6 +1227,7 @@ int main() {
         char msg[200];
         std::snprintf(msg, sizeof msg, "posq %.5f %.5f %.5f %.6f %.6f %.6f %.6f", o.x, o.y, o.z, q[0], q[1], q[2], q[3]);
         SendTo(out, "ft_pointer", msg);
+        posed.valid = false;
     };
     auto sleepMs = [](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); };
     auto headPos = [&] {
@@ -1115,8 +1239,8 @@ int main() {
     auto borrow = [&] {
         SendTo(out, "ft_pointer", "show");
         overlay->ShowOverlay(laserMode);
-        overlay->HideOverlay(cursor);
-        overlay->HideOverlay(marker);
+        cursorDot.Show(false);
+        markerDot.Show(false);
         sleepMs(active ? 50 : 400);  // a fresh connect needs SteamVR to bind the device
         SendTo(out, "ft_pointer", "btn a 1");
         sleepMs(60);
@@ -1243,6 +1367,36 @@ int main() {
         return msg;
     };
 
+    // "move <dyaw> <dpitch>" from the relay.
+    auto mouseMove = [&](double a, double b) {
+        // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
+        // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
+        const bool heldBack = mouseMoveHeld();
+        if (!heldBack) lastMouse = Clock::now();
+        // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
+        if (!active) wake(Clock::now());
+        if (heldBack) return;
+        if (tilting) {
+            tiltYaw += a;
+            tiltPitch = std::clamp(tiltPitch + b, -80.0, 80.0);
+            return;
+        }
+        lastMove = Clock::now();  // the dot shows while the mouse moves it (gaze mode)
+        if (gazeOn && gazeOwns) {
+            // The mouse takes the pointer from the gaze, from where the gaze left it.
+            gazeOwns = false;
+            nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
+            nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
+            nudgeAt = Clock::now(), nudgeMoved = 0;
+        }
+        if (nudging || aimHeld) nudgeMoved += std::hypot(a, b);
+        if (!anchored) recenter = true;
+        yaw += a;
+        while (yaw > 180) yaw -= 360;
+        while (yaw < -180) yaw += 360;
+        pitch = std::clamp(pitch + b, -85.0, 85.0);
+    };
+
     std::printf("ft-pointer running: free distance %.2f m, dot %.2f deg\n", freeDistance, cursorDeg);
     std::fflush(stdout);
 
@@ -1257,8 +1411,8 @@ int main() {
         if (headsetOff && active) {
             active = false;
             claimPending = claimHeld = false;
-            overlay->HideOverlay(cursor);
-            overlay->HideOverlay(marker);
+            cursorDot.Show(false);
+            markerDot.Show(false);
             SendTo(out, "ft_pointer", "btn a 0");
             SendTo(out, "ft_pointer", "hide");
             std::printf("headset off: pointer released\n");
@@ -1308,6 +1462,12 @@ int main() {
                 if (senderLen > offsetof(sockaddr_un, sun_path))
                     sendto(out, msg.data(), msg.size(), 0, reinterpret_cast<const sockaddr *>(&sender), senderLen);
             };
+            // Mouse moves first, the most frequent command.
+            double mx, my;
+            if (std::strncmp(buf, "move ", 5) == 0 && std::sscanf(buf + 5, "%lf %lf", &mx, &my) == 2) {
+                mouseMove(mx, my);
+                continue;
+            }
             // The gaze, from ft-gazed: not mouse input, it never wakes the pointer.
             double g[4];
             if (std::sscanf(buf, "gz %lf %lf %lf %lf", &g[0], &g[1], &g[2], &g[3]) == 4) {
@@ -1373,6 +1533,10 @@ int main() {
                 reply(controllerButtons.Status());
                 continue;
             }
+            if (std::strncmp(buf, "overlay ", 8) == 0 && std::strncmp(buf + 8, "frametop.", 9) == 0) {
+                overlays.Add(buf + 8);
+                continue;
+            }
             if (std::strncmp(buf, "overlays", 8) == 0) {
                 overlays.Request(sender, senderLen);  // answered from the list's thread
                 continue;
@@ -1396,16 +1560,11 @@ int main() {
                     reply(gazeOn ? "ok on" : "ok off");
                 continue;
             }
-            const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
-                                    std::strncmp(buf, "scroll", 6) == 0;
-            // A move held back (POINTER_GAZE_MOUSE_MOVE=held) only wakes the pointer: it isn't using
-            // the mouse, so a drifting mouse doesn't keep the gaze from taking the pointer back.
-            const bool moveHeldBack = std::strncmp(buf, "move", 4) == 0 && mouseMoveHeld();
-            if (mouseInput && !moveHeldBack) lastMouse = Clock::now();
+            // (Moves were taken first, above.)
+            const bool mouseInput = std::strncmp(buf, "btn", 3) == 0 || std::strncmp(buf, "scroll", 6) == 0;
+            if (mouseInput) lastMouse = Clock::now();
             // Any mouse input wakes the pointer (after a controller took over, or a helper restart).
             if (!active && mouseInput) wake(Clock::now());
-            if (moveHeldBack) continue;
-            double a, b;
             char key[128];
             double px, py, pz, pyaw, ppitch, proll = 0, pgrab = -1;
             if (std::sscanf(buf, "grabprobe %127s", key) == 1) {
@@ -1464,31 +1623,12 @@ int main() {
                 tilting = swallowedRight = false;
                 continue;
             }
-            if (tilting && std::sscanf(buf, "move %lf %lf", &a, &b) == 2) {
-                tiltYaw += a;
-                tiltPitch = std::clamp(tiltPitch + b, -80.0, 80.0);
-                continue;
-            }
-            if (std::sscanf(buf, "move %lf %lf", &a, &b) == 2) {
-                lastMove = Clock::now();  // the dot shows while the mouse moves it (gaze mode)
-                if (gazeOn && gazeOwns) {
-                    // The mouse takes the pointer from the gaze, from where the gaze left it.
-                    gazeOwns = false;
-                    nudging = haveHead && Clock::now() - gz.at < std::chrono::milliseconds(200);
-                    nudgeRawHy = gz.rhy, nudgeRawHp = gz.rhp, nudgeHead = lastHead;
-                    nudgeAt = Clock::now(), nudgeMoved = 0;
-                }
-                if (nudging || aimHeld) nudgeMoved += std::hypot(a, b);
-                if (!anchored) recenter = true;
-                yaw += a;
-                while (yaw > 180) yaw -= 360;
-                while (yaw < -180) yaw += 360;
-                pitch = std::clamp(pitch + b, -85.0, 85.0);
-            } else if (std::strncmp(buf, "recenter", 8) == 0) {
+            if (std::strncmp(buf, "recenter", 8) == 0) {
                 recenter = true;
             } else if (std::strncmp(buf, "reload", 6) == 0) {
                 loadConfig();
                 lastSlow = Clock::now() - std::chrono::seconds(10);  // apply POINTER_IGNORE now
+                pass.valid = false;
                 std::printf("reloaded: free distance %.2f m, dot %.2f deg, origin %.2f, head follow %s, leash %.0f deg, "
                             "controller pickup %.1fx, %zu ignored\n",
                             freeDistance, cursorDeg, originFraction, follow ? "on" : "off", leashDeg, pickupScale,
@@ -1506,8 +1646,8 @@ int main() {
                 if (!active) wake(Clock::now());
             } else if (std::strncmp(buf, "hide", 4) == 0) {
                 active = false;
-                overlay->HideOverlay(cursor);
-                overlay->HideOverlay(marker);
+                cursorDot.Show(false);
+                markerDot.Show(false);
                 SendTo(out, "ft_pointer", "hide");
             } else {
                 SendTo(out, "ft_pointer", buf);  // btn, scroll
@@ -1549,8 +1689,8 @@ int main() {
             sys->GetControllerRoleForTrackedDeviceIndex(ours) == vr::TrackedControllerRole_Invalid) {
             active = false;
             claimPending = claimHeld = false;
-            overlay->HideOverlay(cursor);
-            overlay->HideOverlay(marker);
+            cursorDot.Show(false);
+            markerDot.Show(false);
             SendTo(out, "ft_pointer", "btn a 0");
             SendTo(out, "ft_pointer", "hide");
             noWakeUntil = tnow + std::chrono::seconds(2);
@@ -1578,8 +1718,8 @@ int main() {
                 if (tnow - movingSince[i] >= std::chrono::milliseconds(100)) {
                     active = false;
                     claimPending = claimHeld = false;
-                    overlay->HideOverlay(cursor);
-                    overlay->HideOverlay(marker);
+                    cursorDot.Show(false);
+                    markerDot.Show(false);
                     SendTo(out, "ft_pointer", "btn a 0");
                     SendTo(out, "ft_pointer", "hide");
                     std::printf("controller %u moved (%.2f m/s, %.1f rad/s): pointer released\n", i, speed, spin);
@@ -1629,7 +1769,7 @@ int main() {
         }
 
         // Hands (see the top): pinches and grips from ft-hands.
-        {
+        if (handsOn) {
             vr::TrackedDevicePose_t h0;
             sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &h0, 1);
             if (h0.bPoseIsValid) poses.Add(tnow, h0.mDeviceToAbsoluteTracking);
@@ -1928,10 +2068,13 @@ int main() {
         }
         followAt = tnow;
 
-        // Slow work, once a second: overlay handles, our device index, laser width.
+        // Slow work, once a second and when the overlay list is new: overlay handles, our device
+        // index. Only while the pointer is awake (see "Idle" at the top).
         const auto now = std::chrono::steady_clock::now();
-        if (now - lastSlow > std::chrono::seconds(1)) {
+        if (active && (now - lastSlow > std::chrono::seconds(1) || overlays.Generation() != listGeneration)) {
             lastSlow = now;
+            listGeneration = overlays.Generation();
+            const auto before = handles;
             handles.clear();
             for (const auto &key : overlays.Keys()) {
                 if (Ignored(ignore, key)) continue;
@@ -1951,19 +2094,21 @@ int main() {
                 sceneGraph[key] = (tw == 0 || th == 0) && tt == vr::VROverlayTransform_Absolute &&
                                   key.rfind("frametop.", 0) != 0;
             }
-            ours = vr::k_unTrackedDeviceIndexInvalid;
-            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+            if (handles != before) ++visibleGen;
+            // Our device keeps its index; it's looked for again when a device is activated or
+            // deactivated (the events below).
+            for (vr::TrackedDeviceIndex_t i = 0; ours == vr::k_unTrackedDeviceIndexInvalid && i < vr::k_unMaxTrackedDeviceCount; ++i) {
                 char type[64] = "";
                 sys->GetStringTrackedDeviceProperty(i, vr::Prop_ControllerType_String, type, sizeof type);
                 if (std::strcmp(type, "ft_pointer") == 0) ours = i;
             }
-
         }
 
-        if (now - lastVisible > std::chrono::milliseconds(50) || visible.size() != handles.size()) {
+        if (active && (now - lastVisible > std::chrono::milliseconds(50) || visible.size() != handles.size())) {
             lastVisible = now;
-            visible.clear();
-            for (const auto &[key, h] : handles) visible[key] = overlay->IsOverlayVisible(h);
+            std::map<std::string, bool> seen;
+            for (const auto &[key, h] : handles) seen[key] = overlay->IsOverlayVisible(h);
+            if (seen != visible) visible.swap(seen), ++visibleGen;
         }
 
         if (active && anchored && hmd.bPoseIsValid && tilting) {
@@ -1973,8 +2118,8 @@ int main() {
                 tiltOrigin = lastOrigin;
                 tiltBasis = AimBasis(lastAim);
                 tiltStart = false;  // angles carry on from any earlier tilt in this drag
-                overlay->HideOverlay(cursor);
-                overlay->HideOverlay(marker);
+                cursorDot.Show(false);
+                markerDot.Show(false);
             }
             const double yr = tiltYaw * M_PI / 180, pr = tiltPitch * M_PI / 180;
             const Vec3 up{0, 1, 0}, side = tiltBasis.x;
@@ -1990,6 +2135,7 @@ int main() {
             std::snprintf(msg, sizeof msg, "posq %.5f %.5f %.5f %.6f %.6f %.6f %.6f", originRaw.x, originRaw.y,
                           originRaw.z, q[0], q[1], q[2], q[3]);
             SendTo(out, "ft_pointer", msg);
+            posed.valid = false;
         } else if (active && anchored && hmd.bPoseIsValid) {
             const bool dragging = leftHeld || tnow < dropHoldUntil;
             if (!dragging) tiltYaw = tiltPitch = 0;  // drop finished: back to plain pointing
@@ -2033,85 +2179,98 @@ int main() {
                 }
                 return h;
             };
-            Hit first;
-            if (!dragging) first = nearest(anchor, dir);
-            double best = first.along;
-            std::string bestKey = first.key;
-            bool bestScene = first.scene;
-            Vec3 bestPoint = first.point, bestNormal = first.normal;
-            bool onEdge = false;
-            if (!dragging && best < 1e8 && !bestScene) {
-                edgeKey = bestKey, edgePoint = bestPoint, edgeNormal = Normalize(bestNormal), edgeLast = bestPoint;
-            } else if (!dragging && best >= 1e8 && !edgeKey.empty() && visible[edgeKey]) {
-                // Just off a panel: stay on its plane (see "Panel edges" at the top).
-                const double denom = Dot(dir, edgeNormal);
-                if (std::fabs(denom) > 1e-4) {
-                    const double along = Dot(edgePoint - anchor, edgeNormal) / denom;
-                    const Vec3 at = anchor + dir * along;
-                    if (along > 0.05 && std::sqrt(Dot(at - edgeLast, at - edgeLast)) <= edgeReach) {
-                        best = along;
-                        bestKey = edgeKey;
-                        onEdge = true;
+            // Unchanged frames (see the top): the last pass still holds.
+            const bool reuse = !dragging && pass.valid && tnow - pass.at < std::chrono::milliseconds(100) &&
+                               pass.gen == visibleGen && std::fabs(yaw - pass.yaw) < 1e-6 &&
+                               std::fabs(pitch - pass.pitch) < 1e-6 && Length(anchor - pass.anchor) < 0.001 &&
+                               Length(eye - pass.eye) < 0.005;
+            double best = pass.best, distance = pass.distance;
+            std::string bestKey = pass.key;
+            bool bestScene = pass.scene, onEdge = pass.onEdge, occluded = pass.occluded;
+            Vec3 point = pass.point;
+            if (!reuse) {
+                Hit first;
+                if (!dragging) first = nearest(anchor, dir);
+                best = first.along;
+                bestKey = first.key;
+                bestScene = first.scene;
+                Vec3 bestPoint = first.point, bestNormal = first.normal;
+                onEdge = false;
+                if (!dragging && best < 1e8 && !bestScene) {
+                    edgeKey = bestKey, edgePoint = bestPoint, edgeNormal = Normalize(bestNormal), edgeLast = bestPoint;
+                } else if (!dragging && best >= 1e8 && !edgeKey.empty() && visible.count(edgeKey) &&
+                           visible.at(edgeKey)) {
+                    // Just off a panel: stay on its plane (see "Panel edges" at the top).
+                    const double denom = Dot(dir, edgeNormal);
+                    if (std::fabs(denom) > 1e-4) {
+                        const double along = Dot(edgePoint - anchor, edgeNormal) / denom;
+                        const Vec3 at = anchor + dir * along;
+                        if (along > 0.05 && std::sqrt(Dot(at - edgeLast, at - edgeLast)) <= edgeReach) {
+                            best = along;
+                            bestKey = edgeKey;
+                            onEdge = true;
+                        }
                     }
                 }
-            }
-            // Held on one of ft-screens' panels that stays where it is: onto whichever of them
-            // the ray meets (see the top).
-            if (leftHeld && !pressKey.empty()) {
-                vr::ETrackingUniverseOrigin uo;
-                vr::HmdMatrix34_t now{};
-                auto it = handles.find(pressKey);
-                bool still = it != handles.end() &&
-                             overlay->GetOverlayTransformAbsolute(it->second, &uo, &now) == vr::VROverlayError_None;
-                for (int i = 0; still && i < 3; ++i)
-                    for (int j = 0; j < 4; ++j)
-                        if (std::fabs(now.m[i][j] - pressPose.m[i][j]) > 0.001f) still = false;
-                if (still) {
-                    Hit h;
-                    for (const auto &[key, handle] : handles) {
-                        if (!visible[key] || !FramePanel(key)) continue;
-                        vr::VROverlayIntersectionParams_t params{};
-                        params.vSource = {float(anchor.x), float(anchor.y), float(anchor.z)};
-                        params.vDirection = {float(dir.x), float(dir.y), float(dir.z)};
-                        params.eOrigin = vr::TrackingUniverseStanding;
-                        vr::VROverlayIntersectionResults_t r{};
-                        if (overlay->ComputeOverlayIntersection(handle, &params, &r) && r.fDistance > 0.05f &&
-                            r.fDistance < h.along)
-                            h.along = r.fDistance, h.key = key;
+                // Held on one of ft-screens' panels that stays where it is: onto whichever of them
+                // the ray meets (see the top).
+                if (leftHeld && !pressKey.empty()) {
+                    vr::ETrackingUniverseOrigin uo;
+                    vr::HmdMatrix34_t now{};
+                    auto it = handles.find(pressKey);
+                    bool still = it != handles.end() &&
+                                 overlay->GetOverlayTransformAbsolute(it->second, &uo, &now) == vr::VROverlayError_None;
+                    for (int i = 0; still && i < 3; ++i)
+                        for (int j = 0; j < 4; ++j)
+                            if (std::fabs(now.m[i][j] - pressPose.m[i][j]) > 0.001f) still = false;
+                    if (still) {
+                        Hit h;
+                        for (const auto &[key, handle] : handles) {
+                            if (!visible[key] || !FramePanel(key)) continue;
+                            vr::VROverlayIntersectionParams_t params{};
+                            params.vSource = {float(anchor.x), float(anchor.y), float(anchor.z)};
+                            params.vDirection = {float(dir.x), float(dir.y), float(dir.z)};
+                            params.eOrigin = vr::TrackingUniverseStanding;
+                            vr::VROverlayIntersectionResults_t r{};
+                            if (overlay->ComputeOverlayIntersection(handle, &params, &r) && r.fDistance > 0.05f &&
+                                r.fDistance < h.along)
+                                h.along = r.fDistance, h.key = key;
+                        }
+                        if (h.along < 1e8) dragDistance = h.along, lastHit = h.key;
+                    } else {
+                        pressKey.clear();  // carried: the lock holds for the rest of this press
                     }
-                    if (h.along < 1e8) dragDistance = h.along, lastHit = h.key;
-                } else {
-                    pressKey.clear();  // carried: the lock holds for the rest of this press
                 }
-            }
-            // While dragging: keep the press-time distance and show the non-interactive marker.
-            // On a scene-graph plane or a panel's edge: the laser-catching dot goes 5 cm behind it.
-            double distance = dragging ? dragDistance : (best < 1e8 ? best : freeDistance);
-            Vec3 point = anchor + dir * distance;
-            bool occluded = false;
-            if (!dragging) {
-                // The cursor lands on what you see under it: the ray above starts at the anchor,
-                // not the eye, so after leaning it can pick a panel that something nearer
-                // covers from where you are now (panels close together in view, at different
-                // depths). Anything in front of the point on the eye's line of sight wins.
-                const double toPoint = std::sqrt(Dot(point - eye, point - eye));
-                const Hit front = nearest(eye, Normalize(point - eye));
-                if (front.along < toPoint - 0.02) {
-                    occluded = true;
-                    bestKey = front.key, bestScene = front.scene;
-                    point = front.point;
-                    if (!front.scene) edgeKey = front.key, edgePoint = front.point, edgeNormal = Normalize(front.normal),
-                                      edgeLast = front.point;
-                    distance = std::sqrt(Dot(point - anchor, point - anchor));
-                    best = distance;
-                    onEdge = false;
+                // While dragging: keep the press-time distance and show the non-interactive marker.
+                // On a scene-graph plane or a panel's edge: the laser-catching dot goes 5 cm behind it.
+                distance = dragging ? dragDistance : (best < 1e8 ? best : freeDistance);
+                point = anchor + dir * distance;
+                occluded = false;
+                if (!dragging) {
+                    // The cursor lands on what you see under it: the ray above starts at the anchor,
+                    // not the eye, so after leaning it can pick a panel that something nearer
+                    // covers from where you are now (panels close together in view, at different
+                    // depths). Anything in front of the point on the eye's line of sight wins.
+                    const double toPoint = std::sqrt(Dot(point - eye, point - eye));
+                    const Hit front = nearest(eye, Normalize(point - eye));
+                    if (front.along < toPoint - 0.02) {
+                        occluded = true;
+                        bestKey = front.key, bestScene = front.scene;
+                        point = front.point;
+                        if (!front.scene)
+                            edgeKey = front.key, edgePoint = front.point, edgeNormal = Normalize(front.normal),
+                            edgeLast = front.point;
+                        distance = std::sqrt(Dot(point - anchor, point - anchor));
+                        best = distance;
+                        onEdge = false;
+                    }
+                    lastDistance = distance, lastHit = bestKey;
                 }
-                lastDistance = distance, lastHit = bestKey;
             }
             const bool onScene = !dragging && ((bestScene && best < 1e8) || onEdge);
             const bool onPanel = dragging || (best < 1e8 && !onScene);
             const Vec3 sight = Normalize(point - eye);
-            if (!dragging) {
+            if (!dragging && !reuse) {
                 // SteamVR Settings (see the top): the dashboard's main panel is hidden and its
                 // scene-graph panel shows the page.
                 onVrSettings = false;
@@ -2126,6 +2285,10 @@ int main() {
                             onVrSettings = true;
                     }
                 }
+            }
+            if (!reuse) {
+                pass = {!dragging, tnow, visibleGen, yaw, pitch, anchor, eye,
+                        best, distance, bestKey, bestScene, onEdge, occluded, point};
             }
             if (onVrSettings != catcherHidesHit) {
                 overlay->SetOverlayFlag(cursor, vr::VROverlayFlags_HideLaserIntersection, onVrSettings);
@@ -2143,20 +2306,16 @@ int main() {
                     alpha = std::clamp(1 - std::min(secs(lastMove) - gazeShow, secs(lastHeld)) / 0.25, 0.0, 1.0);
                 }
                 if (tnow < calPanelUntil) alpha = 0;
-                overlay->SetOverlayAlpha(marker, float(alpha));
-                overlay->SetOverlayWidthInMeters(marker, float(2 * SETTINGS_DOT * std::tan(cursorDeg * M_PI / 360)));
-                auto mm = Billboard(near, eye);
-                overlay->SetOverlayTransformAbsolute(marker, vr::TrackingUniverseStanding, &mm);
-                overlay->SetOverlayAlpha(cursor, 0);
-                overlay->SetOverlayWidthInMeters(cursor, float(2 * SETTINGS_CATCHER * std::tan(cursorDeg * M_PI / 360)));
-                auto mc = Billboard(far, eye);
-                overlay->SetOverlayTransformAbsolute(cursor, vr::TrackingUniverseStanding, &mc);
-                overlay->ShowOverlay(marker);
-                overlay->ShowOverlay(cursor);
+                markerDot.Alpha(float(alpha));
+                markerDot.Place(near, eye, float(2 * SETTINGS_DOT * std::tan(cursorDeg * M_PI / 360)));
+                cursorDot.Alpha(0);
+                cursorDot.Place(far, eye, float(2 * SETTINGS_CATCHER * std::tan(cursorDeg * M_PI / 360)));
+                markerDot.Show(true);
+                cursorDot.Show(true);
             } else {
                 // On a panel: the non-interactive marker, pulled 5 mm toward the eye so it
                 // draws on top. In free space: the interactive dot the laser lands on.
-                const vr::VROverlayHandle_t show = onPanel ? marker : cursor, hide = onPanel ? cursor : marker;
+                DotOverlay &show = onPanel ? markerDot : cursorDot, &hide = onPanel ? cursorDot : markerDot;
                 const Vec3 at = onPanel ? point + Normalize(eye - point) * 0.005 : onScene ? point + dir * 0.05 : point;
                 const double dist = std::sqrt(Dot(at - eye, at - eye));
                 // Gaze mode: a pulse for each click, and with POINTER_GAZE_DOT=moving, shown only
@@ -2173,12 +2332,10 @@ int main() {
                     }
                 }
                 if (tnow < calPanelUntil) alpha = 0;  // the calibration panel is up (see the top)
-                overlay->SetOverlayAlpha(show, float(alpha));
-                overlay->SetOverlayWidthInMeters(show, float(2 * dist * std::tan(scale * cursorDeg * M_PI / 360)));
-                auto m = Billboard(at, eye);
-                overlay->SetOverlayTransformAbsolute(show, vr::TrackingUniverseStanding, &m);
-                overlay->ShowOverlay(show);
-                overlay->HideOverlay(hide);
+                show.Alpha(float(alpha));
+                show.Place(at, eye, float(2 * dist * std::tan(scale * cursorDeg * M_PI / 360)));
+                show.Show(true);
+                hide.Show(false);
             }
 
             // Controller ray: from the eye, aimed at the cursor point, converted from the
@@ -2223,10 +2380,15 @@ int main() {
                 std::snprintf(msg, sizeof msg, "posq %.5f %.5f %.5f %.6f %.6f %.6f %.6f", oRaw.x, oRaw.y, oRaw.z, q[0],
                               q[1], q[2], q[3]);
                 SendTo(out, "ft_pointer", msg);
-            } else {
+                posed.valid = false;
+            } else if (!posed.valid || tnow - posed.at >= std::chrono::milliseconds(100) ||
+                       Length(eyeRaw - posed.origin) >= 0.0002 || std::fabs(std::remainder(ayaw - posed.yaw, 360.0)) >= 0.04 ||
+                       std::fabs(apitch - posed.pitch) >= 0.04) {
+                // The driver keeps the last pose: only a change goes out (see "Unchanged frames" at the top).
                 char msg[160];
                 std::snprintf(msg, sizeof msg, "pose %.5f %.5f %.5f %.4f %.4f", eyeRaw.x, eyeRaw.y, eyeRaw.z, ayaw, apitch);
                 SendTo(out, "ft_pointer", msg);
+                posed = {true, tnow, eyeRaw, ayaw, apitch};
             }
         }
 
@@ -2275,6 +2437,12 @@ int main() {
 
         vr::VREvent_t ev;
         while (sys->PollNextEvent(&ev, sizeof ev)) {
+            // The dashboard's overlays come and go with it, and a game brings its own.
+            if (ev.eventType == vr::VREvent_DashboardActivated || ev.eventType == vr::VREvent_DashboardDeactivated ||
+                ev.eventType == vr::VREvent_DashboardOverlayCreated || ev.eventType == vr::VREvent_SceneApplicationChanged)
+                overlays.Kick();
+            if (ev.eventType == vr::VREvent_TrackedDeviceActivated || ev.eventType == vr::VREvent_TrackedDeviceDeactivated)
+                ours = vr::k_unTrackedDeviceIndexInvalid;
             if (ev.eventType == vr::VREvent_Quit) {
                 sys->AcknowledgeQuit_Exiting();
 
@@ -2283,6 +2451,15 @@ int main() {
                 return 0;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        // Idle (see the top): wait for a command instead. Not with anything still to finish (the
+        // claim pulse, a click's release, a press).
+        const bool idle = !active && !handsOn && !claimPending && !claimHeld && !clickRelease && !leftHeld &&
+                          hold.src == Src::None;
+        if (idle) {
+            pollfd p{in, POLLIN, 0};
+            poll(&p, 1, controllerButtons.Watching(inGame) ? 20 : 250);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        }
     }
 }

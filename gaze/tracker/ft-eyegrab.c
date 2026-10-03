@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -288,20 +289,53 @@ static int eye_buffer(void) {
 
 // Calls done(frame, slot, time) for every complete eye-camera frame until `seconds` pass
 // (forever if negative), a stop signal comes, the tracker process goes away, or keep()
-// (checked about every 0.25 s, when given) says to stop.
+// (checked about every 0.25 s, when given) says to stop. Looks every `poll_us`.
 //
 // A frame lands over several milliseconds, in bursts, and its last bursts can come after
 // the camera has started its next frame. A slot isn't rewritten until at least three frames
 // later (camera 0 cycles 3,0,1,2; camera 1 7,5,4,6,5,7,6,4), so a frame is passed on when
 // its camera starts the frame after next. Changes to the slot just finished are late bursts,
 // not a new frame. A frame's time is when its slot first changed.
+//
+// Each look checks only the slot each camera writes next: the one that followed the last two
+// before (after[][], seeded with the orders above and learned as frames come). Every check
+// reads 256 words spread over a frame in DMA-BUF memory, so all eight slots each time was
+// most of the cost. A camera with nothing in its expected slot for 1.5 frames, or with no
+// order known yet, has all its slots checked until a frame comes. When that finds a frame
+// somewhere else (the order changed, or a frame was missed), all its slots are checked for
+// SCAN_AFTER_MISS, as before, while after[][] learns the new order. A slot's fingerprint is
+// taken again when it stops being one of the two in use, so a check later sees only a new frame.
+// Between frames it sleeps until FRAME_EARLY before the next one is due (the cameras run at
+// 90 fps, within a ms of each other), then looks every `poll_us`.
+#define FRAME_DUE (1.5 / 90)  // s: a camera that hasn't started a frame by then gets all its slots checked
+#define SCAN_AFTER_MISS 2.0    // s of checking all slots after a frame came in an unexpected one
+#define CAMS_IDLE 0.5          // s without a frame from either camera: look 4 times less often
+#define FRAME_EARLY 0.0025     // s before a frame is due to start looking for it
+
+// When to start looking for the next frame: FRAME_EARLY before the first camera's is due. A
+// camera already late (it lost its order, or stopped) means now.
+static double next_due(const double last[2], double t) {
+    double due = 1e300;
+    for (int cam = 0; cam < 2; cam++) {
+        double d = last[cam] + 1.0 / 90 - FRAME_EARLY;
+        if (t - last[cam] > CAMS_IDLE) continue;  // stopped: the other one sets the pace
+        if (d < due) due = d;
+    }
+    return due < 1e300 ? due : t;
+}
+
 static void poll_frames(int b, double seconds, int pid, void (*done)(const uint8_t *, int, double),
-                        int (*keep)(void)) {
+                        int (*keep)(void), unsigned poll_us) {
+    static const int order[2][8] = {{3, 0, 1, 2, 3, 0, 1, 2}, {7, 5, 4, 6, 5, 7, 6, 4}};
+    int after[EYE_SLOTS][EYE_SLOTS];
+    memset(after, -1, sizeof after);
+    for (int c = 0; c < 2; c++)
+        for (int i = 0; i < 8; i++) after[order[c][i]][order[c][(i + 1) % 8]] = order[c][(i + 2) % 8];
     uint64_t sig[EYE_SLOTS];
     double first[EYE_SLOTS];
     int cur[2] = {-1, -1}, prev[2] = {-1, -1};
     for (int k = 0; k < EYE_SLOTS; k++) sig[k] = frame_sig(bufs[b].p + slot_start(k)), first[k] = 0;
-    double start = now(), checked = start, kept = start;
+    double start = now(), checked = start, kept = start, last[2] = {start, start}, scan_until[2] = {0, 0};
     char proc[64];
     snprintf(proc, sizeof proc, "/proc/%d", pid);
     while ((seconds < 0 || now() - start < seconds) && !stop_rec) {
@@ -315,18 +349,36 @@ static void poll_frames(int b, double seconds, int pid, void (*done)(const uint8
             if (!keep()) return;
             kept = t;
         }
-        for (int k = 0; k < EYE_SLOTS; k++) {
-            uint64_t s = frame_sig(bufs[b].p + slot_start(k));
-            if (s == sig[k]) continue;
-            sig[k] = s;
-            int cam = k >= 4;
-            if (k == cur[cam] || k == prev[cam]) continue;  // landing, or a late burst
-            if (prev[cam] >= 0) done(bufs[b].p + slot_start(prev[cam]), prev[cam], first[prev[cam]]);
-            prev[cam] = cur[cam];
-            cur[cam] = k;
-            first[k] = t;
+        for (int cam = 0; cam < 2; cam++) {
+            int next = prev[cam] >= 0 ? after[prev[cam]][cur[cam]] : -1;
+            int all = next < 0 || t - last[cam] > FRAME_DUE || t < scan_until[cam];
+            int from = all ? cam * 4 : next, to = all ? cam * 4 + 4 : next + 1;
+            for (int k = from; k < to; k++) {
+                uint64_t s = frame_sig(bufs[b].p + slot_start(k));
+                if (s == sig[k]) continue;
+                sig[k] = s;
+                if (k == cur[cam] || k == prev[cam]) continue;  // landing, or a late burst
+                if (next >= 0 && k != next) scan_until[cam] = t + SCAN_AFTER_MISS;
+                if (prev[cam] >= 0) {
+                    done(bufs[b].p + slot_start(prev[cam]), prev[cam], first[prev[cam]]);
+                    after[prev[cam]][cur[cam]] = k;
+                    // Out of use from now on: later changes are a new frame.
+                    sig[prev[cam]] = frame_sig(bufs[b].p + slot_start(prev[cam]));
+                }
+                prev[cam] = cur[cam];
+                cur[cam] = k;
+                first[k] = t;
+                last[cam] = t;
+                next = prev[cam] >= 0 ? after[prev[cam]][cur[cam]] : -1;
+            }
         }
-        usleep(300);
+        double wait = poll_us * 1e-6;
+        if (t - last[0] > CAMS_IDLE && t - last[1] > CAMS_IDLE) {
+            wait *= 4;
+        } else if (next_due(last, t) - t > wait) {
+            wait = next_due(last, t) - t;
+        }
+        usleep((useconds_t)(wait * 1e6));
     }
 }
 
@@ -356,7 +408,7 @@ static int rec(double seconds, const char *dir, int pid) {
     pthread_t writer;
     pthread_create(&writer, NULL, ring_writer, NULL);
     double start = now();
-    poll_frames(b, seconds, pid, rec_frame, NULL);
+    poll_frames(b, seconds, pid, rec_frame, NULL, 300);  // 0.3 ms: recordings' times
     pthread_mutex_lock(&ring.mu);
     ring.done = 1;
     pthread_cond_signal(&ring.cv);
@@ -383,6 +435,10 @@ static int rec(double seconds, const char *dir, int pid) {
 #define SHARE_SLOTS 8
 #define SHARE_MAGIC 0x31434546u  // "FEC1"
 #define WANT_FRESH 3.0           // seconds a touch of the --want file lasts
+// How often --share looks for frames, with a timer slack that lets the kernel group the
+// wakeups: a frame reaches ft-eyes 1 to 1.5 ms after its camera starts the next, not 0.3.
+#define SHARE_POLL_US 1000
+#define SHARE_SLACK_NS 500000
 
 typedef struct {
     uint32_t magic, version, width, height, slots, entry_size;
@@ -462,6 +518,7 @@ static int share_loop(const char *path) {
                         .slots = SHARE_SLOTS, .entry_size = (uint32_t)esize};
     signal(SIGINT, on_stop);
     signal(SIGTERM, on_stop);
+    if (prctl(PR_SET_TIMERSLACK, SHARE_SLACK_NS, 0, 0, 0) != 0) perror("PR_SET_TIMERSLACK");
     fprintf(stderr, "ft-eyegrab: sharing frames in %s%s%s\n", path, want_path ? " while wanted by " : "",
             want_path ? want_path : "");
     int pid = -1, idle = -1, missing = 0;
@@ -486,7 +543,7 @@ static int share_loop(const char *path) {
         if (idle != 0 || missing) fprintf(stderr, "ft-eyegrab: copying frames from eyetracking %d\n", pid);
         idle = 0, missing = 0;
         h->tracker_pid = pid;
-        poll_frames(eye_buffer(), -1, pid, share_frame, wanted);
+        poll_frames(eye_buffer(), -1, pid, share_frame, wanted, SHARE_POLL_US);
         struct stat st;
         char proc[64];
         snprintf(proc, sizeof proc, "/proc/%d", pid);

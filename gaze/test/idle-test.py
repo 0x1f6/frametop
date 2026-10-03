@@ -37,14 +37,26 @@ gazed.read_settings = lambda: ("steam", "steam", "auto", 55.0)
 logs = []
 gazed.log = gazecheck.log = lambda msg: logs.append(msg)
 
-# The fake ft-gaze: 90 samples a second, both eyes seen, until its stdin closes.
+# The fake ft-gaze: 90 samples a second, both eyes seen, until its stdin closes. It logs the
+# sources it was asked for: "argv LIST" (--sources), then "line LIST" for each "sources LIST".
 tmp = tempfile.mkdtemp(prefix="ft-gaze-idle-test-")
 FAKE = os.path.join(tmp, "ft-gaze")
+SOURCES_LOG = os.path.join(tmp, "sources.log")
 with open(FAKE, "w") as f:
-    f.write('''import json, select, sys, time
+    f.write('''import json, os, select, sys, time
+log = open(sys.argv[1], "a", buffering=1)
+log.write("argv " + (sys.argv[sys.argv.index("--sources") + 1] if "--sources" in sys.argv else "-") + "\\n")
+buf = b""
 while True:
-    if select.select([sys.stdin], [], [], 1 / 90)[0] and not sys.stdin.read(1):
-        break
+    if select.select([sys.stdin], [], [], 1 / 90)[0]:
+        data = os.read(0, 4096)
+        if not data:
+            break
+        buf += data
+        while b"\\n" in buf:
+            line, buf = buf.split(b"\\n", 1)
+            if line.startswith(b"sources "):
+                log.write("line " + line[8:].decode() + "\\n")
     eye = {"hy": 1.0, "hp": 2.0}
     print(json.dumps({"t": time.monotonic(), "src": {"mmap1": {"hy": 1.0, "hp": 2.0, "unc": [0.001, 0.001],
           "open": [0.8, 0.8]}, "left": eye, "right": eye}}), flush=True)
@@ -55,8 +67,9 @@ started = []
 def start_helper(self):
     """ft-gaze, straight from here instead of the dev container."""
     import selectors
-    self.proc = subprocess.Popen([sys.executable, FAKE], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
+    self.proc = subprocess.Popen([sys.executable, FAKE, SOURCES_LOG, "--sources", self.wanted_sources()],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    self.proc_sources = self.wanted_sources()
     os.set_blocking(self.proc.stdout.fileno(), False)
     os.set_blocking(self.proc.stderr.fileno(), False)
     self.sel.register(self.proc.stdout, selectors.EVENT_READ, "stdout")
@@ -142,17 +155,24 @@ check("lease over (2 s + IDLE_AFTER): idle", wait(lambda: not svc.awake, 4.5), T
 
 time.sleep(0.5)
 logs.clear()
+open(SOURCES_LOG, "w").close()
 count = len(started)
 check("quick check while idle: queued, waking", ask("quickcal"), "ok waking the eye tracker first")
 check("it woke", wait(lambda: svc.awake and len(started) > count, 1.5), True)
 check("once the tracker sends, it ran (and says why it couldn't open)",
       wait(lambda: any("quickcal, asked for while idle: the panel isn't running" in m for m in logs), 3), True)
 check("nothing left pending", svc.checks.pending, None)
+sources = open(SOURCES_LOG).read().split("\n")
+check("ft-gaze started with every source for the check", sources[0], "argv all")
+in_use = svc.wanted_sources()
+check("then only those in use (SteamVR's tracker: not the action, not own)",
+      (f"line {in_use}" in sources, in_use != "all", "action" in in_use, "own" in in_use), (True, True, False, False))
 check("idle again after", wait(lambda: not svc.awake, 3), True)
 
 print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)
 svc.running = False
 time.sleep(0.7)
 os.remove(FAKE)
+os.remove(SOURCES_LOG)
 os.rmdir(tmp)
 os._exit(1 if failures else 0)

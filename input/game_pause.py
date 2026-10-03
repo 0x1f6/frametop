@@ -65,6 +65,18 @@ RESUME_DELAY = 5.0  # after a VR game ends: loading the next one can end one sce
 GAME_STALE = 12.0  # the helper repeats "vrgame" every 5 s; silence this long means no game (or no SteamVR)
 CHORD_WINDOW = 0.3  # a two-button gesture's buttons go down within this of each other
 DOUBLE_WINDOW = 0.7  # a double press's second press comes within this of the first
+LOOKUP_EVERY = 30.0  # the controllers are looked up again this often (and sooner when they may have changed)
+LOOKUP_GAP = 3.0  # but not more often than this for a message from a device it doesn't know
+
+
+def device_of(text):
+    """A web socket message's "device", without parsing all of it (there are about 160 a second)."""
+    at = text.find('"device"')
+    if at < 0:
+        return None
+    start = text.find('"', text.find(":", at) + 1)
+    end = text.find('"', start + 1)
+    return text[start + 1:end] if 0 <= start < end else None
 
 
 def gesture_of(rules, buttons):
@@ -137,6 +149,12 @@ class ControllerWatch(threading.Thread):
         self.changed = threading.Event()
         self.connected = False
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.lookup_at = None  # look the controllers up again then (see recheck)
+
+    def recheck(self, delay=1.5):
+        """The controllers' root paths may change soon: the 3D mouse's virtual controller is taking
+        or giving back its hand role. SteamVR takes a moment to hand the role over."""
+        self.lookup_at = time.monotonic() + delay
 
     def set_gesture(self, spec):
         """(buttons, presses), or None for no gesture."""
@@ -176,15 +194,22 @@ class ControllerWatch(threading.Thread):
             ws.open(f"frametop_pause_{os.getpid()}")
             sides = {}  # root path -> side
             next_poll = 0.0
+            last_poll = 0.0
             while True:
                 g = self.current()
                 if g is None:
                     return
                 now = time.monotonic()
+                lookup_at = self.lookup_at
+                if lookup_at is not None and now >= lookup_at:
+                    self.lookup_at = None
+                    next_poll = now
                 if now >= next_poll:
                     # A controller connects later, or changes its root path when the 3D mouse's
-                    # virtual controller takes or gives back its hand role.
-                    next_poll = now + 3.0
+                    # virtual controller takes or gives back its hand role. Each lookup is an HTTP
+                    # request to vrserver, so it's at connect, every LOOKUP_EVERY, when a message
+                    # comes from a device not on the list, and when the relay says (recheck).
+                    next_poll, last_poll = now + LOOKUP_EVERY, now
                     found = vrws.controllers()
                     if found != sides:
                         for path in sides.keys() - found.keys():
@@ -199,6 +224,9 @@ class ControllerWatch(threading.Thread):
                                  f"controller{'s' if len(sides) != 1 else ''} on SteamVR's web socket")
                 wanted = {b: (b.split("/", 1)[0], f"/input/{b.split('/', 1)[1]}/click") for b in g.buttons}
                 for text in ws.messages(timeout=1.0):
+                    device = device_of(text)
+                    if device and device not in sides:
+                        next_poll = min(next_poll, last_poll + LOOKUP_GAP)  # its root path changed, maybe
                     # About 160 messages a second, nearly all capacitive sensing: parse only the
                     # few that carry one of the gesture's buttons.
                     if not any(c in text for _, c in wanted.values()):
@@ -469,6 +497,10 @@ class GamePause:
         if self.resume_at is not None:
             return max(0.05, self.resume_at - now)
         return 1.0 if self.game else 3600.0
+
+    def controllers_changed(self):
+        """The 3D mouse took or gave back its hand role, which changes a controller's root path."""
+        self.watch.recheck()
 
     def helper_started(self):
         """The pointer helper (re)started, so SteamVR did too, maybe with the gaze service."""
