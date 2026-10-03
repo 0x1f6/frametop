@@ -566,6 +566,30 @@ class ButtonSessionTest(SessionBase):
         self.assertIn("panel: keys " + session.KEYS_STEP, self.panel)
 
 
+class LightingTest(unittest.TestCase):
+    """The measured lighting label: the mono cameras' ambient infrared."""
+
+    def ring(self, slam, upper):
+        return {"slam_left": {"mean": 70.0, "dark_mean": slam}, "slam_right": {"mean": 80.0, "dark_mean": slam},
+                "upper_left": {"mean": 50.0, "dark_mean": upper}, "upper_right": {"mean": 20.0, "dark_mean": upper}}
+
+    def test_indoor_and_daylight(self):
+        self.assertEqual(session.classify_lighting(self.ring(3.0, 0.5)), "indoor")    # one lamp, 2026-10-02
+        self.assertEqual(session.classify_lighting(self.ring(3.7, 0.7)), "indoor")    # a lamp-lit room
+        self.assertEqual(session.classify_lighting(self.ring(20.0, 8.0)), "daylight")
+        self.assertEqual(session.classify_lighting(self.ring(0.0, 0.0)), "")          # no dark frames yet
+        self.assertEqual(session.classify_lighting(None), "")
+        self.assertEqual(session.ambient_ir(self.ring(3.0, 0.5)), 1.75)
+
+    def test_record(self):
+        rec = session.lighting_record("auto", self.ring(3.0, 0.5))
+        self.assertEqual((rec["chosen"], rec["source"], rec["measured"]), ("indoor", "measured", "indoor"))
+        rec = session.lighting_record("dim", self.ring(3.0, 0.5))
+        self.assertEqual((rec["chosen"], rec["source"], rec["measured"]), ("dim", "picked", "indoor"))
+        rec = session.lighting_record("auto", None)
+        self.assertEqual((rec["chosen"], rec["source"], rec["ring"]), ("", "measured", {}))
+
+
 class ManyPartsTest(unittest.TestCase):
     """A take recorded in 40 parts (step mode stops the recording between steps): review reads
     them in order, export makes one stream, validate passes."""

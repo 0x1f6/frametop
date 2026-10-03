@@ -277,6 +277,98 @@ def similar_lighting(base_dir, lighting):
     return None
 
 
+DAYLIGHT_IR = 6.0   # ambient IR (the mono cameras' mean dark_mean) from which it's daylight
+
+
+def ambient_ir(ring):
+    """The mono cameras' mean dark_mean (the room's infrared light, as ft-hands logs it), or
+    None if none has one. ring is ring_lighting()'s dict."""
+    vals = [float(v.get("dark_mean", 0)) for v in (ring or {}).values() if isinstance(v, dict)]
+    vals = [v for v in vals if v > 0]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def classify_lighting(ring):
+    """"daylight" or "indoor" from the room's infrared light, "" if it can't tell. Sunlight
+    carries a lot of infrared; lamps and LEDs hardly any, so a dim room and a bright one read
+    about the same (2026-10: 1.8 by one lamp, 2.2 in a lamp-lit room) and aren't told apart."""
+    ir = ambient_ir(ring)
+    if ir is None:
+        return ""
+    return "daylight" if ir >= DAYLIGHT_IR else "indoor"
+
+
+def lighting_record(choice, ring):
+    """session.json's "lighting": chosen is the person's pick, or with "auto" (or none) what
+    the cameras measured; measured and ambient_ir are always the cameras' reading."""
+    measured = classify_lighting(ring)
+    picked = choice if choice in ("dim", "room", "daylight") else ""
+    return {"chosen": picked or measured, "source": "picked" if picked else "measured",
+            "measured": measured, "ambient_ir": ambient_ir(ring), "ring": ring or {}}
+
+
+def unit_active(unit):
+    return subprocess.run(host_command("systemctl", "--user", "-q", "is-active", unit),
+                          capture_output=True, timeout=30).returncode == 0
+
+
+def start_unit(unit, what, argv, log=lambda line: None):
+    """Start argv as a transient user unit that stops with SteamVR. True if it started it,
+    False if it was running already; raises RuntimeError if it couldn't."""
+    if unit_active(unit):
+        log("%s is running already" % unit)
+        return False
+    cmd = host_command("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
+                       "--description=Frametop hand recorder: " + what,
+                       "-p", "PartOf=steamvr.service", "-p", "After=steamvr.service",
+                       "-p", "Restart=on-failure", "-p", "RestartSec=3", "-p", "TimeoutStopSec=5", *argv)
+    for attempt in range(3):   # distrobox-host-exec has failed once, silently, and worked again
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 or unit_active(unit):
+            log("started %s" % unit)
+            return True
+        log("starting %s failed (exit %d): %s" % (unit, r.returncode, (r.stderr or r.stdout).strip()))
+        time.sleep(0.5)
+    raise RuntimeError("couldn't start %s (exit %d): %s" % (unit, r.returncode, (r.stderr or r.stdout).strip()))
+
+
+def stop_unit(unit):
+    subprocess.run(host_command("systemctl", "--user", "stop", unit), capture_output=True, timeout=30)
+
+
+def ring_alive(path=None):
+    try:
+        r = Ring(path or os.path.join(run_dir(), "cam-ring"))
+    except (OSError, ValueError):
+        return False
+    try:
+        return r.alive()
+    finally:
+        r.close()
+
+
+def start_camd(path=None, log=lambda line: None, stop=lambda: False, timeout=15.0):
+    """Make sure ft-camd fills the camera ring: start it (CAMD_UNIT) if nothing does. True if
+    it started it, False if a ring was live already; raises RuntimeError if it can't."""
+    path = path or os.path.join(run_dir(), "cam-ring")
+    if ring_alive(path):
+        return False
+    if not os.access(FT_CAMD, os.X_OK):
+        raise RuntimeError("ft-camd isn't built: hands/build.sh")
+    caps = subprocess.run(["getcap", FT_CAMD], capture_output=True, text=True) if shutil.which("getcap") else None
+    if caps is not None and "cap_sys_ptrace" not in caps.stdout:
+        raise RuntimeError("ft-camd needs its capabilities: hands/run.sh caps (asks for sudo)")
+    started = start_unit(CAMD_UNIT, "the camera broker", [FT_CAMD, "--status", "60"], log)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if ring_alive(path):
+            return started
+        if stop():
+            return started
+        time.sleep(0.1)
+    raise RuntimeError("ft-camd didn't start (is SteamVR running?): journalctl --user -u " + CAMD_UNIT)
+
+
 # ------------------------------------------------------------------------------------------
 # The factory calibration, without what identifies the unit
 
@@ -1331,7 +1423,7 @@ class Session:
         self._session_json = {
             "schema": 1, "tool": "ft-handrec " + _git_describe(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "contributor": self.profile.get("contributor", ""),
-            "lighting": {"chosen": self.lighting_choice, "ring": lighting or {}},
+            "lighting": lighting_record(self.lighting_choice, lighting),
             "checklist": self.checklist,
             "device": {"steamos": _os_version(), "steamvr": _steamvr_version(), "cameras": cams},
             "calibration_removed": removed,
@@ -1444,35 +1536,19 @@ class Session:
         return (self._session_json or {}).get("sides", {}).get("swapped")
 
     def _ensure_ring(self, path):
-        def alive():
-            try:
-                r = Ring(path)
-            except (OSError, ValueError):
-                return False
-            try:
-                return r.alive()
-            finally:
-                r.close()
-
-        if alive():
+        if ring_alive(path):
             return
         if self.ring:
             raise _Fail("No frames in %s (start ft-ringplay first)" % path)
         if not self.start_processes:
             raise _Fail("ft-camd isn't running (and --no-start)")
-        if not os.access(FT_CAMD, os.X_OK):
-            raise _Fail("ft-camd isn't built: hands/build.sh")
-        caps = subprocess.run(["getcap", FT_CAMD], capture_output=True, text=True) if shutil.which("getcap") else None
-        if caps is not None and "cap_sys_ptrace" not in caps.stdout:
-            raise _Fail("ft-camd needs its capabilities: hands/run.sh caps (asks for sudo)")
-        self._start_unit(CAMD_UNIT, "the camera broker", [FT_CAMD, "--status", "60"])
-        for _ in range(150):
-            if alive():
-                return
-            if self._want["stop"]:
-                raise _Stop()
-            time.sleep(0.1)
-        raise _Fail("ft-camd didn't start (is SteamVR running?): journalctl --user -u " + CAMD_UNIT)
+        try:
+            if start_camd(path, self._log, lambda: self._want["stop"]):
+                self._units.append(CAMD_UNIT)
+        except RuntimeError as e:
+            raise _Fail(str(e))
+        if self._want["stop"]:
+            raise _Stop()
 
     def _start_tracker(self):
         up = os.path.join(REPO, "scripts", "container-up.sh")
@@ -1485,30 +1561,15 @@ class Session:
         self._start_unit(HANDS_UNIT, "hand tracking for feedback", argv)
 
     def _start_unit(self, unit, what, argv):
-        def active():
-            return subprocess.run(host_command("systemctl", "--user", "-q", "is-active", unit),
-                                  capture_output=True, timeout=30).returncode == 0
-
-        if active():
-            self._log("%s is running already" % unit)
-            return
-        cmd = host_command("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
-                           "--description=Frametop hand recorder: " + what,
-                           "-p", "PartOf=steamvr.service", "-p", "After=steamvr.service",
-                           "-p", "Restart=on-failure", "-p", "RestartSec=3", "-p", "TimeoutStopSec=5", *argv)
-        for attempt in range(3):   # distrobox-host-exec has failed once, silently, and worked again
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if r.returncode == 0 or active():
+        try:
+            if start_unit(unit, what, argv, self._log):
                 self._units.append(unit)
-                self._log("started %s" % unit)
-                return
-            self._log("starting %s failed (exit %d): %s" % (unit, r.returncode, (r.stderr or r.stdout).strip()))
-            time.sleep(0.5)
-        raise _Fail("couldn't start %s (exit %d): %s" % (unit, r.returncode, (r.stderr or r.stdout).strip()))
+        except RuntimeError as e:
+            raise _Fail(str(e))
 
     def _stop_units(self):
         for unit in reversed(self._units):
-            subprocess.run(host_command("systemctl", "--user", "stop", unit), capture_output=True, timeout=30)
+            stop_unit(unit)
             self._log("stopped %s" % unit)
         self._units = []
 
@@ -2369,7 +2430,8 @@ def main():
     ap.add_argument("--base", help="where sessions go (default %s; a temporary folder with --dry-run)" % BASE_DIR)
     ap.add_argument("--objects", default="", help="ticked objects, comma-separated (unknown names are your own)")
     ap.add_argument("--controllers", action="store_true", help="controllers with the straps")
-    ap.add_argument("--lighting", default="room", choices=("dim", "room", "daylight"))
+    ap.add_argument("--lighting", default="auto", choices=("auto", "dim", "room", "daylight"),
+                    help="this round's light (auto: indoor or daylight, from the cameras)")
     ap.add_argument("--script", default=SCRIPT_PATH)
     ap.add_argument("--panel", help="the panel program (default hands/rec/build/ft-handpanel)")
     ap.add_argument("--hands-dir", help="where the hands file is (default /run/user/UID/frametop-hands)")
@@ -2468,6 +2530,8 @@ def main():
         light = ring_lighting(a.ring)
         match = similar_lighting(base, {"chosen": a.lighting, "ring": light}) if light else None
         print("lighting: %s" % (json.dumps(light) if light else "no camera ring"))
+        if light:
+            print("  measured: %s (ambient IR %s)" % (classify_lighting(light) or "can't tell", ambient_ir(light)))
         if match:
             print("  about the same light as session %s (%s)" % match)
 

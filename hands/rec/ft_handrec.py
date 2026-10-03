@@ -68,7 +68,11 @@ ROUND_BYTES = 10 * 1000 ** 3  # about what one round of recording takes
 OBJECTS = [("pencil", "Pencil or pen"), ("phone", "Phone"), ("cup", "Cup or mug (empty)"),
            ("keyboard", "Keyboard"), ("mouse", "Mouse"), ("gamepad", "Gamepad"),
            ("small", "Something small (a coin, a key, a bottle cap)")]
-LIGHTING = [("dim", "Dim: one lamp only"), ("room", "Normal room light"), ("daylight", "Daylight near a window")]
+# "auto": the cameras' measurement (session.classify_lighting: indoor or daylight); the rest
+# correct it, since the cameras can't tell a dim room from a bright one.
+LIGHTING = [("auto", "Measured by the cameras"), ("dim", "Dim: one lamp only"), ("room", "Normal room light"),
+            ("daylight", "Daylight near a window")]
+LIGHTING_TEXT = dict(LIGHTING[1:], indoor="Indoor light")
 SLEEVES = [("short", "Short sleeves or bare arms"), ("long", "Long sleeves"), ("", "Rather not say")]
 HANDEDNESS = [("", "Rather not say"), ("right", "Right-handed"), ("left", "Left-handed"),
               ("both", "Both (ambidextrous)")]
@@ -207,7 +211,7 @@ class Backend(QObject):
     message = Signal(str, bool)  # text, is error
     # From other threads (the session runner, export, the lighting check): queued to this one.
     _statusArrived = Signal(dict)
-    _lightingArrived = Signal(str)
+    _lightingArrived = Signal(str, str)
     _exportProgress = Signal(float, str)
     _exportFinished = Signal(str, str)  # path, error ("" when it worked; "cancelled")
     loginChanged = Signal()
@@ -236,6 +240,9 @@ class Backend(QObject):
         self._session_id = ""
         self._status = {}
         self._lighting_note = ""
+        self._lighting_measured = ""
+        self._lighting_busy = False
+        self._camd_started = False   # ft-camd started for the light check: stopped on quit
         self._export_cancel = None
         self._export_thread = None
         self._export_fraction = 0.0
@@ -354,37 +361,56 @@ class Backend(QObject):
 
     @Property(str, notify=lightingChanged)
     def lightingNote(self):
+        """A warning: this light is like an earlier round's, or it couldn't be measured."""
         return self._lighting_note
+
+    @Property(str, notify=lightingChanged)
+    def lightingMeasured(self):
+        """What the cameras see: "Indoor light" or "Daylight…", "Measuring…", or ""."""
+        return "Measuring…" if self._lighting_busy else self._lighting_measured
 
     @Slot(str)
     def checkLighting(self, chosen):
-        """Compare the cameras' brightness now with earlier rounds (session.similar_lighting):
-        a round in light like an earlier one adds less to the dataset."""
+        """Measure the light (starting ft-camd if nothing runs it) and compare it with earlier
+        rounds (session.similar_lighting): a round in light like an earlier one adds less."""
         mod = self._runner()
-        if not mod:
+        if not mod or self._lighting_busy:
             return
         base = self.store.base
-        labels = dict(LIGHTING)
+        self._lighting_busy = True
+        self.lightingChanged.emit()
 
         def run():
+            measured = ""
             try:
                 ring = mod.ring_lighting()
+                if ring is None and not self.sessionActive:
+                    if mod.start_camd():
+                        self._camd_started = True
+                    time.sleep(1.0)    # the first near-black frames
+                    ring = mod.ring_lighting()
                 if ring is None:
-                    note = ("The cameras aren't running yet, so the light can't be compared with your "
-                            "earlier rounds now. The session checks it when it starts.")
+                    note = ("The cameras aren't running, so the light can't be measured now. The session "
+                            "measures it when it starts.")
                 else:
+                    kind = mod.classify_lighting(ring)
+                    ir = mod.ambient_ir(ring)
+                    measured = (f"{LIGHTING_TEXT.get(kind, kind)} (infrared {ir:.1f})" if kind
+                                else "The cameras couldn't measure the light yet.")
                     match = mod.similar_lighting(base, {"chosen": chosen, "ring": ring})
                     note = "" if not match else (
                         f"The cameras see about the same light as in your round of {session_label(match[0])} "
-                        f"({labels.get(match[1], match[1] or 'no choice')}). A different light helps the "
+                        f"({LIGHTING_TEXT.get(match[1], match[1] or 'not given')}). A different light helps the "
                         "dataset more: change the lighting if you can, or go ahead anyway.")
             except Exception as e:
-                note = f"Couldn't check the light: {e}"
-            self._lightingArrived.emit(note)
+                note = f"Couldn't measure the light: {e}"
+            self._lightingArrived.emit(note, measured)
         self._thread(run)
 
-    def _on_lighting(self, note):
+    def _on_lighting(self, note, measured):
+        self._lighting_busy = False
         self._lighting_note = note
+        self._lighting_measured = measured
         self.lightingChanged.emit()
 
     # --- the camera check (hands/camcheck.py through session.camera_check)
@@ -618,6 +644,11 @@ class Backend(QObject):
         if self._upload_proc:
             self.cancelUpload()
             self._upload_thread.join(10)
+        if self._camd_started and self._session_mod:
+            try:
+                self._session_mod.stop_unit(self._session_mod.CAMD_UNIT)
+            except Exception:
+                pass
 
     # --- review
     @Property("QVariantList", notify=sessionsChanged)
@@ -627,7 +658,7 @@ class Backend(QObject):
             s["label"] = session_label(s["id"])
             s["sizeText"] = takes.human_bytes(s["bytes"])
             s["exportText"] = takes.human_bytes(s["export_bytes"]) if s["exported"] else ""
-            s["lightingText"] = dict(LIGHTING).get(s["lighting"], "")
+            s["lightingText"] = LIGHTING_TEXT.get(s["lighting"], "")
             s["active"] = self.sessionActive and s["id"] == self._session_id
             s["statusText"] = {"recording": "" if s["active"] else "interrupted", "error": "ended with an error",
                                "stopped": "stopped early"}.get(s["status"], "")

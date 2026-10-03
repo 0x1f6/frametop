@@ -245,7 +245,7 @@ Kirigami.ApplicationWindow {
             id: checklist
             title: "Before you start"
             readonly property bool privacyOk: privacy1.checked && privacy2.checked && privacy3.checked
-            readonly property bool ready: privacyOk && lighting.currentIndex >= 0 && backend.diskOk
+            readonly property bool ready: privacyOk && backend.diskOk
                                           && backend.runnerError === "" && !backend.sessionActive
 
             function answers() {
@@ -336,33 +336,40 @@ Kirigami.ApplicationWindow {
                 }
 
                 Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Light" }
+                Controls.Label {
+                    Kirigami.FormData.label: "The cameras see:"
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    wrapMode: Text.Wrap
+                    text: backend.lightingMeasured || "Not measured yet"
+                }
                 Controls.ComboBox {
                     id: lighting
                     Kirigami.FormData.label: "Lighting this round:"
                     model: backend.lightingChoices
                     textRole: "text"
                     valueRole: "value"
-                    currentIndex: -1
-                    displayText: currentIndex < 0 ? "Choose…" : currentText
+                    currentIndex: 0
                     onActivated: backend.checkLighting(currentValue)
+                    Component.onCompleted: backend.checkLighting(currentValue)
                 }
                 Controls.Label {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     wrapMode: Text.Wrap
                     opacity: 0.7
-                    text: "Each round in a different light helps the most: dim, a normal room, daylight."
+                    text: "Each round in a different light helps the most: dim, a normal room, daylight. The cameras "
+                          + "tell daylight from indoor light themselves; to say dim or a normal room, pick it here."
                 }
                 Kirigami.InlineMessage {
                     Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     Layout.fillWidth: true
-                    visible: backend.lightingNote !== "" && lighting.currentIndex >= 0
+                    visible: backend.lightingNote !== ""
                     Layout.preferredHeight: visible ? implicitHeight : 0
                     type: Kirigami.MessageType.Warning
                     text: backend.lightingNote
                 }
                 Controls.Button {
-                    visible: backend.lightingNote !== "" && lighting.currentIndex >= 0
-                    text: "Check the light again"
+                    visible: backend.lightingNote !== "" || backend.lightingMeasured === ""
+                    text: "Measure the light again"
                     icon.name: "view-refresh"
                     onClicked: backend.checkLighting(lighting.currentValue)
                 }
@@ -529,7 +536,6 @@ Kirigami.ApplicationWindow {
                     visible: (!checklist.ready || backend.camerasBlockStart) && !backend.sessionActive
                     opacity: 0.7
                     text: !checklist.privacyOk ? "Tick the three privacy checks to start."
-                          : lighting.currentIndex < 0 ? "Choose the lighting to start."
                           : backend.camerasBlockStart ? "The headset's cameras aren't all running: see the message at the top." : ""
                 }
             }

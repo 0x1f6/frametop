@@ -76,7 +76,8 @@ No name, email, or account. The contributor id is random, so several sessions fr
 
 ```json
 {"schema": 1, "tool": "ft-handrec <git describe>", "started": "<ISO>", "contributor": "<uuid>",
- "lighting": {"chosen": "dim|room|daylight", "ring": {"<cam>": {"mean": 0.0, "dark_mean": 0.0}}},
+ "lighting": {"chosen": "dim|room|daylight|indoor", "source": "measured|picked", "measured": "indoor|daylight|",
+              "ambient_ir": 0.0, "ring": {"<cam>": {"mean": 0.0, "dark_mean": 0.0}}},
  "checklist": {"objects": ["pencil", "phone", "cup", "keyboard", "mouse", "gamepad", "small"], "own_objects": ["..."],
                "controllers": "straps|none", "sleeves": "short|long|", "rings": false, "watch": false, "notes": ""},
  "device": {"steamos": "<VERSION_ID from /etc/os-release>", "steamvr": "<version if known>", "cameras": [{"name", "width", "height"}]},
@@ -279,7 +280,8 @@ Before section 7: "Put on both controllers and tighten the straps". Before secti
 
 - **Hands seen:** from the hands file. A hand counts as seen if its flags match the side and the file is fresh (publish within 0.3 s). Prompts with `hands` set show the `hands` chips. If an asked-for hand is lost for more than 1.5 s, the note says "I can't see your left hand: bring it into view".
 - **Controller tracking:** in sections 8 and 9, `devices` is polled once a second. A result other than 200 for more than 1 s says "The left controller lost tracking: turn your palm slightly toward you". Each such stretch goes into `prompts.jsonl` as `feedback` with `"controller": {...}`.
-- **Lighting check at session start:** the mean of every mono camera's `mean` and `dark_mean` from the ring (`hands/tools/ring.py` layout; struct only, no numpy). It's compared with the person's earlier sessions. If the chosen lighting matches an earlier round's within 15%, the window says so before starting.
+- **Lighting, measured:** the checklist page measures the light when it opens, starting ft-camd (`frametop-handrec-camd.service`) if nothing runs it; the window stops it again on quit if it started it. The mean of every mono camera's `mean` and `dark_mean` from the ring (`hands/tools/ring.py` layout; struct only, no numpy) is compared with the person's earlier sessions. If it matches an earlier round's within 15%, the window says so before starting.
+- **Lighting label:** "Measured by the cameras" is the default. `ambient_ir`, the mono cameras' mean `dark_mean` (the room's infrared), labels the round `daylight` from 6.0 and `indoor` below (`session.classify_lighting`). Lamps and LEDs give off hardly any infrared, so a dim room and a lit one read about the same (1.8 by one lamp, 2.2 in a lamp-lit room) and the cameras can't tell them apart; the person can pick dim, room or daylight instead (`source: "picked"`). The 6.0 threshold is a guess until a daylight round is measured.
 
 ### Camera check
 
