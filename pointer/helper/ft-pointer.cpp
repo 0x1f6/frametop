@@ -311,6 +311,7 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -500,29 +501,62 @@ std::string JsonQuote(const std::string &s) {
 // public call to enumerate other apps' overlays). Hidden ones are listed too: the
 // window controls under a floating panel only appear while something hovers the
 // panel, and the cursor has to find them the moment they do, not a second later.
+// Each vrcmd run is a shell and a new SteamVR client, about 30 ms of CPU, so the list is read
+// every 20 seconds (kEvery) while the pointer is awake, and at once when something says it may
+// have changed (Kick: the pointer waking, the dashboard opening or closing, a click that hit
+// nothing), at most once a second. Showing and hiding the overlays it knows doesn't need a new
+// list: the main loop polls their visibility (IsOverlayVisible) every 50 ms.
 // Paused while the pointer is off: each vrcmd run connects to SteamVR as a new app, and a new
 // app every second kept SteamVR (and the headset's displays) from going to standby.
 // "overlays" requests (Frametop Input Settings' Ignored panels page) refresh the list even
 // while paused, and are answered from this thread once it's fresh.
 class OverlayList {
 public:
+    static constexpr auto kEvery = std::chrono::seconds(20), kGap = std::chrono::seconds(1);
     void Start() {
         out_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         thread_ = std::thread([this] {
+            std::unique_lock<std::mutex> lk(lock_);
             while (running_) {
-                if (!paused_ || requested_) Refresh();
-                // Wait a second, or less when the pointer wakes (refresh right away then).
-                for (int i = 0; i < 10 && running_; ++i) {
-                    const bool wasPaused = paused_;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if ((wasPaused && !paused_) || requested_) break;
+                // Sleeps while paused (until a request or the wake); otherwise until it's time, or
+                // a kick once kGap has passed since the last read.
+                const auto due = std::max(last_ + kGap, kicked_ ? last_ : last_ + kEvery);
+                if (!waiting_.empty()) {
+                } else if (paused_) {
+                    cv_.wait(lk);
+                    continue;
+                } else if (std::chrono::steady_clock::now() < due) {
+                    cv_.wait_until(lk, due);
+                    continue;
                 }
+                kicked_ = false;
+                lk.unlock();
+                Refresh();
+                lk.lock();
+                last_ = std::chrono::steady_clock::now();
             }
         });
     }
-    void SetPaused(bool paused) { paused_ = paused; }
+    // Unpausing (the pointer woke) reads the list again at once.
+    void SetPaused(bool paused) {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (paused == paused_) return;
+        if (!paused) kicked_ = true, last_ = {};
+        paused_ = paused;
+        cv_.notify_one();
+    }
+    // The list may have changed: read it again soon (not while paused).
+    void Kick() {
+        std::lock_guard<std::mutex> guard(lock_);
+        kicked_ = true;
+        cv_.notify_one();
+    }
     void Stop() {
-        running_ = false;
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            running_ = false;
+            cv_.notify_one();
+        }
         if (thread_.joinable()) thread_.join();
     }
     std::vector<std::string> Keys() {
@@ -531,12 +565,14 @@ public:
         for (const auto &e : entries_) keys.push_back(e.key);
         return keys;
     }
+    // Goes up by one each time the list is read, so the main loop knows to look the keys up again.
+    unsigned Generation() const { return generation_; }
     // Answer `to` with {"t":"overlays","list":[{"key","name","visible"}...]} after the next refresh.
     void Request(const sockaddr_un &to, socklen_t len) {
         if (len <= offsetof(sockaddr_un, sun_path)) return;
         std::lock_guard<std::mutex> guard(lock_);
         if (waiting_.size() < 8) waiting_.push_back({to, len});
-        requested_ = true;
+        cv_.notify_one();
     }
 
 private:
@@ -545,7 +581,6 @@ private:
         bool visible;
     };
     void Refresh() {
-        requested_ = false;
         FILE *p = popen("LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrcmd --overlays 2>/dev/null", "r");
         if (!p) return;
         std::vector<Entry> entries;
@@ -577,6 +612,7 @@ private:
             entries_ = std::move(entries);
             waiting.swap(waiting_);
         }
+        ++generation_;
         if (waiting.empty()) return;
         std::string msg = "{\"t\":\"overlays\",\"list\":[";
         for (size_t i = 0; i < entries_.size(); ++i)
@@ -589,10 +625,11 @@ private:
 
     std::thread thread_;
     int out_ = -1;
-    std::atomic<bool> paused_{false};
-    std::atomic<bool> running_{true};
-    std::atomic<bool> requested_{false};
-    std::mutex lock_;
+    std::mutex lock_;  // guards everything below
+    std::condition_variable cv_;
+    bool paused_ = false, running_ = true, kicked_ = false;
+    std::chrono::steady_clock::time_point last_{};  // the last read
+    std::atomic<unsigned> generation_{0};
     std::vector<Entry> entries_;  // written only by the thread; the lock guards readers
     std::vector<std::pair<sockaddr_un, socklen_t>> waiting_;
 };
@@ -965,6 +1002,8 @@ int main() {
             if (debug) std::fflush(stdout);
         }
         nudging = confirmLesson = false;
+        // A click on nothing: maybe on an overlay that came up since the list was read.
+        if (lastHit.empty()) overlays.Kick();
         leftHeld = true;
         dragDistance = lastDistance;
         pressKey.clear();
@@ -1089,6 +1128,7 @@ int main() {
                !aimHeld && !leftHeld && !tilting && hold.src == Src::None && !clickPress && !clickRelease;
     };
     auto lastSlow = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    unsigned listGeneration = 0;  // the overlay list the handles were looked up from
 
     // --- Panel placement (see "Placement" at the top of the file) ---
     // Device pose, given in the standing universe, sent to the driver in raw space.
@@ -1928,10 +1968,11 @@ int main() {
         }
         followAt = tnow;
 
-        // Slow work, once a second: overlay handles, our device index, laser width.
+        // Slow work, once a second and when the overlay list is new: overlay handles, our device index.
         const auto now = std::chrono::steady_clock::now();
-        if (now - lastSlow > std::chrono::seconds(1)) {
+        if (now - lastSlow > std::chrono::seconds(1) || overlays.Generation() != listGeneration) {
             lastSlow = now;
+            listGeneration = overlays.Generation();
             handles.clear();
             for (const auto &key : overlays.Keys()) {
                 if (Ignored(ignore, key)) continue;
@@ -2275,6 +2316,10 @@ int main() {
 
         vr::VREvent_t ev;
         while (sys->PollNextEvent(&ev, sizeof ev)) {
+            // The dashboard's overlays come and go with it, and a game brings its own.
+            if (ev.eventType == vr::VREvent_DashboardActivated || ev.eventType == vr::VREvent_DashboardDeactivated ||
+                ev.eventType == vr::VREvent_DashboardOverlayCreated || ev.eventType == vr::VREvent_SceneApplicationChanged)
+                overlays.Kick();
             if (ev.eventType == vr::VREvent_Quit) {
                 sys->AcknowledgeQuit_Exiting();
 
