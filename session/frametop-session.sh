@@ -234,6 +234,40 @@ elif [ "$(kreadconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
 fi
 
+# KWin draws through zink on the headset's GPU, which vrcompositor needs, so the blur and
+# background contrast behind panels and menus and the window animations cost frames for
+# little. They're off by default in this desktop. Each is written once, before KWin first
+# reads it, and only if this desktop's config doesn't have it yet; the marker keeps it
+# from coming back, since System Settings deletes a setting put back to KDE's default.
+# docs/reference.md says how to turn them on again.
+default() {  # file group key value
+  [ -n "$(kreadconfig6 --file "$1" --group "$2" --key "$3")" ] || kwriteconfig6 --file "$1" --group "$2" --key "$3" "$4"
+}
+frametoprc=$XDG_CONFIG_HOME/frametoprc
+if [ "$(kreadconfig6 --file "$frametoprc" --group Defaults --key effects)" != 1 ]; then
+  default "$kwinrc" Plugins blurEnabled false
+  default "$kwinrc" Plugins contrastEnabled false
+  default "$XDG_CONFIG_HOME/kdeglobals" KDE AnimationDurationFactor 0
+  kwriteconfig6 --file "$frametoprc" --group Defaults --key effects 1
+fi
+
+# System autostart entries this desktop doesn't need, hidden for it alone by a copy with
+# Hidden=true in its own autostart folder, once and unless there's a file of that name
+# already. Discover's update notifier starts Discover itself to check for updates (about
+# 600 MB and a share of a core, with Flatpak's helper and AppStream behind it); updates
+# come with SteamOS and from Discover in the stock desktop. IBus can't reach the
+# desktop's apps: KWin's input method is ft-textinput, and the session drops the
+# variables that point apps at IBus or XIM. Deleting the copy brings an entry back.
+if [ "$(kreadconfig6 --file "$frametoprc" --group Defaults --key autostart)" != 1 ]; then
+  for entry in org.kde.discover.notifier ibus; do
+    src=/etc/xdg/autostart/$entry.desktop dst=$XDG_CONFIG_HOME/autostart/$entry.desktop
+    [ -r "$src" ] && [ ! -e "$dst" ] || continue
+    mkdir -p "$(dirname "$dst")"
+    sed '/^\[Desktop Entry\]$/a Hidden=true' "$src" > "$dst"
+  done
+  kwriteconfig6 --file "$frametoprc" --group Defaults --key autostart 1
+fi
+
 # Profiles reopen apps (docs/profiles.md), so Plasma's own session restore stays off here;
 # with both, apps would open twice.
 kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginMode emptySession

@@ -306,14 +306,19 @@ int main() {
         std::printf("displays on: %s\n", why.c_str());
     };
 
+    // SteamVR is asked every 100 ms (events, the activity level, poses: IPC calls to
+    // vrserver). Input wakes the loop too, to wake the displays at once, but a moving mouse
+    // sends hundreds of events a second, so those wakes only drain the devices.
+    constexpr auto kTick = std::chrono::milliseconds(100);
+    auto lastVr = now - kTick;
     std::vector<pollfd> fds;
     while (!stopSignal) {
-        // Sleep until input or 100 ms: input wakes the displays at once, poses every tick.
         fds.clear();
         fds.push_back({ctl, POLLIN, 0});
         for (auto &[path, d] : inputs)
             if (d.fd >= 0) fds.push_back({d.fd, POLLIN, 0});
-        poll(fds.data(), fds.size(), 100);
+        const auto wait = std::chrono::ceil<std::chrono::milliseconds>(kTick - (Clock::now() - lastVr));
+        poll(fds.data(), fds.size(), std::clamp<int>(wait.count(), 0, kTick.count()));
         now = Clock::now();
         const bool grace = now < graceUntil;
         std::string use;  // why this tick counts as use
@@ -329,71 +334,74 @@ int main() {
             lastConf = now;
         }
 
-        vr::VREvent_t ev;
-        while (sys->PollNextEvent(&ev, sizeof ev)) {
-            if (ev.eventType == vr::VREvent_Quit) {
-                stopSignal = SIGTERM;
-                sys->AcknowledgeQuit_Exiting();
-            } else if (ev.eventType == vr::VREvent_TrackedDeviceActivated ||
-                       ev.eventType == vr::VREvent_TrackedDeviceDeactivated) {
-                lastClasses = now - std::chrono::hours(1);
-            }
-        }
-        if (now - lastClasses > std::chrono::seconds(5)) {
-            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
-                classes[i] = sys->GetTrackedDeviceClass(i);
-            lastClasses = now;
-        }
-
-        // SteamVR's standby (headset taken off) turns the displays off itself; putting the
-        // headset on again (or the mount covering the sensor again) counts as use.
-        // A change counts once it has held for a second (the first reading after connecting
-        // is Idle).
-        const auto level = sys->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
-        const bool awayNow = level == vr::k_EDeviceActivityLevel_Idle || level == vr::k_EDeviceActivityLevel_Standby ||
-                             level == vr::k_EDeviceActivityLevel_Idle_Timeout;
-        if (awayNow == away) awaySince = now;
-        if (awayNow != away && now - awaySince >= std::chrono::seconds(1)) {
-            away = awayNow;
-            std::printf("SteamVR: headset %s\n", away ? "off (SteamVR's standby has the displays)" : "on");
-            if (!away) use = "headset on again";
-        }
-
-        // Raw poses: recentering or a new play area doesn't move anything.
-        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0, poses, vr::k_unMaxTrackedDeviceCount);
-        for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {
-            const auto c = classes[i];
-            if (c != vr::TrackedDeviceClass_HMD && c != vr::TrackedDeviceClass_Controller &&
-                c != vr::TrackedDeviceClass_GenericTracker)
-                continue;
-            const auto &p = poses[i];
-            if (!p.bPoseIsValid || p.eTrackingResult != vr::TrackingResult_Running_OK) {
-                anchors[i].set = false;  // tracking back or a controller turned on: start over
-                continue;
-            }
-            if (!anchors[i].set || grace || now - anchors[i].at > kMoveWindow) {
-                SetAnchor(anchors[i], p.mDeviceToAbsoluteTracking, now);
-                continue;
-            }
-            double metres, degrees;
-            Distance(anchors[i], p.mDeviceToAbsoluteTracking, metres, degrees);
-            if (metres > moveMetres || degrees > moveDegrees) {
-                SetAnchor(anchors[i], p.mDeviceToAbsoluteTracking, now);
-                if (use.empty()) {
-                    char why[96];
-                    std::snprintf(why, sizeof why, "%s %u moved %.1f mm, %.2f deg",
-                                  c == vr::TrackedDeviceClass_HMD ? "headset" : "device", i, metres * 1000, degrees);
-                    use = why;
+        if (now - lastVr >= kTick) {
+            lastVr = now;
+            vr::VREvent_t ev;
+            while (sys->PollNextEvent(&ev, sizeof ev)) {
+                if (ev.eventType == vr::VREvent_Quit) {
+                    stopSignal = SIGTERM;
+                    sys->AcknowledgeQuit_Exiting();
+                } else if (ev.eventType == vr::VREvent_TrackedDeviceActivated ||
+                           ev.eventType == vr::VREvent_TrackedDeviceDeactivated) {
+                    lastClasses = now - std::chrono::hours(1);
                 }
             }
-        }
+            if (now - lastClasses > std::chrono::seconds(5)) {
+                for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+                    classes[i] = sys->GetTrackedDeviceClass(i);
+                lastClasses = now;
+            }
 
-        if (off && ReadInt(kBacklight, -1) > 0) {
-            // Something else lit them (SteamVR leaving standby, the brightness setting).
-            off = false;
-            std::remove(SavedPath().c_str());
-            use = "turned on elsewhere";
-            std::printf("displays on: turned on elsewhere\n");
+            // SteamVR's standby (headset taken off) turns the displays off itself; putting the
+            // headset on again (or the mount covering the sensor again) counts as use.
+            // A change counts once it has held for a second (the first reading after connecting
+            // is Idle).
+            const auto level = sys->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+            const bool awayNow = level == vr::k_EDeviceActivityLevel_Idle || level == vr::k_EDeviceActivityLevel_Standby ||
+                                 level == vr::k_EDeviceActivityLevel_Idle_Timeout;
+            if (awayNow == away) awaySince = now;
+            if (awayNow != away && now - awaySince >= std::chrono::seconds(1)) {
+                away = awayNow;
+                std::printf("SteamVR: headset %s\n", away ? "off (SteamVR's standby has the displays)" : "on");
+                if (!away) use = "headset on again";
+            }
+
+            // Raw poses: recentering or a new play area doesn't move anything.
+            sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0, poses, vr::k_unMaxTrackedDeviceCount);
+            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+                const auto c = classes[i];
+                if (c != vr::TrackedDeviceClass_HMD && c != vr::TrackedDeviceClass_Controller &&
+                    c != vr::TrackedDeviceClass_GenericTracker)
+                    continue;
+                const auto &p = poses[i];
+                if (!p.bPoseIsValid || p.eTrackingResult != vr::TrackingResult_Running_OK) {
+                    anchors[i].set = false;  // tracking back or a controller turned on: start over
+                    continue;
+                }
+                if (!anchors[i].set || grace || now - anchors[i].at > kMoveWindow) {
+                    SetAnchor(anchors[i], p.mDeviceToAbsoluteTracking, now);
+                    continue;
+                }
+                double metres, degrees;
+                Distance(anchors[i], p.mDeviceToAbsoluteTracking, metres, degrees);
+                if (metres > moveMetres || degrees > moveDegrees) {
+                    SetAnchor(anchors[i], p.mDeviceToAbsoluteTracking, now);
+                    if (use.empty()) {
+                        char why[96];
+                        std::snprintf(why, sizeof why, "%s %u moved %.1f mm, %.2f deg",
+                                      c == vr::TrackedDeviceClass_HMD ? "headset" : "device", i, metres * 1000, degrees);
+                        use = why;
+                    }
+                }
+            }
+
+            if (off && ReadInt(kBacklight, -1) > 0) {
+                // Something else lit them (SteamVR leaving standby, the brightness setting).
+                off = false;
+                std::remove(SavedPath().c_str());
+                use = "turned on elsewhere";
+                std::printf("displays on: turned on elsewhere\n");
+            }
         }
         if (!use.empty()) {
             lastUse = now;

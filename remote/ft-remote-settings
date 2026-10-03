@@ -83,6 +83,7 @@ class Window(Adw.ApplicationWindow):
         self.status = {}
         self.revealed = False
         self.setting = False  # the switch is being set from the status, not by the user
+        self.asking = False  # a status check is running
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
@@ -139,16 +140,27 @@ class Window(Adw.ApplicationWindow):
                         "/tmp/frametop-remote.log and /tmp/frametop-vnc.log.")
         page.add(about)
 
+        # Each check runs remote-ctl.sh (bash, curl, and python3 for the tailnet name), so
+        # it runs every 5 seconds, when the window comes to the front, and after a change.
         self.refresh()
-        GLib.timeout_add_seconds(2, self.refresh)
+        GLib.timeout_add_seconds(5, self.refresh)
+        self.connect("notify::is-active", lambda win, _param: win.is_active() and win.refresh())
 
     # --- status ---
     def refresh(self):
-        proc = Gio.Subprocess.new([CTL, "status"], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
-        proc.communicate_utf8_async(None, None, self.on_status)
+        if not self.asking:
+            self.asking = True
+            proc = Gio.Subprocess.new([CTL, "status"], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+            proc.communicate_utf8_async(None, None, self.on_status)
         return True
 
+    def refresh_soon(self):
+        """Again in a moment: remote access takes a second or two to start or stop."""
+        self.refresh()
+        GLib.timeout_add_seconds(2, lambda: self.refresh() and False)
+
     def on_status(self, proc, result):
+        self.asking = False
         try:
             _, out, _ = proc.communicate_utf8_finish(result)
         except GLib.Error:
@@ -197,7 +209,7 @@ class Window(Adw.ApplicationWindow):
             self.toast("Remote access turns on at the next desktop restart")
         else:
             self.toast("Remote access on")
-        self.refresh()
+        self.refresh_soon()
 
     def on_reveal(self, button):
         self.revealed = button.get_active()
@@ -221,7 +233,7 @@ class Window(Adw.ApplicationWindow):
         if self.status.get("running") == "1":
             subprocess.run([CTL, "restart"], stdin=subprocess.DEVNULL, capture_output=True)
         self.toast("New password set" + (": remote access restarted" if self.status.get("running") == "1" else ""))
-        self.refresh()
+        self.refresh_soon()
 
     def copy(self, text, done):
         if text:
