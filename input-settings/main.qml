@@ -969,6 +969,14 @@ Kirigami.ApplicationWindow {
             title: "Gaze"
             header: DriverWarning {}
             property var status: backend.gazeStatus
+            // The gaze service idles while the gaze isn't used; open, this page keeps it going.
+            Timer {
+                running: true
+                repeat: true
+                interval: 10000
+                triggeredOnStart: true
+                onTriggered: backend.keepGazeAwake()
+            }
             actions: [
                 Kirigami.Action {
                     text: "Quick check"
@@ -1202,7 +1210,8 @@ Kirigami.ApplicationWindow {
                 Controls.Label {
                     Kirigami.FormData.label: "Service:"
                     text: backend.gazeServiceRunning
-                          ? (gpage.status.ft_gaze ? "running" : "running, eye tracker reader restarting")
+                          ? (gpage.status.awake === false ? "idle: " + gpage.status.idle + " (it starts when the gaze is used)"
+                             : gpage.status.ft_gaze ? "running" : "running, eye tracker reader starting")
                           : backend.gazeServiceInstalled ? "not running (frametop-gaze.service, starts with SteamVR)"
                           : "not installed: run gaze/run.sh install in the Frametop folder, in a terminal"
                     color: backend.gazeServiceRunning ? Kirigami.Theme.textColor : Kirigami.Theme.negativeTextColor

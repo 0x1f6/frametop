@@ -1164,6 +1164,12 @@ class Backend(QObject):
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
 
     @Slot()
+    def keepGazeAwake(self):
+        """The Gaze page is open: the gaze service doesn't idle meanwhile (its status stays live,
+        and a check opens without waiting for the tracker). The page renews this every 10 s."""
+        self._send("wake 30", GAZED)
+
+    @Slot()
     def gazeQuickCheck(self):
         """The gaze service's one-dot check, in the panel fixed to the headset."""
         self._gaze_check("quickcal", "Quick check: look at the dot in front of you")

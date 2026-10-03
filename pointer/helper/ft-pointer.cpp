@@ -267,7 +267,8 @@
 //
 // Commands (datagrams on @ft_pointer_helper): show, hide, recenter, move <dyaw> <dpitch>,
 // follow on|off|toggle (head follow, until the next restart or a change to POINTER_FOLLOW),
-// gaze on|off|toggle|? (gaze mode, likewise with POINTER_GAZE; ? only asks), gz ... (the gaze, from ft-gazed),
+// gaze on|off|toggle|? (gaze mode, likewise with POINTER_GAZE; ? only asks, and "? headset" adds
+// worn|away to the reply), gz ... (the gaze, from ft-gazed),
 // reload (re-read the settings below), debug (toggle a twice-a-second state log),
 // overlays (replies with the overlay list as JSON, see OverlayList),
 // vrbind/vrglobal/vrstatus (Frame controller buttons, see vrbuttons.h),
@@ -1387,7 +1388,12 @@ int main() {
                     std::printf("gaze mode %s\n", gazeOn ? "on" : "off");
                     std::fflush(stdout);
                 }
-                reply(gazeOn ? "ok on" : "ok off");
+                // "gaze ? headset" (the gaze service, which idles while nobody wears the headset)
+                // also says whether someone does.
+                if (std::strstr(arg, "headset"))
+                    reply(gazeOn ? (headsetOff ? "ok on away" : "ok on worn") : (headsetOff ? "ok off away" : "ok off worn"));
+                else
+                    reply(gazeOn ? "ok on" : "ok off");
                 continue;
             }
             const bool mouseInput = std::strncmp(buf, "move", 4) == 0 || std::strncmp(buf, "btn", 3) == 0 ||
