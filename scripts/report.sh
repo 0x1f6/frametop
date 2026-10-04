@@ -42,6 +42,25 @@ for i, s in enumerate(d.get("screens", []), 1):
 print("visibility:", d.get("visibility"))
 PY
 
+section "Plasma panels and outputs"
+python3 "$repo/session/fix-panels.py" --check 2>&1 || true
+python3 - "$repo" <<'PY' 2>&1 || true
+import json, subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/layout")
+import ft_layout
+env = ft_layout.nested_env()
+if not env:
+    sys.exit(print("desktop not running: no live outputs or panels"))
+outs = json.loads(subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True, env=env, timeout=10).stdout or "{}")
+for o in outs.get("outputs", []):
+    size = o.get("size") or {}
+    print(f"output {o.get('name')}: enabled={o.get('enabled')} priority={o.get('priority')} {size.get('width')}x{size.get('height')}")
+js = "print(JSON.stringify(panels().map(p => ({id: p.id, screen: p.screen, location: p.location}))))"
+r = subprocess.run(["qdbus6", "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", js],
+                   capture_output=True, text=True, env=env, timeout=10)
+print("live panels:", (r.stdout or r.stderr).strip())
+PY
+
 section "Input relay (last 60 lines)"
 journalctl --user -u frametop-input-relay -n 60 --no-pager -o short 2>/dev/null
 section "Pointer helper (last 60 lines)"

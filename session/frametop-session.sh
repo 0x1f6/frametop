@@ -272,4 +272,9 @@ fi
 # with both, apps would open twice.
 kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginMode emptySession
 
+# Plasma keeps a panel on a screen number, and never moves one whose screen this desktop
+# doesn't have, like a spare output or a screen a smaller layout dropped. Put such a panel
+# back on the first (primary) screen before Plasma reads the file (session/fix-panels.py).
+python3 "$here/fix-panels.py" --screens "$screens" || true
+
 dbus-run-session startplasma-wayland
