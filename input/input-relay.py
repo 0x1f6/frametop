@@ -132,10 +132,10 @@ KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
-KEY_VOLUMEDOWN, KEY_VOLUMEUP = 114, 115
-# Volume keys are remapped to KEY_MACRO29 and KEY_MACRO30: above 255, so X11 can't
-# carry them, and bound to nothing in the default keymap.
-VOLUME_STANDIN = {KEY_VOLUMEUP: 0x2AC, KEY_VOLUMEDOWN: 0x2AD}
+KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP = 113, 114, 115
+# Volume keys are remapped to KEY_MACRO28, KEY_MACRO29 and KEY_MACRO30: above 255, so X11
+# can't carry them, and bound to nothing in the default keymap.
+VOLUME_STANDIN = {KEY_MUTE: 0x2AB, KEY_VOLUMEUP: 0x2AC, KEY_VOLUMEDOWN: 0x2AD}
 VOLUME_ORIGINAL = {v: k for k, v in VOLUME_STANDIN.items()}
 VOLUME_CODES = set(VOLUME_STANDIN) | set(VOLUME_ORIGINAL)
 BUS_USB, BUS_BLUETOOTH, BUS_VIRTUAL = 0x03, 0x05, 0x06
@@ -383,9 +383,13 @@ class Volume:
 
     def key(self, fd, code, value, now):
         if value == 1:
-            self.held = (fd, code)
-            self.step(code)
-            self.next_at = now + self.DELAY
+            if VOLUME_ORIGINAL.get(code, code) == KEY_MUTE:
+                subprocess.Popen(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                self.held = (fd, code)
+                self.step(code)
+                self.next_at = now + self.DELAY
         elif value == 0 and self.held == (fd, code):
             self.release()
 
