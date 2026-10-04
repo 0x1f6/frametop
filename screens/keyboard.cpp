@@ -459,7 +459,21 @@ void Hide() {
 bool Shown() { return g_shown; }
 
 void SetLasers(bool on) {
-    if (Create()) vr::VROverlay()->SetOverlayFlag(g_overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, on);
+    static vr::VROverlayHandle_t set = vr::k_ulOverlayHandleInvalid;  // the overlay `was` is for
+    static bool was = false;
+    if (!Create() || (set == g_overlay && was == on)) return;
+    set = g_overlay, was = on;
+    vr::VROverlay()->SetOverlayFlag(g_overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, on);
+}
+
+bool Aimed(const vr::HmdMatrix34_t &laser) {
+    if (!g_shown) return false;
+    vr::VROverlayIntersectionParams_t in{};
+    in.eOrigin = vr::TrackingUniverseStanding;
+    in.vSource = {laser.m[0][3], laser.m[1][3], laser.m[2][3]};
+    in.vDirection = {-laser.m[0][2], -laser.m[1][2], -laser.m[2][2]};
+    vr::VROverlayIntersectionResults_t out{};
+    return vr::VROverlay()->ComputeOverlayIntersection(g_overlay, &in, &out);
 }
 
 void Poll(void (*handle)(const Event &, void *), void *data) {

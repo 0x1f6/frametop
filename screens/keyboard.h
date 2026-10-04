@@ -26,6 +26,8 @@ const vr::HmdMatrix34_t &Pose();
 void EndDragBy(uint32_t device);
 // Controllers' lasers work the panel with the dashboard closed, like the screens'.
 void SetLasers(bool on);
+// A laser (its pose, aiming along -z) points at the panel.
+bool Aimed(const vr::HmdMatrix34_t &laser);
 // The panel's input: key presses and releases, and Closed for its Close key.
 void Poll(void (*handle)(const Event &, void *), void *data);
 void Destroy();

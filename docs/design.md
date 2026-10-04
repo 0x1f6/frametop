@@ -62,7 +62,7 @@ A profile's screen part is the custom arrangement under a name: each screen's po
 
 `IVRApplications::GetCurrentSceneProcessId()` is 0 when no game is running (the Frame's home environment isn't a scene app) and the game's process ID while one is. ft-screens checks it twice a second, turns the flag off while a game runs, and by default hides the screens unless the dashboard is open. Flatscreen games run inside Steam's gamescope overlay and aren't scene apps, which is why "only with the dashboard open" is offered as a controller setting.
 
-The reset button needs to work in a game, where the screens have the flag off. So ft-screens turns the flag on for that button's overlay alone while a hand controller aims within about one button's width of it, and off half a second after the aim leaves a zone twice as wide. ft-screens finds the aim from the controllers' laser poses, which it reads anyway to show the controls, so it doesn't need SteamVR's laser to be on first. The game loses the controllers only while you aim at the button.
+In a game, Frametop's panels work like SteamVR's own floating windows: point a controller at one and its laser comes on, point away and the game has the controllers again. ft-screens turns the flag on for a panel while a hand controller's laser pose meets it, its controls, or a floating window's popups. It finds that from the poses it already reads to show the controls, so SteamVR's laser doesn't have to be on first. Leaving takes a margin two control-sizes wide and 0.3 s, a drag or a held button keeps the flag on, and the keyboard, a single overlay, uses SteamVR's `ComputeOverlayIntersection`. The 3D mouse doesn't need any of this: it has its own laser mode.
 
 ## Floating windows
 
