@@ -30,7 +30,9 @@ gaze_quickcal = the gaze service's one-dot check ("quickcal" to @ft_gazed), sens
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
 keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the desktop window under the
 pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
-window back (both to ft-floatd, @frametop_float), profile:NAME = switch to that profile (ft-layout
+window back (both to ft-floatd, @frametop_float), spin_next and spin_prev = turn every panel in the
+room about your head so the next one to the right or left comes to the front (ft-screens' "spin",
+Meta+Alt+Tab and Meta+Alt+Shift+Tab by default), profile:NAME = switch to that profile (ft-layout
 use NAME: its screens and apps; docs/profiles.md), steam_menu = open the SteamVR dashboard on
 Steam's menu, or close the dashboard (steam/ft-steam menu, through Steam's UI), pause_toggle =
 pause Frametop for a VR game, or resume it (game_pause.py), command:CMD = run
@@ -209,14 +211,16 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right",
            "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "float_toggle",
-           "dock_all", "steam_menu", "pause_toggle", "key", "none")
+           "dock_all", "spin_next", "spin_prev", "steam_menu", "pause_toggle", "key", "none")
 # Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
 # Key combinations a rules file without "key_bindings" gets: a Meta tap opens Steam's menu, Meta+J
 # and Meta+K click at the gaze (free on the Frametop desktop, and apps don't use Meta),
-# Meta+Shift+F floats a window.
+# Meta+Shift+F floats a window, and Meta+Alt+Tab and Meta+Alt+Shift+Tab spin the panels around
+# you (ft-screens' lazy susan); not Meta+Tab, which is Cmd+Tab on a Mac reached through a remote
+# desktop like RustDesk.
 DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
-                        "42+125+33": "float_toggle"}
+                        "42+125+33": "float_toggle", "56+125+15": "spin_next", "42+56+125+15": "spin_prev"}
 KEY_F24 = 194  # sent to the desktop with a Meta combination (see the top)
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
@@ -232,6 +236,9 @@ GAZED = "\0ft_gazed"
 FLOAT = "\0frametop_float"  # ft-floatd, floating windows in the Frametop desktop
 # Actions for ft-floatd ("float_toggle", "dock_all"): they don't need pointer mode.
 FLOAT_ACTIONS = {"float_toggle": b"float pointer", "dock_all": b"dock all"}
+# Actions for ft-screens: spin_next and spin_prev turn every panel in the room about your head,
+# so the next one to the right or left comes to the front. They don't need pointer mode either.
+SCREENS_ACTIONS = {"spin_next": b"spin next", "spin_prev": b"spin prev"}
 PROFILE = "profile:"  # "profile:NAME": switch to that profile (doesn't need pointer mode either)
 COMMAND = "command:"  # "command:CMD": run CMD (nor does this)
 
@@ -242,7 +249,7 @@ def known_action(a):
 
 
 def needs_pointer(a):
-    return a not in FLOAT_ACTIONS and a not in ("steam_menu", "pause_toggle") and not a.startswith((PROFILE, COMMAND))
+    return a not in FLOAT_ACTIONS and a not in SCREENS_ACTIONS and a not in ("steam_menu", "pause_toggle") and not a.startswith((PROFILE, COMMAND))
 
 
 def works_paused(a):
@@ -922,6 +929,13 @@ def main():
             if value == 1:
                 try:
                     screens_sock.sendto(FLOAT_ACTIONS[action], FLOAT)
+                except OSError:
+                    pass  # the Frametop desktop isn't running
+                log(action)
+        elif action in SCREENS_ACTIONS:
+            if value == 1:
+                try:
+                    screens_sock.sendto(SCREENS_ACTIONS[action], SCREENS)
                 except OSError:
                     pass  # the Frametop desktop isn't running
                 log(action)
