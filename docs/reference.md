@@ -38,12 +38,13 @@ Restarting the desktop closes its windows. Before the unit stops, `session/keep-
 
 Each KWin window is one screen. ft-screens sets its size with an `xdg_toplevel` configure and KWin resizes the output to match, live. Frames arrive as DMA-BUFs and go to SteamVR through OpenVR's `IVRIPCResourceManagerClient::ImportDmabuf`, with no copy and no size limit.
 
-Every screen is an overlay named `frametop.screen.N` with four controls:
+Every screen is an overlay named `frametop.screen.N` with five controls:
 
 - `.bar` moves the screen. Drag it with any laser or with the 3D mouse, whose right-drag tilts. Scrolling while you drag pushes the screen away or pulls it closer, along the line from your head.
 - `.curve` bends the screen into a cylinder around you, using your current distance as the radius, or makes it flat again.
 - `.roll` rolls the screen when you drag it sideways, like a knob. It snaps level within 2.5°, and scrolling on it turns 5° per notch.
 - `.resize`, the tab on the bottom right corner, sets the width. Screens go down to 15 cm wide.
+- `.reset`, left of the bar, puts every screen back in its layout around where you are now, like Meta+Shift+R (`ft-layout apply`). In a VR game, where the screens leave the controllers to the game, aiming a controller at it turns SteamVR's laser on for that button alone, so the trigger clicks it; the game gets the controllers back half a second after you aim away.
 
 The controls are sized from both the screen's width and its distance from you, follow the surface of a curved screen, and stay invisible until a laser or the 3D mouse's cursor lands on one or comes within about 1.5 times a button's size of it. While invisible they're still there, fully transparent, so SteamVR's laser can find them. They're translucent until a laser is on them, like SteamVR's own window controls.
 
@@ -143,7 +144,7 @@ Device rules are saved in `~/.config/frametop-input.json`. `input-settings/insta
 
 ## Frametop Display Settings and ft-layout
 
-When the desktop starts, its screens arrange themselves around where you're facing. You can move them by hand at any time and put them back with Meta+Shift+R, the Reset Screen Layout menu entry, Arrange now in the app, or a mouse button mapped to Reset desktop screen layout.
+When the desktop starts, its screens arrange themselves around where you're facing. You can move them by hand at any time and put them back with Meta+Shift+R, the reset button left of any screen's bar, the Reset Screen Layout menu entry, Arrange now in the app, or a mouse button mapped to Reset desktop screen layout.
 
 The desktop's own screen arrangement follows where the screens are around you, whatever their numbers: a screen you see to the left of another is to its left in Plasma too, so the pointer and dragged windows cross straight to it. Screens one above the other stack, and screens pinned to a wrist or your head come last. It's updated at startup, after arranging or saving the layout, and half a second after you let go of a screen you moved. With the headset off there's no head pose to go by, and the arrangement stays as it was.
 
