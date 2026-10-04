@@ -795,7 +795,9 @@ static bool setup_dmabuf(struct server *s) {
 
 int main(int argc, char **argv) {
     struct server s = {0};
-    s.controller_click.threshold = 8;
+    // About 0.9 degrees on a 3.4 m wide 3440-pixel screen 2 m away; 8 (the first default,
+    // about 0.2 degrees) needed a very still hand to click (headset test 2026-10-03).
+    s.controller_click.threshold = 32;
     for (int i = 0; i < MAX_SCREENS; ++i) s.scale[i] = 1;
     s.kb_screen = -1;
     s.rate[FT_FOCUSED] = 0, s.rate[FT_IN_VIEW] = 15, s.rate[FT_HIDDEN] = 1;
