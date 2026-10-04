@@ -190,8 +190,12 @@ Mat TipOffset(vr::TrackedDeviceIndex_t dev) {
     Tip tip{model, Identity(), false, now};
     vr::RenderModel_ControllerMode_State_t mode{};
     vr::RenderModel_ComponentState_t state{};
-    if (model[0] && vr::VRRenderModels()->GetComponentStateForDevicePath(model, vr::k_pch_Controller_Component_Tip,
-                                                                          vr::k_ulInvalidInputValueHandle, &mode, &state))
+    // GetComponentState, not GetComponentStateForDevicePath: without an input source handle
+    // the latter fails for every component while a VR game runs, and the rays came from the
+    // pose, 40 degrees above the laser. The tip doesn't move with the buttons.
+    vr::VRControllerState_t buttons{};
+    if (model[0] && vr::VRRenderModels()->GetComponentState(model, vr::k_pch_Controller_Component_Tip, &buttons, &mode,
+                                                            &state))
         tip.offset = state.mTrackingToComponentLocal, tip.found = true;
     cache[dev] = tip;
     return tip.offset;
