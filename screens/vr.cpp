@@ -1409,6 +1409,7 @@ struct Press {
     double x = 0, y = 0;                      // ...and where on it, in buffer pixels
     double distance = 1;                      // from the laser's start to the last panel it met
     long upAt = -1;                           // the pointer helper saw left come up: release it at this tick
+    int64_t idleSince = -1;                   // the pressing controller has held nothing since (ms, ReleaseStuck)
 };
 Press g_press;
 vr::VROverlayHandle_t g_catcher = vr::k_ulOverlayHandleInvalid;
@@ -1443,6 +1444,47 @@ void ReleaseAway(uint32_t button, void (*handle)(const struct ft_event *, void *
     e.type = FT_LEAVE;
     e.screen = g_press.screen;
     handle(&e, data);
+}
+
+// Whether a hand controller holds anything (a button down): 1 yes, 0 no, -1 unknown. SteamVR
+// answers overlay apps only while a VR game runs (checked 2026-10-04); outside games it can't
+// say. The Frame controller's axes have no types, so the buttons are all there is.
+int ControllerHolds(vr::TrackedDeviceIndex_t dev) {
+    vr::VRControllerState_t st{};
+    if (!vr::VRSystem()->GetControllerState(dev, &st, sizeof st)) return -1;
+    return st.ulButtonPressed ? 1 : 0;
+}
+
+// Releases SteamVR never sends. Pausing, or hiding the screen a button went down on, takes the
+// laser off it mid-click (the pause gesture's second thumbstick click does that), and SteamVR's
+// laser mouse then forgets the button: no release comes, the catcher stayed up, and the game
+// never got its controllers back (2026-10-04). So a held button is released here when it has
+// no visible screen to come up on, or when its hand controller has held nothing for kStuckMs
+// (only known during VR games, where the lost release took the game's controllers).
+// The pointer helper's virtual controller has its own word for that ("up").
+constexpr int64_t kStuckMs = 1000;
+void ReleaseStuck(void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!g_press.buttons) {
+        g_press.idleSince = -1;
+        return;
+    }
+    const char *why = nullptr;
+    const auto it = g_screens.find(g_press.screen);
+    if (g_paused) why = "paused";
+    else if (g_press.screen >= 0 && (it == g_screens.end() || !it->second.visible)) why = "its screen hid";
+    else if (IsHandController(g_press.device)) {
+        const int64_t now = NowMs();
+        if (ControllerHolds(g_press.device) != 0) g_press.idleSince = -1;
+        else if (g_press.idleSince < 0) g_press.idleSince = now;
+        else if (now - g_press.idleSince >= kStuckMs) why = "the controller holds nothing";
+    }
+    if (!why) return;
+    std::printf("a held button can't come up on a screen (%s): released\n", why);
+    const vr::TrackedDeviceIndex_t dev = g_press.device;
+    for (uint32_t b = 0; b < 32; ++b)
+        if (g_press.buttons & (1u << b)) ReleaseAway(BTN_LEFT + b, handle, data);
+    g_press.buttons = 0, g_press.upAt = -1, g_press.idleSince = -1;
+    EndDragsBy(dev);
 }
 
 void ShowCatcher(bool on) {
@@ -2232,6 +2274,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         if (ev.eventType == vr::VREvent_MouseButtonUp)
             ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
     if (g_press.upAt >= 0 && g_tick >= g_press.upAt) ReleaseAway(BTN_LEFT, handle, data);
+    ReleaseStuck(handle, data);
     RefreshChrome();
     while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
         if (ev.eventType == vr::VREvent_Quit) {
