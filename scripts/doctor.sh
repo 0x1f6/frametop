@@ -36,6 +36,10 @@ check "distrobox" on_frame 'test -x ~/.local/bin/distrobox && ~/.local/bin/distr
 check "container $FRAME_BOX" on_frame "podman ps -a --filter name=^$FRAME_BOX\$ --format '{{.Image}} {{.Status}}' | grep ."
 check "repo on the Frame" on_frame 'pwd'
 check "free space in ~" on_frame "df -h ~ | awk 'NR==2{print \$4\" free\"}'"
+# A taskbar saved on a screen the desktop doesn't have is hidden; the desktop's next start
+# moves it to the first screen (session/fix-panels.py).
+check "taskbar on a screen" on_frame 'set -o pipefail; [ -f session/fix-panels.py ] || { echo "not checked (older checkout)"; exit 0; }
+  python3 session/fix-panels.py --check | paste -sd ";" | sed "s/;/; /g"'
 
 echo "what Frametop needs from SteamOS:"
 if [ "$FRAME_LOCAL" = 1 ]; then

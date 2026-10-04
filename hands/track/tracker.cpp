@@ -162,7 +162,7 @@ void Tracker::run_landmarks(const std::map<std::string, Image> &images, std::vec
     ++stats.hand_batches;
 }
 
-bool Tracker::single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) const {
+bool Tracker::single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) {
     V3 rays[21];
     for (int i = 0; i < 21; ++i) rays[i] = cam.ray(lm.pts[i]);
     std::vector<std::pair<double, double>> est;   // (depth, weight)
@@ -554,6 +554,13 @@ std::vector<Seen> Tracker::views_now() const {
     for (const View &v : views_)
         if (v.fresh) out.push_back({v.cam->name, v.hand, v.roi, v.lm, {}});
     return out;
+}
+
+void Tracker::exchange(const std::string &a, const std::string &b) {
+    if (!cams_.count(a) || !cams_.count(b)) return;
+    const Camera *ca = cams_[a], *cb = cams_[b];
+    for (View &v : views_) v.cam = v.cam == ca ? cb : v.cam == cb ? ca : v.cam;
+    for (auto &[id, h] : hands_) h.has_pts = false, h.frames = 0, h.residual = -1;
 }
 
 void Tracker::drop_camera(const std::string &name) {

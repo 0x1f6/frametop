@@ -31,7 +31,7 @@ You need a Steam Frame with an internet connection, a keyboard (Bluetooth, or th
 
    It asks which version you want: stable (the `main` branch, tested releases) or experimental (the `experimental` branch, the newest features, less tested). Then it clones the repo into `~/frametop` and runs `install.sh`. To choose without the question, add `-s -- --stable` or `-s -- --experimental` after `bash`. By hand, the same is `git clone https://github.com/DeeJanuz/frametop.git ~/frametop`, then `cd ~/frametop` and `./install.sh` (add `--branch experimental` to the clone for experimental).
 
-   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you three things along the way: whether to install gaze mode (experimental, yes by default) and the Bluetooth fixes, then whether to restart SteamVR. The Bluetooth fixes need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
+   The installer sets up distrobox in your home folder (the system files aren't touched), a Fedora build container, and everything else. The first run downloads 1–2 GB. It asks you four things along the way: whether to install gaze mode (experimental, yes by default), our own eye tracker for it (yes by default), and the Bluetooth fixes, then whether to restart SteamVR. The eye tracker and the Bluetooth fixes need your `sudo` password; if you've never set one, run `passwd` first, or skip them for now. SteamVR has to restart once at the end, which closes everything open in VR, including the terminal. Rebooting the headset works too.
 
 After the restart, Launch a program → Desktop opens the multi-screen desktop, with its screens arranged around where you're facing. Frametop Display Settings and Frametop Input Settings are in the desktop's application menu, under Settings.
 
@@ -57,9 +57,11 @@ If you work in the desktop for long stretches, or leave the headset on a stand, 
 | While carrying a screen, sweep its laser across your other controller's ring, then let go | Pins it to that wrist, at its size and distance, as you hold it when you let go; it shows while you see its front. Grab its bar to adjust it (it stays pinned); sweep across the ring again to take it off |
 | Set a screen to On your head (Frametop Display Settings, Visibility & pins) | Pins it to your head where it is, like a HUD. Grab its bar to move it; it stays on your head |
 | Meta+Shift+R in the desktop | Puts the screens back in their layout (also in the menu as Reset Screen Layout, and mappable to a mouse button) |
+| Meta+Alt+Tab, or Meta+Alt+Shift+Tab | Spins every screen and floating window around you together, like a lazy susan, so the next one on your right (or left) glides to straight ahead, with the pointer and typing going to it. Their arrangement stays the same: the room turns instead of you. Tap again to keep going; Meta+Shift+R puts the screens back. Pinned screens stay where they are |
 | Meta+Shift+H in the desktop | Hides or shows all screens (also in the menu as Hide/Show Screens, and mappable). The Visibility & pins tab of Frametop Display Settings can instead show them only with the dashboard open, or while you look at your wrist |
+| Tap Meta, on any keyboard | Opens the Steam menu in the SteamVR dashboard, or closes the dashboard, wherever you are. The desktop's launcher is still on the taskbar and Alt+F1. Change it in Frametop Input Settings (Keyboard page), where any key combination or modifier tap can do a Frametop or Steam action, open a profile, or run a command of your own |
 | Switch a screen to Hidden (Frametop Display Settings, Visibility & pins → Screens shown) | Hides just that screen until you switch it back, whatever the other visibility settings say; new windows that would open on it float instead |
-| Play a VR game | The screens hide and your controllers stay in the game. Open the SteamVR dashboard, or press Meta+Shift+H, to see and use them. To keep them visible over games, change During VR games on the Visibility & pins tab; the controllers still stay in the game, and you use the screens with the mouse or the dashboard |
+| Play a VR game | Frametop pauses so the game gets the headset to itself (see [Pause for VR games](#pause-for-vr-games)): the screens hide and your controllers stay in the game. Click both thumbsticks together twice to bring Frametop back. With the automatic pause off, the screens still hide, and the SteamVR dashboard or Meta+Shift+H shows them; to keep them visible over games, change During VR games on the Visibility & pins tab |
 
 Restarting the desktop (Restart desktop in Frametop Display Settings) closes its windows, but background work you started in it, such as servers, tmux sessions, or builds, keeps running.
 
@@ -94,9 +96,21 @@ A profile is a named setup: where the screens are, with their sizes and pins, wh
 | Pick a profile under Arrangement and press Open profile | Switches to it: the screens move, open windows of its apps go to their places, and the apps that aren't open start. Nothing closes |
 | Pick a profile under Start in profile, or run its entry (Frametop: NAME) from SteamVR's Launch a program list | The desktop starts in that profile, or switches to it if it's running. A profile can also go on a key combination, mouse button, or controller button in Frametop Input Settings |
 
+### Pause for VR games
+
+Frametop pauses while a VR game runs, so the game gets the headset's CPU and GPU, and comes back a few seconds after the game ends. Paused, the screens hide and the desktop nearly stops drawing, but its windows stay open. Gaze mode's eye tracking stops, and so do remote desktop and hand tracking if they run. The mouse works as a plain mouse in SteamVR.
+
+| Do this | To get this |
+| --- | --- |
+| Click both thumbsticks together, twice | Pauses Frametop, or brings it back, in a game or not. You hear a short sound. The game sees the clicks too |
+| Start a VR game | Frametop pauses, and comes back 5 seconds after the game ends. Bring it back during the game, and it stays on until that game ends |
+| Map Pause/resume Frametop to a mouse button, key combination, or controller button | The same, from that button (Frametop Input Settings) |
+
+The Game optimization page of Frametop Input Settings turns the automatic pause off, changes the gesture, closes the desktop instead of hiding it (more for the game, but its windows close), and turns the sound off. From a terminal: `input/ft-pause on`, `off`, or `status`.
+
 ### Gaze mode (experimental)
 
-In gaze mode the pointer goes where you look, and the mouse or the keyboard does the last bit. The installer offers it (or run `gaze/run.sh install` later). Turn it on and calibrate it on the Gaze page of Frametop Input Settings.
+In gaze mode the pointer goes where you look, and the mouse or the keyboard does the last bit. The installer offers it (or run `gaze/run.sh install` later), and then our own eye tracker for it, which is more accurate than SteamVR's (or run `gaze/tracker/install.sh` later; it needs `sudo`). Gaze mode uses ours once it's installed, and SteamVR's until then. Turn it on and calibrate it on the Gaze page of Frametop Input Settings.
 
 | Do this | To get this |
 | --- | --- |
@@ -123,15 +137,16 @@ This is an early release, tested on one Steam Frame (SteamOS 0.3.0 build 2026092
 
 - A SteamOS or SteamVR update can break parts of it until Frametop catches up. After an update, run `cd ~/frametop && scripts/doctor.sh` in a terminal. It checks what Frametop needs from SteamOS, and says what changed since the versions you last marked as working and what to try. Once everything works, `scripts/doctor.sh --mark-good` records the versions. If something stops working, please report it.
 - The first install downloads 1–2 GB for the build container and compiles everything on the headset, which takes several minutes.
-- During a VR game you can't show the screens with a controller button, because the game owns the buttons. Open the SteamVR dashboard, press Meta+Shift+H, or use a mapped mouse button instead.
-- Flatscreen games aren't detected as games. If your controllers end up working the screens instead of the game, set Controllers on the screens to "Only with the SteamVR dashboard open" (Frametop Display Settings, Visibility & pins tab).
+- During a VR game, mapped controller buttons belong to the game, so they can't bring the screens up. The pause gesture still works: Frametop reads it without taking the thumbsticks from the game. With the automatic pause off, open the SteamVR dashboard, press Meta+Shift+H, or use a mapped mouse button instead.
+- Flatscreen games aren't detected as games, so they don't pause Frametop by themselves: click both thumbsticks twice to pause it. If your controllers end up working the screens instead of the game, set Controllers on the screens to "Only with the SteamVR dashboard open" (Frametop Display Settings, Visibility & pins tab).
 - Typing follows your last click. A controller click on a panel other than the screens (the dashboard, a Steam app) doesn't move typing there; click it with the mouse, or click a screen to bring typing back.
 - The screens don't draw a mouse cursor of their own. The 3D mouse's dot or SteamVR's laser shows where you're pointing.
 - Profiles reopen apps, not what the apps had open. Tabs, files, and folders are left to each app's own restore.
 - Dragging something from one panel to another (a screen and a floating window) works, but the dragged item's icon doesn't show while the pointer is between panels.
 - Gaze mode is only as good as its calibration, and that depends on how the headset sits on your face. If the pointer lands off after you adjust the headset, run Quick check or Calibrate on the Gaze page of Frametop Input Settings.
 - On SteamVR's Settings page, the 3D mouse shows a laser beam and a larger hit dot, like a controller. SteamVR doesn't tell other programs where that page is (unlike Steam's pages, such as Library), so the mouse used to miss most of it: clicks went through to a desktop screen behind, and the dot disappeared. As a workaround, on that page only, the laser starts near your eye and SteamVR finds the page itself. See docs/design.md.
-- Remote desktop over VNC (Frametop Remote Access in the app menu, or `./desktops.sh remote on`) needs Tailscale on the Frame. It shows the primary screen only. The app turns it on and off, shows the address, and shows, copies, or changes the VNC password. The password is made at random on the Frame and kept in `~/.config/frametop-remote` (only you can read it); VNC limits it to 8 characters, and the tailnet encrypts the connection. Turning it on in a desktop that started with it off takes a desktop restart.
+- Remote desktop over VNC (Frametop Remote Access in the app menu, or `./desktops.sh remote on`) needs Tailscale on the Frame. It shows the primary screen only. The app turns it on and off, shows the address, and shows, copies, or changes the VNC password. The password is made at random on the Frame and kept in `~/.config/frametop-remote` (only you can read it); VNC limits it to 8 characters, and the tailnet encrypts the connection. Turning it on in a desktop that started with it off takes a desktop restart. It costs almost nothing until a viewer connects; the picture then takes a few seconds to appear.
+- The desktop has no blur behind panels and menus, and no window animations, so it leaves the headset's GPU to SteamVR. Turn them back on in the Frametop desktop's System Settings (Desktop Effects, and Animation speed under General Behavior); Frametop won't turn them off again.
 - Turning the displays off on a stand only turns their backlight off. SteamVR has no way for other programs to put the headset in standby, so tracking and rendering keep running, and the headset draws nearly its full power.
 
 ## Reporting problems

@@ -25,6 +25,7 @@ for u in frametop-input-relay frametop-pointer frametop-power; do
   echo "$u: $(systemctl --user is-enabled $u 2>/dev/null) / $(systemctl --user is-active $u 2>/dev/null)"
 done
 echo "desktop: $(pgrep -x ft-screens >/dev/null && echo running || echo 'not running'), plasmashell: $(pgrep -c plasmashell || true)"
+echo "paused for VR games: $(cat /run/user/$(id -u)/frametop-pause.json 2>/dev/null || echo 'no (never paused since boot)')"
 LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrpathreg show 2>/dev/null | sed -n '/xternal/,$p'
 
 section "What Frametop needs from SteamOS (scripts/update-check.py)"
@@ -39,6 +40,25 @@ print("mode:", d.get("mode"), " auto:", d.get("auto"), " primary:", d.get("prima
 for i, s in enumerate(d.get("screens", []), 1):
     print(f"screen {i}: {s.get('size')} {s.get('metres')} m curve={s.get('curve', 0)} pinned={s.get('pin', {}).get('hand', '-') if isinstance(s.get('pin'), dict) else '-'}")
 print("visibility:", d.get("visibility"))
+PY
+
+section "Plasma panels and outputs"
+python3 "$repo/session/fix-panels.py" --check 2>&1 || true
+python3 - "$repo" <<'PY' 2>&1 || true
+import json, subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/layout")
+import ft_layout
+env = ft_layout.nested_env()
+if not env:
+    sys.exit(print("desktop not running: no live outputs or panels"))
+outs = json.loads(subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True, env=env, timeout=10).stdout or "{}")
+for o in outs.get("outputs", []):
+    size = o.get("size") or {}
+    print(f"output {o.get('name')}: enabled={o.get('enabled')} priority={o.get('priority')} {size.get('width')}x{size.get('height')}")
+js = "print(JSON.stringify(panels().map(p => ({id: p.id, screen: p.screen, location: p.location}))))"
+r = subprocess.run(["qdbus6", "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", js],
+                   capture_output=True, text=True, env=env, timeout=10)
+print("live panels:", (r.stdout or r.stderr).strip())
 PY
 
 section "Input relay (last 60 lines)"

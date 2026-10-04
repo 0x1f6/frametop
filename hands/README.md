@@ -14,12 +14,16 @@ Two programs, each a user service that stops when SteamVR does:
 
 They don't start with SteamVR. `hands/run.sh install` builds them, gives ft-camd its capabilities, installs both services disabled, and links `hands/ft-handsctl` into `~/.local/bin`. Then `ft-handsctl on` starts hand tracking and `ft-handsctl off` stops it. `install.sh` doesn't install it.
 
+For the cutouts alone, `hands/ft-cutouts on` starts the same two programs with ft-hands' `--no-gestures`: your hands show through the screens, and no pinch or grip is detected, so nothing clicks or drags. It runs this checkout's build as transient user units, so it needs `hands/build.sh` and ft-camd's capabilities (`hands/run.sh caps`) but not `hands/run.sh install`. It and `ft-handsctl on` stop each other's services, and it stops with SteamVR too.
+
 ```
 ft-handsctl on | off            # on the Frame: start or stop hand tracking (SteamVR must be running)
 ft-handsctl status              # the services, and ft-hands' last status lines
 ft-handsctl log [lines]
 ft-handsctl cutouts on|off|state  # ft-screens' hand cutouts, without stopping tracking
 ft-handsctl gestures            # pinches and grips, live (tools/watch_gestures.py --distance)
+
+hands/ft-cutouts on | off | status   # the cutouts only: no pinches or grips
 
 hands/run.sh install            # build, give ft-camd its capabilities (sudo, once per build), install disabled
 hands/run.sh start|stop         # start or stop the services
@@ -32,7 +36,7 @@ hands/run.sh uninstall
 
 Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides them), read when ft-camd and ft-hands start:
 
-- `HANDS_SWAP_SIDES=1`: the two side cameras' names are swapped (see ft-camd below). Check with `tools/check_sides.py --ring`.
+- `HANDS_SWAP_SIDES=auto` (the default): ft-hands tells from the hands which side camera is which, and corrects ft-camd's names when they're backwards (see "Which camera is which" below). `1` forces them exchanged and `0` forces ft-camd's names; ft-hands still checks and logs a warning if the hands disagree.
 - `HANDS_CPUS=5,6,7`: the CPUs the model threads run on (below).
 - `HANDS_CAMERAS` (`auto`), `HANDS_BRIGHT` (`all`), `HANDS_BRIGHT_ON` (40), `HANDS_BRIGHT_OFF` (25): which cameras ft-hands tracks with, as `--cams`, `--bright`, `--bright-on` and `--bright-off` (see ft-hands). `HANDS_CAMERAS=mono` also keeps ft-camd off the colour cameras.
 - `HANDS_COLOR_LEFT` (`color_video0`), `HANDS_COLOR_CROP` (`subtract`): how the colour module's calibration maps onto its images, as `--color-left` and `--color-crop`.
@@ -82,7 +86,14 @@ Options:
 
 It exits when XRService exits, or when a camera's buffers keep going stale, which means XRService has reallocated them. The service starts it again, and it attaches to the new buffers.
 
-**Which camera is which:** video9 is `slam_left`, video13 is `slam_right`, video6 is `upper_left` and video7 is `upper_right`. This was checked by rendering the same view from each camera with the factory calibration. But ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and after some XRService restarts it gets them backwards. Then every hand is seen by one camera only, at the wrong depth, and the hand holes land beside the hands. With the headset on, looking at a room with some texture, `tools/check_sides.py --ring` says whether the names are right (exit 0), swapped (exit 3), or it can't tell (exit 2). When they're swapped, set `HANDS_SWAP_SIDES=1`. The colour cameras are video3 (`arcimx616 0-0010`) and video0 (`0-001a`); which of them is `passthrough_left` in the module's calibration is for `tools/check_color.py` to settle, on a recording with texture in view.
+**Which camera is which:** video9 is `slam_left`, video13 is `slam_right`, video6 is `upper_left` and video7 is `upper_right`. This was checked by rendering the same view from each camera with the factory calibration. But ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and after some XRService restarts it gets them backwards. Then every hand is seen by one camera only, at the wrong depth, and the hand holes land beside the hands. ft-hands now catches this by itself (`track/sides.h`, `HANDS_SWAP_SIDES=auto`):
+- Whenever a hand's landmarks are found in two cameras at once (one of them a side camera), it intersects the rays through the 21 landmarks twice: once with the calibrations as named, once with the two side cameras exchanged. The same hand seen the right way meets within a few mm, in front of both cameras and as far away as its size says. The wrong way misses by centimetres or meets behind a camera.
+- With the names wrong, the tracker never gets such pairs on its own: it hands the hand over to where the wrong calibration puts it and finds nothing there. So 5 times a second while undecided, the check places a tracked hand in 3D under the other naming and runs the landmark model where that puts it in the other side camera.
+- It decides after 10 votes one way and none the other, or 20 with at most a fifth the other way, over at least 1 s. That takes about 1-2 s of hands in view. If the names are backwards, it exchanges them; the tracked views move with their images. Then it checks once more, more strictly.
+- The log says what it found (`side cameras: SWAPPED, now exchanged after 3.2 s (votes ...)`). So does `/run/user/UID/frametop-hands/sides.json`, which the hand recorder reads. Recordings get a `DIR/sides.json` (hands/rec/sides.py has the rules).
+- `--record-only` can't tell (it tracks nothing): it records ft-camd's names unless `--sides 0|1` says otherwise.
+
+`tools/check_sides.py --ring` is the independent check from the scene (ORB matches meeting under each naming): exit 0 as named, 3 swapped, 2 can't tell. `--pair upper` checks the upper pair the same way: in every recording so far (3 XRService starts, both side namings) the upper pair was named right. The colour cameras are video3 (`arcimx616 0-0010`) and video0 (`0-001a`); which of them is `passthrough_left` in the module's calibration is for `tools/check_color.py` to settle, on a recording with texture in view.
 
 ## ft-hands
 
@@ -98,13 +109,14 @@ Options:
 - `--threads N`: model threads, pinned to the `--cpus` list. Default 3.
 - `--cpus LIST`: CPUs for the model threads and the main loop. Default `5,6,7` (`HANDS_CPUS`). SteamOS starts user processes on CPUs 0-4, and XRService's head tracking runs on 2-3. With the headset on, a step took 8.4 ms on 5-7 against 13.2 ms on 2-4, and SteamVR's frame timing didn't change (2026-09-29, three rounds of the same replayed frames).
 - `--contrast MODE` or `PALM/HAND`: how crops are equalized before the models see them: `clahe[:CLIP]`, `none`, or `stretch` (1st-99th percentile). Default `clahe:2/none`. In the dim recording, CLAHE let the palm search find about 10% more hands, but it made the landmarks jitter more (published median 6.9 mm, against 6.0 mm with plain landmark crops).
-- `--swap-sides`: swap the two side cameras (`HANDS_SWAP_SIDES`, see ft-camd).
+- `--sides auto|0|1`: which side camera is which (`HANDS_SWAP_SIDES`, see "Which camera is which"); `--swap-sides` is `--sides 1`.
 - `--seconds N`: stop after N seconds.
 - `--status S`: how often to print status, in seconds.
 - `--models DIR`: where the models are.
 - `--nice N`: niceness. Default 5, so the VR stack wins contested CPUs.
 - `--no-publish`: don't write the hands and gestures files.
-- `--record DIR`, `--record-for S`: save every frame set for S seconds (default 120) to `DIR/sets.bin`. That's about 80 MB/s. Sending the tracker SIGUSR1 (`pkill -USR1 -x ft-hands`) starts a recording in `~/.local/share/frametop/hands/rec-<time>` without a restart. Recordings are images of your hands and room: they stay on the headset unless you move them.
+- `--no-gestures`: hands for the cutouts only. No pinch or grip detection, so nothing reaches the pointer and a closing hand doesn't raise the rate to 30 Hz. The gestures file is removed at start. `ft-cutouts` runs it this way.
+- `--record DIR`, `--record-for S`, `--record-hz N`: save every frame set for S seconds (default 120) to `DIR/sets.bin`, or at most N sets a second with `--record-hz` (the hand recorder uses 10). Every set is about 80 MB/s. Sending the tracker SIGUSR1 (`pkill -USR1 -x ft-hands`) starts a recording in `~/.local/share/frametop/hands/rec-<time>` without a restart. Recordings are images of your hands and room: they stay on the headset unless you move them.
 - `--record-only`: record without tracking or publishing, so it can run beside the live tracker. Give it `--record DIR`, since SIGUSR1 would reach both trackers. With `ft-camd --with-dark`, recordings also hold each camera's newest dark frame as `<name>_dk`, which doubles the rate. With `--with-color`, each colour camera's newest frame is saved with every set, as `color_video<N>`, which adds about 70 MB/s. Run the recorder at normal I/O priority: idle I/O priority stalled a 165 MB/s recording.
 - `--keep-presence P`: the landmark presence a tracked view needs to stay tracked. New views always need 0.5. Default 0.5. Lowering it to 0.2 barely helped in the bright recording, because lost hands drop to near-zero presence.
 - `--ring PATH`: read frames from another ring, such as `ft-ringplay`'s.
@@ -192,7 +204,7 @@ hands/build/ft-handreplay ~/.local/share/frametop/hands/rec-20260929-120000 --co
 
 Python, with NumPy and OpenCV. `setup/dev-container.sh` doesn't install them, because Fedora's `python3-opencv` pulls in over a gigabyte; in the dev container, run `sudo dnf install python3-numpy python3-opencv` once. Off the Frame, `FRAME_JOB_DEVICE_ROOT` can point at a folder with copies of the headset's calibration files.
 
-- `tools/check_sides.py --ring` (or a recording): are the side cameras named right?
+- `tools/check_sides.py --ring` (or a recording, a sets file, `--pair upper`, `--calib DIR`, `--json`): are the side cameras named right, from the scene? ft-handreplay's `--sides file|0|1|auto` replays with DIR/sides.json's names (the default), as recorded, exchanged, or as auto decides, and reports what the side check found and when.
 - `tools/check_color.py REC`: how the colour module's calibration maps onto its images.
 - `tools/show_set.py REC`: a recording's frame sets as images.
 - `tools/watch_gestures.py [--distance]`: pinches and grips, live.
@@ -202,15 +214,59 @@ Python, with NumPy and OpenCV. `setup/dev-container.sh` doesn't install them, be
 
 To try the hand cutouts without restarting the desktop, `screens/build/ft-handtest [--distance m] [--width m] [--seconds s]` (built by `screens/build.sh`, run in the dev container, with hand tracking on) shows a test panel of its own, a light grid 1 m wide and 0.8 m ahead by default, and cuts your hands out of it the way ft-screens cuts them out of the screens.
 
+## Camera check
+
+Hand tracking needs all four mono cameras and the headset's IR light. With the Arcturus colour module attached, SteamVR's XRService loads an FPGA image ("VCINT") onto the module every time it opens the cameras: when SteamVR starts and after every wake. When that load fails, XRService runs only the two side cameras, the frames come out darker and noisier, and ft-hands finds no hands at all. It happened on 2026-10-02 at 17:02, after the headset slept; the hand recorder then said "I can't see your hands" for a whole session.
+
+`hands/camcheck.py` (system Python, standard library) tells whether the four cameras run: `ok`, `degraded: upper cameras and IR light off (VCINT FPGA failed to load)` (or another `degraded:` reason), or `unknown` (SteamVR not running, the cameras closed while the headset sleeps). It prints the log lines and other evidence it used; `--json` is for programs; the exit status is 0, 1 or 2. It reads:
+- the running XRService's log (`~/.local/share/Steam/logs/xrservice.txt`): the last camera start (from the FPGA check to the next "Closing tracking camera interfaces"), its VCINT result, `Upper cameras FPGA interleaving support: N`, `Created N tasks (T tracking, P passthrough)` and the `TrackingCameraInit` lines. A wake that works prints no "Created N tasks", so an older one doesn't count;
+- which `/dev/video*` XRService has open (`/proc/PID/fd`; video9 and video13 are the side pair, video6 and video7 the upper pair). Only on the host: the dev container can't read another process's open files, so there it's skipped;
+- ft-camd's ring header, when it runs: how many mono cameras it publishes.
+
+The hand recorder runs it before a session (DESIGN.md, "Camera check"). `hands/tests/test_camcheck.py` runs it on the 2026-10-02 log cut at several points, and on made-up logs.
+
+### The watcher (off by default)
+
+`hands/ft-camwatch` follows the XRService log (a stat every 2 s, reading only what's new). On a VCINT failure it posts a notification in the Frametop desktop, on the desktop's own D-Bus, found through its plasmashell as `decoration/apply.sh` does. With `CAMWATCH_AUTO_RESTART=1` in `~/.config/frametop.conf` it also restarts SteamVR, but only:
+- while the headset isn't worn (frame-job's check: `vrcompositor` runs and a `/sys/class/backlight/*/brightness` is over 0), and after it has been off for `CAMWATCH_IDLE_S` (60);
+- with no app Steam launched (`SteamLaunch AppId=N` in a process's arguments; `CAMWATCH_IGNORE_APPIDS` lists ids that don't count) and nobody on the remote desktop (an established connection to the VNC port, `VNC_PORT`, 5900);
+- once per failure, and not again within `CAMWATCH_COOLDOWN_MIN` (30) of the last automatic restart. It remembers both in `~/.local/state/frametop/camwatch.json`, so its own restart doesn't reset them.
+
+It logs every decision to the journal. `ft-camwatch --once` prints the state and what it would do, and does nothing; `--dry-run` keeps watching without acting. `hands/frametop-camwatch.service` is the unit (a template, `@REPO@` as in the others; nothing installs or enables it yet). It isn't `PartOf=steamvr.service`, so it outlives the restart it asks for. `CAMWATCH_NOTIFY=0` turns the notification off. `hands/tests/test_camwatch.py` tests its decisions with made-up inputs.
+
+### What a SteamVR restart does to Frametop
+
+Read from the code on the experimental branch, not tried live:
+- ft-screens quits when SteamVR does: on `VREvent_Quit` it ends its Wayland display (`screens/vr.cpp`, `ft_vr_poll`; `screens/compositor.c`, `handle_vr_event`). It never connects to SteamVR again: `ft_vr_init` runs once, at its start.
+- KWin runs nested in ft-screens, so the Frametop desktop ends with it, every window in it too (the hand recorder's as well). Its unit, `frametop-desktop`, is a transient `systemd-run` unit with `Restart=no`, so the desktop doesn't come back by itself: start it again (Desktop in the library, or `desktops.sh start`).
+- When the unit stops, systemd ends what's left in it. `session/keep-apps.sh` moves programs started in the desktop out of the unit first, but only `desktops.sh stop` runs it; here they stop too. Programs in the dev container (ft-screens, the hand recorder) are in the container's cgroup and end when their Wayland connection goes.
+- The units that are `PartOf=steamvr.service` restart with it: `frametop-camd`, `frametop-hands`, the pointer helper, gaze and power, and the hand recorder's own transient ft-camd and ft-hands units.
+
+### Verified, and what's a guess
+
+Verified, from the XRService logs of 2026-10-01 and 2026-10-02 and the running system:
+- The failure's log lines and its effect: "Failed to load VCINT FPGA image when passthrough cameras are connected", interleaving support 0, "Created 4 tasks (2 tracking, 2 passthrough)", and only video9 and video13 opened. At 19:38-19:59 XRService held only those two of the four (plus video0 and video3), and ft-camd published two mono cameras.
+- A wake's load can work and can fail. Both wakes in the logs started from an FPGA that answered nothing ("ERROR/UNKNOWN"): the one at 2026-10-01 16:39 loaded VCINT, the one at 2026-10-02 17:02 failed ("FPGA config_done signal did not assert").
+- After a reboot the FPGA reads PASSTHRU and SteamVR's start loads VCINT (2026-10-01 21:53, 2026-10-02 13:39).
+- A SteamVR restart within a boot found VCINT still loaded and loaded nothing (2026-10-01 15:27): XRService checks the FPGA when it starts and loads only when it must.
+
+Guesses, not tested:
+- **Whether a SteamVR restart fixes it.** After a failed load the FPGA doesn't answer, so a new XRService would run the same load a wake runs, which has worked once and failed once. It's never been tried after a failure. If it doesn't help, only a reboot is known to work (the FPGA comes up as PASSTHRU, and the load at SteamVR's start has worked both times).
+- That the IR light is off because of the FPGA: the frames are darker and the illuminator ring isn't seen, and the FPGA loader lists a `room_led_en` pin, but nothing shows the light's state directly.
+- That a sleep and wake (taking the headset off long enough) would retry the load too: it should, since every wake loads VCINT, but no failure has been followed by a wake yet.
+- How the Frametop desktop behaves on a SteamVR restart (above): read from the code only.
+- That Steam-launched apps carry `SteamLaunch AppId=N`: from Steam on other Linux systems; no VR game has run on the Frame to confirm it.
+
 ## Build
 
 `hands/build.sh` builds in the dev container on the Frame, into `hands/build/`, with `hands/Makefile`. The first build fetches ncnn at a pinned tag (`NCNN_TAG` in the Makefile) and builds it into `hands/build/ncnn`, which takes a few minutes; `NCNN=DIR` points at an ncnn install already built instead. ft-camd is linked statically, because it runs on the host, which has an older glibc than the container.
 
 ## Known issues
 
-- **The side cameras can come out swapped.** ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and some XRService restarts reverse it. For now it's caught by hand: `tools/check_sides.py --ring`, then `HANDS_SWAP_SIDES=1`. It needs a fix in ft-camd, or at least an automatic check when it starts.
+- **The side cameras can come out swapped.** ft-camd tells the side cameras' buffers apart only by XRService's allocation order, and some XRService restarts reverse it. ft-hands corrects it from the hands (`HANDS_SWAP_SIDES=auto`, the default). Until it has seen about 1-2 s of hands in both namings' reach, the cutouts may sit beside the hands. ft-camd itself still can't tell.
 - **The colour cameras can't be used while the headset is worn.** The colour module then writes only a half-size image into the top-left quarter of its buffers, and ft-camd drops those frames. So the service runs the mono cameras only, and tracking in bright light, where the mono cameras see dark hands, doesn't get the colour pair's help.
 - **The colour calibration mapping isn't settled.** Which colour camera is `passthrough_left` (`HANDS_COLOR_LEFT`) and how the module's crop applies (`HANDS_COLOR_CROP`) still need `tools/check_color.py` on a recording with a lit, textured view.
 - **Depth when one camera loses the hand.** A hand seen in one camera drifts 10% per update toward the one-camera depth guess (`kMonoDepthGain`, 0.1, in `track/tracker.cpp`). In the 2026-09-30 replays that was worse than keeping the last distance (see "3D" above). A smaller gain, such as 0.02, is the next thing to try.
 - **Pinches aren't reliable enough for everyday use yet.** That's why hand tracking stays off until `ft-handsctl on`, and `POINTER_HANDS` is 0 by default.
+- **SteamVR can leave the upper cameras and the IR light off after a wake**, and then no hands are found. See "Camera check" above: `camcheck.py` tells, the hand recorder won't start a session, and the fix is a SteamVR restart or a reboot.
 - **Floating windows don't get hand cutouts.** Their panels show crops of the client buffer, which the cutouts' side-by-side buffer doesn't match (`screens/vr.cpp`, `UpdateCutouts`).

@@ -11,6 +11,8 @@
 //     its centre (it snaps level within kRollSnap), or scroll on it for kRollStep steps.
 //   - a resize tab on the bottom right corner: drag it to set the width (the height
 //     follows the screen's resolution).
+//   - a reset button left of the bar: every screen back in its layout, around where you
+//     are now (`ft-layout apply`, like Meta+Shift+R).
 //   The controls are translucent, like SteamVR's own, and brighten under a laser. They
 //   are invisible until a laser (a controller's, or the 3D mouse's) lands on or passes very close to
 //   one of them (UpdateControls).
@@ -40,9 +42,17 @@
 //     default it's off while a game (a scene app) runs: the screens stay up over the game,
 //     the controllers stay in it, and the 3D mouse (its own laser mode) or the dashboard
 //     works the screens. Modes: always, outside_games (default), dashboard (never on its
-//     own; also for flatscreen games, which aren't scene apps).
+//     own; also for flatscreen games, which aren't scene apps). Where the mode leaves the
+//     controllers to the game, pointing a controller at a panel (a screen, a floating window
+//     and its popups, their controls, the keyboard) turns the laser on for it until you
+//     point away, like SteamVR's own floating windows (UpdateAim).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
+//   - paused ("pause on", from the input relay when Frametop pauses for a VR game,
+//     input/game_pause.py): every screen and floating window hides whatever the mode, the
+//     hotkey, or the dashboard says, and compositor.c gives KWin a frame callback once a
+//     second, as for any hidden screen, so KWin and its apps hardly draw. "pause off" undoes
+//     it.
 //   - hand cutouts (handcut.cpp): where ft-hands (hands/) tracks a hand between an eye and a
 //     screen, that eye sees through the screen (to Room View). Only then is the screen
 //     drawn by us, into a side-by-side buffer (one half per eye); otherwise its client
@@ -180,8 +190,12 @@ Mat TipOffset(vr::TrackedDeviceIndex_t dev) {
     Tip tip{model, Identity(), false, now};
     vr::RenderModel_ControllerMode_State_t mode{};
     vr::RenderModel_ComponentState_t state{};
-    if (model[0] && vr::VRRenderModels()->GetComponentStateForDevicePath(model, vr::k_pch_Controller_Component_Tip,
-                                                                          vr::k_ulInvalidInputValueHandle, &mode, &state))
+    // GetComponentState, not GetComponentStateForDevicePath: without an input source handle
+    // the latter fails for every component while a VR game runs, and the rays came from the
+    // pose, 40 degrees above the laser. The tip doesn't move with the buttons.
+    vr::VRControllerState_t buttons{};
+    if (model[0] && vr::VRRenderModels()->GetComponentState(model, vr::k_pch_Controller_Component_Tip, &buttons, &mode,
+                                                            &state))
         tip.offset = state.mTrackingToComponentLocal, tip.found = true;
     cache[dev] = tip;
     return tip.offset;
@@ -228,6 +242,7 @@ constexpr double kRollSnap = 2.5;    // degrees from level where rolling snaps l
 constexpr double kRollStep = 5;      // degrees per scroll notch on the roll button
 constexpr float kChromeIdle = 0.55f; // the controls' opacity without a laser on them
 constexpr long kControlsLinger = 35; // ticks (~0.4 s) the controls stay after a laser leaves
+constexpr long kAimLinger = 25;      // ticks (~0.3 s) a panel keeps the laser on after the aim leaves it
 long g_tick = 0;                     // ft_vr_poll calls
 bool g_vr = false;                   // connected to SteamVR (ft-screens --no-vr runs without it)
 constexpr vr::TrackedDeviceIndex_t kNone = vr::k_unTrackedDeviceIndexInvalid;
@@ -242,7 +257,8 @@ struct Screen {
     vr::VROverlayHandle_t overlay = vr::k_ulOverlayHandleInvalid, bar = vr::k_ulOverlayHandleInvalid,
                           handle = vr::k_ulOverlayHandleInvalid, curveButton = vr::k_ulOverlayHandleInvalid,
                           rollButton = vr::k_ulOverlayHandleInvalid, dockButton = vr::k_ulOverlayHandleInvalid,
-                          closeButton = vr::k_ulOverlayHandleInvalid;  // the last two: floating windows
+                          closeButton = vr::k_ulOverlayHandleInvalid,  // the last two: floating windows
+                          resetButton = vr::k_ulOverlayHandleInvalid;  // desktop screens only
     int width = 0, height = 0;    // current buffer size (mouse scale)
     double metres = 1;
     double curve = 0;             // cylinder radius in metres; 0 = flat
@@ -259,11 +275,12 @@ struct Screen {
     double grabX = 0, grabY = 0;              // resize: the grab point relative to the corner
     Mat rollFrom = Identity();                // roll: the pose at the press (pinRel when pinned)
     double rollAngle = 0;                     // roll: the laser's angle around the centre then
-    bool hover[6] = {};                       // a laser is on the bar, curve, roll, resize, dock, close control
+    bool hover[7] = {};                       // a laser is on the bar, curve, roll, resize, dock, close, reset control
     bool lasers = true;                       // MakeOverlaysInteractiveIfVisible is set
     float controls = 0;                       // the controls' fade, 0 (hidden) .. 1
     bool controlsUp = false;                  // the controls' overlays are shown
     long nearUntil = 0;                       // a laser was near the controls until this tick
+    long aimUntil = 0;                        // a hand controller pointed at it until this tick (UpdateAim)
     vr::TrackedDeviceIndex_t pinTarget = kNone;  // moving: rides on this controller when let go
     vr::TrackedDeviceIndex_t onWrist = kNone;    // moving: the laser is in this controller's ring
     bool barLit = false;
@@ -287,6 +304,11 @@ struct Screen {
     long resizeSent = 0;          // g_tick of the last resize request (they're throttled)
     int resizeW = 0, resizeH = 0; // ...and its size
     std::map<int, Sub> subs;
+    // Attention (UpdateAttention): what ft_vr_screen_attention answers, and until when (ms)
+    // it stays focused or in view after the last reason for it.
+    ft_attention attention = FT_FOCUSED;
+    int64_t inputMs = INT64_MIN / 2;  // the last pointer event on it or its controls
+    int64_t focusUntil = 0, viewUntil = 0;
     double heightMetres() const {
         if (floating && cropW > 0) return metres * cropH / cropW;
         return width > 0 ? metres * height / width : metres * 9 / 16;
@@ -294,11 +316,11 @@ struct Screen {
     // Buffer pixels from OpenVR's mouse position on the panel (its origin is bottom left).
     // A cropped panel too: SteamVR gives the position in the whole texture, not the crop.
     void ToBuffer(double mx, double my, double *x, double *y) const { *x = mx, *y = height - my; }
-    std::array<vr::VROverlayHandle_t, 6> Controls() const {
-        return {bar, curveButton, rollButton, handle, dockButton, closeButton};
+    std::array<vr::VROverlayHandle_t, 7> Controls() const {
+        return {bar, curveButton, rollButton, handle, dockButton, closeButton, resetButton};
     }
-    std::array<vr::VROverlayHandle_t, 7> All() const {
-        return {overlay, bar, curveButton, rollButton, handle, dockButton, closeButton};
+    std::array<vr::VROverlayHandle_t, 8> All() const {
+        return {overlay, bar, curveButton, rollButton, handle, dockButton, closeButton, resetButton};
     }
 };
 std::map<int, Screen> g_screens;
@@ -320,6 +342,7 @@ double g_gestureAngle = 20;  // gesture: look within this of the controller
 std::string g_gestureHand = "left";
 Lasers g_lasers = Lasers::OutsideGames;  // when controllers' lasers work the screens (see the top)
 bool g_gameRunning = false;              // a scene app (VR game) is running
+bool g_paused = false;                   // Frametop paused for a VR game: everything hidden (see the top)
 InGames g_inGames = InGames::Hide;       // during a VR game, the always mode acts like the dashboard mode
 
 // ---------------------------------------------------------------- chrome (bar, button, handle)
@@ -433,6 +456,19 @@ std::vector<uint8_t> DockTexture(int n) {
             if (std::fabs(u) < 0.5 && v > -0.52 && v < -0.38) return true;  // the line
             if (std::fabs(u) < 0.08 && v > -0.1 && v < 0.5) return true;    // the shaft
             return v >= -0.3 && v <= -0.05 && std::fabs(u) <= (v + 0.3) * 1.2;  // the head, point down
+        },
+        DiscRim);
+}
+
+std::vector<uint8_t> ResetTexture(int n) {
+    // A reticle: "put the screens back around you" (like a recenter).
+    return ControlTexture(
+        n, InDisc,
+        [](double u, double v) {
+            const double r = std::hypot(u, v);
+            if (std::fabs(r - 0.4) < 0.07 || r < 0.13) return true;  // the ring and the centre
+            return (std::fabs(u) < 0.06 && std::fabs(v) > 0.47 && std::fabs(v) < 0.72) ||
+                   (std::fabs(v) < 0.06 && std::fabs(u) > 0.47 && std::fabs(u) < 0.72);  // the ticks
         },
         DiscRim);
 }
@@ -589,16 +625,18 @@ Mat BarOffset(const Screen &s) { return OnSurface(s, 0, BarY(s), 0.003); }
 
 // Put the bar, the curve button, and the corner tab under the screen (same parent: the
 // room or the controller), sized for the screen and its distance, and on its surface.
-// Where each control sits, relative to the screen: bar, curve, roll, resize tab, and a
-// floating window's dock and close buttons (left of the bar).
-std::array<Mat, 6> ControlOffsets(const Screen &s) {
+// Where each control sits, relative to the screen: bar, curve, roll, resize tab, a
+// floating window's dock and close buttons (left of the bar), and a desktop screen's reset
+// button (left of the bar, where a floating window has its dock button).
+std::array<Mat, 7> ControlOffsets(const Screen &s) {
     const double h = s.heightMetres(), bar = s.chrome, button = s.grip, gap = bar * 0.06;
     return {BarOffset(s), OnSurface(s, bar / 2 + gap + button / 2, BarY(s), 0.003),
             OnSurface(s, bar / 2 + gap * 2 + button * 1.5, BarY(s), 0.003),
             // The tab's top left corner is the screen's bottom right corner.
             OnSurface(s, s.metres / 2 + s.grip / 2, -(h / 2 + s.grip / 2), 0.003),
             OnSurface(s, -(bar / 2 + gap + button / 2), BarY(s), 0.003),
-            OnSurface(s, -(bar / 2 + gap * 2 + button * 1.5), BarY(s), 0.003)};
+            OnSurface(s, -(bar / 2 + gap * 2 + button * 1.5), BarY(s), 0.003),
+            OnSurface(s, -(bar / 2 + gap + button / 2), BarY(s), 0.003)};
 }
 
 // A floating window's popups and dialogs, a few millimetres in front of it, where they are
@@ -633,12 +671,15 @@ void PlaceChrome(Screen &s) {
     if (s.floating) {
         vr::VROverlay()->SetOverlayWidthInMeters(s.dockButton, float(button));
         vr::VROverlay()->SetOverlayWidthInMeters(s.closeButton, float(button));
+    } else {
+        vr::VROverlay()->SetOverlayWidthInMeters(s.resetButton, float(button));
     }
     // Curved, the bar bends with the screen's bottom edge.
     vr::VROverlay()->SetOverlayCurvature(s.bar, s.curve > 0 ? float(std::min(1.0, bar / (2 * M_PI * s.curve))) : 0.f);
     const std::pair<vr::VROverlayHandle_t, Mat> parts[] = {
         {s.bar, offsets[0]},        {s.curveButton, offsets[1]}, {s.rollButton, offsets[2]},
-        {s.handle, offsets[3]},     {s.dockButton, offsets[4]},  {s.closeButton, offsets[5]}};
+        {s.handle, offsets[3]},     {s.dockButton, offsets[4]},  {s.closeButton, offsets[5]},
+        {s.resetButton, offsets[6]}};
     PlaceSubs(s);
     if (s.pinned != kNone) {
         for (const auto &[o, off] : parts) {
@@ -734,6 +775,7 @@ void UpdateGame() {
 }
 
 bool ModeVisible() {
+    if (g_paused) return false;
     switch (EffectiveMode()) {
         case Mode::Always: return !g_manual;
         case Mode::Toggle: return g_manual;
@@ -759,10 +801,10 @@ bool ModeVisible() {
 void ApplyAlpha(const Screen &s) {
     vr::VROverlay()->SetOverlayAlpha(s.overlay, s.alpha);
     for (const auto &[k, sub] : s.subs) vr::VROverlay()->SetOverlayAlpha(sub.overlay, s.alpha);
-    const bool active[6] = {s.hover[0] || s.drag == Drag::Move, s.hover[1], s.hover[2] || s.drag == Drag::Roll,
-                            s.hover[3] || s.drag == Drag::Resize, s.hover[4], s.hover[5]};
+    const bool active[7] = {s.hover[0] || s.drag == Drag::Move, s.hover[1], s.hover[2] || s.drag == Drag::Roll,
+                            s.hover[3] || s.drag == Drag::Resize, s.hover[4], s.hover[5], s.hover[6]};
     const auto controls = s.Controls();
-    for (int k = 0; k < 6; ++k)
+    for (int k = 0; k < 7; ++k)
         if (controls[k] != vr::k_ulOverlayHandleInvalid)
             vr::VROverlay()->SetOverlayAlpha(controls[k], s.alpha * s.controls * (active[k] ? 1.f : kChromeIdle));
 }
@@ -792,7 +834,7 @@ void UpdateVisibility() {
     Mat head;
     const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
     for (auto &[i, s] : g_screens) {
-        bool visible = s.shown && (shared || s.drag != Drag::None) && !s.alone;
+        bool visible = !g_paused && s.shown && (shared || s.drag != Drag::None) && !s.alone;
         // A floating window's panel: while a window floats on it, its output is on, and the
         // window isn't minimized (and once it has a crop).
         if (s.floating) visible = visible && s.floatOn && s.outputOn && !s.minimized && s.cropW > 0;
@@ -810,16 +852,92 @@ void UpdateVisibility() {
     }
 }
 
+// Attention, for each screen's frame rate (compositor.c gives KWin frame callbacks at a
+// rate for each level): focused while you look at the screen (within kFocusAngle of where
+// your head points), a laser or the mouse is on it, or it's being carried; in view while
+// any of it is within kViewAngle; hidden otherwise, or while it isn't shown. A level stays
+// for a moment after its reason goes, so a glance away doesn't make it stutter, and goes up
+// at once.
+constexpr double kFocusAngle = 12, kViewAngle = 60;  // degrees
+constexpr int64_t kFocusLinger = 1500, kViewLinger = 500, kInputFocus = 1500;  // ms
+
+bool RayOnPlane(const Mat &p, const Mat &d, double *x, double *y);
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+
+// The smallest angle between where the head points and the screen: to the point of its
+// rectangle nearest where the head's ray meets its plane, its centre, and its corners. A
+// curved screen counts as flat; the angles hardly differ.
+double AngleToScreen(const Screen &s, const Mat &p, const Mat &head) {
+    const double hw = s.metres / 2, hh = s.heightMetres() / 2;
+    double f[3];
+    Column(head, 2, f);  // the head's +Z points backward
+    auto angleTo = [&](double u, double v) {
+        double to[3];
+        for (int i = 0; i < 3; ++i) to[i] = p.m[i][3] + u * p.m[i][0] + v * p.m[i][1] - head.m[i][3];
+        const double len = std::sqrt(Dot3(to, to)) + 1e-9;
+        return std::acos(std::clamp(-Dot3(f, to) / len, -1.0, 1.0)) * 180 / M_PI;
+    };
+    double best = 180, x, y;
+    if (RayOnPlane(p, head, &x, &y)) best = angleTo(std::clamp(x, -hw, hw), std::clamp(y, -hh, hh));
+    for (double u : {-hw, 0.0, hw})
+        for (double v : {-hh, 0.0, hh}) best = std::min(best, angleTo(u, v));
+    return best;
+}
+
+void UpdateAttention() {
+    const int64_t now = NowMs();
+    Mat head;
+    const bool haveHead = DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head);
+    for (auto &[i, s] : g_screens) {
+        if (!s.visible) {
+            s.attention = FT_HIDDEN;
+            s.focusUntil = s.viewUntil = 0;
+            continue;
+        }
+        bool focus = s.drag != Drag::None || now - s.inputMs < kInputFocus, view = focus;
+        Mat p;
+        if (!haveHead) {
+            view = true;  // nothing to go by
+        } else if (ScreenPose(s, &p)) {
+            const double a = AngleToScreen(s, p, head);
+            focus = focus || a <= kFocusAngle;
+            view = view || a <= kViewAngle;
+        }
+        if (focus) s.focusUntil = now + kFocusLinger;
+        if (view) s.viewUntil = now + kViewLinger;
+        s.attention = now < s.focusUntil ? FT_FOCUSED : now < s.viewUntil ? FT_IN_VIEW : FT_HIDDEN;
+    }
+}
+
 
 // Controllers' lasers on the screens (see the top): the flag follows the mode and whether a
-// VR game runs.
+// VR game runs, and where the mode leaves the controllers to the game, whether one points at
+// the panel (UpdateAim).
+bool LasersByMode() { return g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning); }
+long g_keyboardAimUntil = 0;
+
 void UpdateLasers() {
-    const bool want = g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning);
+    const bool byMode = LasersByMode();
     for (auto &[i, s] : g_screens) {
+        const bool want = byMode || (s.visible && g_tick < s.aimUntil);
         if (s.lasers == want) continue;
         s.lasers = want;
         vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, want);
     }
+    if (keyboard::Shown()) keyboard::SetLasers(byMode || g_tick < g_keyboardAimUntil);
+}
+
+// The distance from a laser's line to a point ahead of it, or -1 when it's behind.
+double RayDistance(const Mat &d, const Mat &c) {
+    const double o[3] = {d.m[0][3], d.m[1][3], d.m[2][3]}, dir[3] = {-d.m[0][2], -d.m[1][2], -d.m[2][2]};
+    const double v[3] = {c.m[0][3] - o[0], c.m[1][3] - o[1], c.m[2][3] - o[2]};
+    const double t = Dot3(v, dir);
+    if (t <= 0) return -1;
+    const double q[3] = {v[0] - dir[0] * t, v[1] - dir[1] * t, v[2] - dir[2] * t};
+    return std::sqrt(Dot3(q, q));
 }
 
 // The controls are invisible until a laser is on one of them (SteamVR's hover event) or
@@ -842,18 +960,14 @@ void UpdateControls() {
             for (double f : {-0.5, -0.25, 0.0, 0.25, 0.5})
                 spots.push_back(Mul(p, Mul(offsets[0], Translation(f * s.chrome, 0, 0))));
             const auto controls = s.Controls();
-            for (int k = 1; k < 6; ++k)
+            for (int k = 1; k < 7; ++k)
                 if (controls[k] != vr::k_ulOverlayHandleInvalid) spots.push_back(Mul(p, offsets[k]));
             const double reach = std::max(s.grip * 1.5, s.chrome * 0.12);
             for (const Mat &d : lasers) {
-                const double o[3] = {d.m[0][3], d.m[1][3], d.m[2][3]}, dir[3] = {-d.m[0][2], -d.m[1][2], -d.m[2][2]};
                 bool close = false;
                 for (const Mat &c : spots) {
-                    const double v[3] = {c.m[0][3] - o[0], c.m[1][3] - o[1], c.m[2][3] - o[2]};
-                    const double t = Dot3(v, dir);
-                    if (t <= 0) continue;
-                    const double q[3] = {v[0] - dir[0] * t, v[1] - dir[1] * t, v[2] - dir[2] * t};
-                    if (Dot3(q, q) <= reach * reach) close = true;
+                    const double r = RayDistance(d, c);
+                    if (r >= 0 && r <= reach) close = true;
                 }
                 if (close) {
                     s.nearUntil = g_tick + kControlsLinger;
@@ -893,6 +1007,21 @@ void SendFloat(const std::string &msg) {
     if (msg.rfind("resize ", 0) != 0)  // an edge drag sends many resizes a second
         std::printf("to ft-floatd: %s\n", msg.c_str());
 }
+
+// To the pointer helper (@ft_pointer_helper), from an unbound socket.
+void SendPointer(const std::string &msg) {
+    static const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const char name[] = "ft_pointer_helper";
+    std::memcpy(addr.sun_path + 1, name, sizeof name - 1);
+    sendto(fd, msg.data(), msg.size(), MSG_DONTWAIT, reinterpret_cast<sockaddr *>(&addr),
+           socklen_t(offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1));
+}
+
+// A new panel: the pointer helper reads SteamVR's list of panels only every 20 s, so it's told
+// at once ("overlay <key>"), or the mouse couldn't click a menu until then.
+void AnnounceOverlay(const char *key) { SendPointer(std::string("overlay ") + key); }
 
 // Where a device's ray meets the screen's plane, in the screen's x (right) and y (up),
 // metres from its centre.
@@ -1017,15 +1146,8 @@ void EndDrag(Screen &s) {
     ApplyAlpha(s);
 }
 
-// KWin's outputs follow where the screens are, so the pointer and dragged windows cross
-// to the screen you see next to this one: `ft-layout scale` runs once a move has settled.
-long g_arrangeAt = -1;  // g_tick to run it at, -1 = not pending
-
-void ArrangeDesktopSoon() { g_arrangeAt = g_tick + 45; }  // about half a second
-
-void UpdateArrange() {
-    if (g_arrangeAt < 0 || g_tick < g_arrangeAt) return;
-    g_arrangeAt = -1;
+// Run `ft-layout <cmd>` in the background, logging to /tmp/frametop-layout.log.
+void RunLayout(const char *cmd) {
     char exe[PATH_MAX];
     if (!realpath("/proc/self/exe", exe)) return;
     std::string layout(exe);  // <repo>/screens/build/ft-screens -> <repo>/layout/ft-layout
@@ -1036,12 +1158,24 @@ void UpdateArrange() {
     posix_spawn_file_actions_addopen(&io, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&io, 1, "/tmp/frametop-layout.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     posix_spawn_file_actions_adddup2(&io, 1, 2);
-    char scale[] = "scale";
-    char *argv[] = {layout.data(), scale, nullptr};
+    std::string arg(cmd);
+    char *argv[] = {layout.data(), arg.data(), nullptr};
     pid_t pid;  // reaped by the compositor's SIGCHLD handler
     if (posix_spawn(&pid, layout.c_str(), &io, nullptr, argv, environ) != 0)
         std::printf("can't run %s\n", layout.c_str());
     posix_spawn_file_actions_destroy(&io);
+}
+
+// KWin's outputs follow where the screens are, so the pointer and dragged windows cross
+// to the screen you see next to this one: `ft-layout scale` runs once a move has settled.
+long g_arrangeAt = -1;  // g_tick to run it at, -1 = not pending
+
+void ArrangeDesktopSoon() { g_arrangeAt = g_tick + 45; }  // about half a second
+
+void UpdateArrange() {
+    if (g_arrangeAt < 0 || g_tick < g_arrangeAt) return;
+    g_arrangeAt = -1;
+    RunLayout("scale");
 }
 
 // Let go: pin to the armed wrist, as the screen is now.
@@ -1241,6 +1375,7 @@ void SetSub(Screen &s, int index, int k, int x, int y, int w, int h) {
         vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
         vr::VROverlay()->SetOverlayFlag(sub.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, s.lasers);
         vr::VROverlay()->SetOverlaySortOrder(sub.overlay, 5);
+        AnnounceOverlay(key);
         it = s.subs.emplace(k, sub).first;
         if (s.shown) {
             auto imp = g_imports.find(s.shown);
@@ -1274,6 +1409,7 @@ struct Press {
     double x = 0, y = 0;                      // ...and where on it, in buffer pixels
     double distance = 1;                      // from the laser's start to the last panel it met
     long upAt = -1;                           // the pointer helper saw left come up: release it at this tick
+    int64_t idleSince = -1;                   // the pressing controller has held nothing since (ms, ReleaseStuck)
 };
 Press g_press;
 vr::VROverlayHandle_t g_catcher = vr::k_ulOverlayHandleInvalid;
@@ -1310,6 +1446,47 @@ void ReleaseAway(uint32_t button, void (*handle)(const struct ft_event *, void *
     handle(&e, data);
 }
 
+// Whether a hand controller holds anything (a button down): 1 yes, 0 no, -1 unknown. SteamVR
+// answers overlay apps only while a VR game runs (checked 2026-10-04); outside games it can't
+// say. The Frame controller's axes have no types, so the buttons are all there is.
+int ControllerHolds(vr::TrackedDeviceIndex_t dev) {
+    vr::VRControllerState_t st{};
+    if (!vr::VRSystem()->GetControllerState(dev, &st, sizeof st)) return -1;
+    return st.ulButtonPressed ? 1 : 0;
+}
+
+// Releases SteamVR never sends. Pausing, or hiding the screen a button went down on, takes the
+// laser off it mid-click (the pause gesture's second thumbstick click does that), and SteamVR's
+// laser mouse then forgets the button: no release comes, the catcher stayed up, and the game
+// never got its controllers back (2026-10-04). So a held button is released here when it has
+// no visible screen to come up on, or when its hand controller has held nothing for kStuckMs
+// (only known during VR games, where the lost release took the game's controllers).
+// The pointer helper's virtual controller has its own word for that ("up").
+constexpr int64_t kStuckMs = 1000;
+void ReleaseStuck(void (*handle)(const struct ft_event *, void *), void *data) {
+    if (!g_press.buttons) {
+        g_press.idleSince = -1;
+        return;
+    }
+    const char *why = nullptr;
+    const auto it = g_screens.find(g_press.screen);
+    if (g_paused) why = "paused";
+    else if (g_press.screen >= 0 && (it == g_screens.end() || !it->second.visible)) why = "its screen hid";
+    else if (IsHandController(g_press.device)) {
+        const int64_t now = NowMs();
+        if (ControllerHolds(g_press.device) != 0) g_press.idleSince = -1;
+        else if (g_press.idleSince < 0) g_press.idleSince = now;
+        else if (now - g_press.idleSince >= kStuckMs) why = "the controller holds nothing";
+    }
+    if (!why) return;
+    std::printf("a held button can't come up on a screen (%s): released\n", why);
+    const vr::TrackedDeviceIndex_t dev = g_press.device;
+    for (uint32_t b = 0; b < 32; ++b)
+        if (g_press.buttons & (1u << b)) ReleaseAway(BTN_LEFT + b, handle, data);
+    g_press.buttons = 0, g_press.upAt = -1, g_press.idleSince = -1;
+    EndDragsBy(dev);
+}
+
 void ShowCatcher(bool on) {
     if (on == g_catcherShown || g_catcher == vr::k_ulOverlayHandleInvalid) return;
     g_catcherShown = on;
@@ -1330,7 +1507,8 @@ void UpdateCatcher() {
     for (int k = 0; k < 3; ++k) params.vSource.v[k] = l.m[k][3], params.vDirection.v[k] = -l.m[k][2];
     for (auto &[i, s] : g_screens) {
         if (!s.visible) continue;
-        std::vector<vr::VROverlayHandle_t> parts(s.All().begin(), s.All().end());
+        const auto all = s.All();  // one copy: two calls give two temporaries, not one range
+        std::vector<vr::VROverlayHandle_t> parts(all.begin(), all.end());
         for (const auto &[k, sub] : s.subs) parts.push_back(sub.overlay);
         for (auto o : parts) {
             vr::VROverlayIntersectionResults_t hit;
@@ -1354,6 +1532,137 @@ Screen *Find(int one_based) {
     return it == g_screens.end() ? nullptr : &it->second;
 }
 
+// ---------------------------------------------------------------- the lazy susan
+// "spin next|prev|<degrees>": the panels in the room (screens and floating windows, not
+// pinned ones) turn together about a vertical axis through your head, so the next panel to
+// your right (next) or left (prev) glides to straight ahead, or the ring turns by that many
+// degrees (positive turns it left, like next). Their arrangement stays as it is: the room
+// turns instead of you. A spin that arrives during one adds to it, from where the panels are
+// headed, so quick taps carry on smoothly. Grabbing a panel, or a command that places it,
+// takes it out of the spin where it is. The 3D mouse's pointer goes to straight ahead.
+constexpr double kSpinSeconds = 0.3;  // how long a spin takes
+constexpr double kSpinAhead = 8;      // degrees: a panel this near straight ahead is the current one
+constexpr double kSpinFocus = 30;     // degrees: when a spin settles, the panel this near ahead gets typing
+
+struct Spin {
+    bool on = false;
+    double cx = 0, cz = 0;    // the axis
+    double from = 0, to = 0;  // radians, turned from the poses in base (positive: to the left)
+    Clock::time_point start;
+    std::map<int, Mat> base;  // index -> its pose before the spin
+    int front = -1;           // settled: this panel came to the front (ft_vr_poll reports it)
+} g_spin;
+
+// p turned a radians about the vertical axis through (cx, cz); positive turns it to the left.
+Mat Turned(const Mat &p, double a, double cx, double cz) {
+    const double c = std::cos(a), s = std::sin(a);
+    Mat r = Identity();
+    r.m[0][0] = float(c), r.m[0][2] = float(s);
+    r.m[2][0] = float(-s), r.m[2][2] = float(c);
+    r.m[0][3] = float(cx - c * cx - s * cz);
+    r.m[2][3] = float(cz + s * cx - c * cz);
+    return Mul(r, p);
+}
+
+bool Spinnable(const Screen &s) { return s.pinned == kNone && (!s.floating || s.floatOn) && s.drag == Drag::None; }
+
+double SpinNow() {
+    if (!g_spin.on) return g_spin.to;
+    const double t = std::min(1.0, std::chrono::duration<double>(Clock::now() - g_spin.start).count() / kSpinSeconds);
+    return g_spin.from + (g_spin.to - g_spin.from) * t * t * (3 - 2 * t);
+}
+
+void UpdateSpin() {
+    if (!g_spin.on) return;
+    const double a = SpinNow();
+    const bool done = Clock::now() - g_spin.start >= std::chrono::duration<double>(kSpinSeconds);
+    for (auto it = g_spin.base.begin(); it != g_spin.base.end();) {
+        auto s = g_screens.find(it->first);
+        if (s == g_screens.end() || !Spinnable(s->second)) {
+            it = g_spin.base.erase(it);  // grabbed, pinned, or gone: it stays where it is now
+            continue;
+        }
+        SetAbsolute(s->second, Turned(it->second, a, g_spin.cx, g_spin.cz));
+        ++it;
+    }
+    if (done) {
+        // The panel now nearest straight ahead (of where you face) gets typing and the active window.
+        Mat head;
+        double nearest = kSpinFocus;
+        if (DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head)) {
+            for (const auto &[i, p] : g_spin.base) {
+                const auto it = g_screens.find(i);
+                Mat q;
+                if (it == g_screens.end() || !it->second.visible || !ScreenPose(it->second, &q)) continue;
+                double f[3] = {-head.m[0][2], 0, -head.m[2][2]};
+                double d[3] = {q.m[0][3] - head.m[0][3], 0, q.m[2][3] - head.m[2][3]};
+                const double fl = std::sqrt(Dot3(f, f)), dl = std::sqrt(Dot3(d, d));
+                if (fl < 1e-6 || dl < 1e-6) continue;
+                const double a = std::acos(std::clamp(Dot3(f, d) / (fl * dl), -1.0, 1.0)) * 180 / M_PI;
+                if (a < nearest) nearest = a, g_spin.front = i;
+            }
+        }
+        g_spin.on = false;
+        g_spin.base.clear();
+        ArrangeDesktopSoon();  // KWin's outputs follow where the screens are now
+    }
+}
+
+void SpinCommand(const char *arg, char *reply, int size) {
+    Mat head;
+    if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head))
+        return (void)std::snprintf(reply, size, "error no head pose (headset off?)");
+    if (g_spin.on) {
+        g_spin.from = SpinNow();  // carry on from where the panels are now
+    } else {
+        g_spin.base.clear();
+        for (auto &[i, s] : g_screens) {
+            Mat p;
+            if (Spinnable(s) && ScreenPose(s, &p)) g_spin.base[i] = p;
+        }
+        g_spin.cx = head.m[0][3], g_spin.cz = head.m[2][3];
+        g_spin.from = g_spin.to = 0;
+    }
+    if (g_spin.base.empty()) return (void)std::snprintf(reply, size, "error nothing to spin");
+    double turn;  // degrees, positive to the left
+    const bool next = !std::strcmp(arg, "next");
+    if (next || !std::strcmp(arg, "prev")) {
+        // Each visible panel's bearing from where you face, to the right positive, as it will
+        // be when the spin so far ends; the nearest one past straight ahead comes to the front.
+        double fx = -head.m[0][2], fz = -head.m[2][2];
+        const double n = std::sqrt(fx * fx + fz * fz) + 1e-9;
+        fx /= n, fz /= n;
+        const double rx = -fz, rz = fx;
+        double best = 0;
+        bool found = false;
+        for (const auto &[i, p] : g_spin.base) {
+            const auto s = g_screens.find(i);
+            if (s == g_screens.end() || !s->second.visible) continue;
+            const Mat q = Turned(p, g_spin.to, g_spin.cx, g_spin.cz);
+            const double dx = q.m[0][3] - head.m[0][3], dz = q.m[2][3] - head.m[2][3];
+            double a = std::atan2(dx * rx + dz * rz, dx * fx + dz * fz) * 180 / M_PI;
+            if (!next) a = -a;
+            if (a <= kSpinAhead) a += 360;
+            if (!found || a < best) best = a, found = true;
+        }
+        if (!found || best >= 360 - kSpinAhead) {
+            if (!g_spin.on) g_spin.base.clear();
+            return (void)std::snprintf(reply, size, "ok 0 (no other panel)");
+        }
+        if (best > 180) best -= 360;  // the short way round
+        turn = next ? best : -best;
+    } else {
+        char *end;
+        turn = std::strtod(arg, &end);
+        if (end == arg || *end) return (void)std::snprintf(reply, size, "error spin next|prev|<degrees>");
+    }
+    g_spin.to += turn * M_PI / 180;
+    g_spin.start = Clock::now();
+    g_spin.on = true;
+    SendPointer("recenter");  // the 3D mouse's pointer stays in front of you, on what comes there
+    std::snprintf(reply, size, "ok %.1f", turn);
+}
+
 uint32_t LinuxButton(uint32_t vrButton) {
     switch (vrButton) {
         case vr::VRMouseButton_Right: return BTN_RIGHT;
@@ -1366,6 +1675,81 @@ uint32_t LinuxButton(uint32_t vrButton) {
 void ReleaseAwayBy(vr::TrackedDeviceIndex_t dev, uint32_t vrButton, void (*handle)(const struct ft_event *, void *),
                    void *data) {
     if (g_press.buttons && dev == g_press.device) ReleaseAway(LinuxButton(vrButton), handle, data);
+}
+
+// Where a laser meets a panel's surface, in the panel's u (metres along it from the centre,
+// along the arc when curved) and v (up). OpenVR curves a screen into a cylinder toward its
+// front, centred `curve` metres in front of it (see OnSurface).
+bool RayOnSurface(const Screen &s, const Mat &p, const Mat &laser, double *u, double *v) {
+    const Mat inv = Inverse(p);
+    const double o[3] = {inv.m[0][0] * laser.m[0][3] + inv.m[0][1] * laser.m[1][3] + inv.m[0][2] * laser.m[2][3] + inv.m[0][3],
+                         inv.m[1][0] * laser.m[0][3] + inv.m[1][1] * laser.m[1][3] + inv.m[1][2] * laser.m[2][3] + inv.m[1][3],
+                         inv.m[2][0] * laser.m[0][3] + inv.m[2][1] * laser.m[1][3] + inv.m[2][2] * laser.m[2][3] + inv.m[2][3]};
+    double d[3];
+    for (int i = 0; i < 3; ++i) d[i] = -(inv.m[i][0] * laser.m[0][2] + inv.m[i][1] * laser.m[1][2] + inv.m[i][2] * laser.m[2][2]);
+    if (s.curve <= 0) {
+        if (std::fabs(d[2]) < 1e-6) return false;
+        const double t = -o[2] / d[2];
+        if (t <= 0) return false;
+        *u = o[0] + d[0] * t, *v = o[1] + d[1] * t;
+        return true;
+    }
+    // x^2 + (z - r)^2 = r^2, on the screen's side of the axis (z < r).
+    const double r = s.curve, oz = o[2] - r;
+    const double a = d[0] * d[0] + d[2] * d[2], b = 2 * (o[0] * d[0] + oz * d[2]), c = o[0] * o[0] + oz * oz - r * r;
+    const double disc = b * b - 4 * a * c;
+    if (a < 1e-9 || disc < 0) return false;
+    for (double t : {(-b - std::sqrt(disc)) / (2 * a), (-b + std::sqrt(disc)) / (2 * a)}) {
+        const double x = o[0] + d[0] * t, z = oz + d[2] * t;
+        if (t <= 0 || z >= 0) continue;
+        *u = r * std::atan2(x, -z), *v = o[1] + d[1] * t;
+        return true;
+    }
+    return false;
+}
+
+// Where the mode leaves the controllers to a VR game (see the top): a hand controller
+// pointing at a panel, its controls, or a floating window's popups keeps that panel's laser
+// on (UpdateLasers) until kAimLinger ticks after it points away, like SteamVR's own floating
+// windows. Leaving takes a wider margin than arriving, and a drag or a held button keeps it
+// on. The keyboard is one overlay, so SteamVR's own intersection test does there.
+void UpdateAim() {
+    if (LasersByMode()) return;
+    std::vector<Mat> lasers;
+    for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+        Mat d;
+        if (IsHandController(i) && LaserPose(i, &d)) lasers.push_back(d);
+    }
+    for (auto &[index, s] : g_screens) {
+        Mat p;
+        if (!s.visible || !ScreenPose(s, &p)) continue;
+        if (s.drag != Drag::None || (g_press.buttons && g_press.screen == index)) {
+            s.aimUntil = g_tick + kAimLinger;
+            continue;
+        }
+        const double m = s.grip * (g_tick < s.aimUntil ? 2.0 : 0.25), h = s.heightMetres();
+        // The panel and its controls: the bar row under it, the resize tab off its corner.
+        const double halfW = std::max(s.metres / 2 + s.grip, s.chrome / 2 + s.chrome * 0.12 + s.grip * 2) + m;
+        const double top = h / 2 + m, bottom = std::min(BarY(s) - s.grip, -(h / 2 + s.grip)) - m;
+        for (const Mat &l : lasers) {
+            double u, v;
+            if (!RayOnSurface(s, p, l, &u, &v)) continue;
+            bool on = std::fabs(u) <= halfW && v <= top && v >= bottom;
+            for (const auto &[k, sub] : s.subs) {
+                if (on || s.cropW <= 0) break;
+                const double su = (sub.x + sub.w / 2.0 - (s.cropX + s.cropW / 2.0)) * s.mpp;
+                const double sv = -(sub.y + sub.h / 2.0 - (s.cropY + s.cropH / 2.0)) * s.mpp;
+                on = std::fabs(u - su) <= sub.w * s.mpp / 2 + m && std::fabs(v - sv) <= sub.h * s.mpp / 2 + m;
+            }
+            if (on) {
+                s.aimUntil = g_tick + kAimLinger;
+                break;
+            }
+        }
+    }
+    if (keyboard::Shown())
+        for (const Mat &l : lasers)
+            if (keyboard::Aimed(l)) g_keyboardAimUntil = g_tick + kAimLinger;
 }
 
 const char *LasersName() {
@@ -1500,7 +1884,7 @@ void UpdateSteamInFront() {
         g_keyboardAside = true;
     } else if (!front && g_keyboardAside) {
         g_keyboardAside = false;
-        keyboard::Show(g_asidePose);
+        if (keyboard::Show(g_asidePose)) AnnounceOverlay("frametop.keyboard");
     }
 }
 
@@ -1568,6 +1952,25 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
 }
 
 bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
+bool ft_vr_paused(void) { return g_paused; }
+
+enum ft_attention ft_vr_screen_attention(int index) {
+    const auto it = g_screens.find(index);
+    return g_vr && it != g_screens.end() ? it->second.attention : FT_FOCUSED;
+}
+
+bool ft_vr_vsync(double *since, double *hz) {
+    if (!g_vr) return false;
+    float s = 0;
+    uint64_t frame = 0;
+    if (!vr::VRSystem()->GetTimeSinceLastVsync(&s, &frame)) return false;
+    vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+    const float f = vr::VRSystem()->GetFloatTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
+                                                                  vr::Prop_DisplayFrequency_Float, &err);
+    if (err != vr::TrackedProp_Success || !(f >= 30 && f <= 240) || !(s >= 0 && s < 1)) return false;
+    *since = s, *hz = f;
+    return true;
+}
 
 }  // extern "C"
 
@@ -1607,6 +2010,9 @@ bool MakePanel(Screen &s, const char *prefix, const char *label) {
         static const auto close = CloseTexture(64);
         s.dockButton = chrome("dock", "back to the desktop", dock, 64, 64);
         s.closeButton = chrome("close", "close", close, 64, 64);
+    } else {
+        static const auto reset = ResetTexture(64);
+        s.resetButton = chrome("reset", "reset the layout", reset, 64, 64);
     }
     ApplyAlpha(s);
     return true;
@@ -1727,6 +2133,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         auto panelEvent = [&](const vr::VREvent_t &ev, bool sub) {
             ft_event e{};
             e.screen = index;
+            if (ev.eventType != vr::VREvent_FocusLeave) s.inputMs = NowMs();
             auto at = [&] { s.ToBuffer(ev.data.mouse.x, ev.data.mouse.y, &e.x, &e.y); };
             switch (ev.eventType) {
                 case vr::VREvent_MouseMove:
@@ -1741,6 +2148,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                     e.type = FT_BUTTON;
                     e.button = LinuxButton(ev.data.mouse.button);
                     e.pressed = ev.eventType == vr::VREvent_MouseButtonDown;
+                    e.controller = IsHandController(ev.trackedDeviceIndex);
                     at();
                     if (!e.pressed && s.titleCarry) e.x = s.carryX, e.y = s.carryY, s.titleCarry = false;
                     if (e.pressed) {
@@ -1778,6 +2186,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         // The controls light up under a laser.
         auto hover = [&](int k) {
             const bool on = ev.eventType == vr::VREvent_MouseMove || ev.eventType == vr::VREvent_FocusEnter;
+            if (on) s.inputMs = NowMs();
             if (!on && ev.eventType != vr::VREvent_FocusLeave) return;
             if (s.hover[k] != on) s.hover[k] = on, ApplyAlpha(s);
         };
@@ -1827,6 +2236,19 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
                 }
             }
         }
+        // The reset button: every screen back in the layout, around where you are now
+        // (`ft-layout apply`, like Meta+Shift+R; it refuses a second copy).
+        while (s.resetButton != vr::k_ulOverlayHandleInvalid &&
+               vr::VROverlay()->PollNextOverlayEvent(s.resetButton, &ev, sizeof ev)) {
+            hover(6);
+            if (ev.eventType == vr::VREvent_MouseButtonDown && ev.data.mouse.button == vr::VRMouseButton_Left) {
+                std::printf("screen %d: reset the layout\n", index + 1);
+                RunLayout("apply");
+            } else if (ev.eventType == vr::VREvent_MouseButtonUp) {
+                EndDragsBy(ev.trackedDeviceIndex);
+                ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
+            }
+        }
         // The roll button: drag around like a knob, or scroll.
         while (vr::VROverlay()->PollNextOverlayEvent(s.rollButton, &ev, sizeof ev)) {
             hover(2);
@@ -1852,6 +2274,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         if (ev.eventType == vr::VREvent_MouseButtonUp)
             ReleaseAwayBy(ev.trackedDeviceIndex, ev.data.mouse.button, handle, data);
     if (g_press.upAt >= 0 && g_tick >= g_press.upAt) ReleaseAway(BTN_LEFT, handle, data);
+    ReleaseStuck(handle, data);
     RefreshChrome();
     while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
         if (ev.eventType == vr::VREvent_Quit) {
@@ -1887,9 +2310,19 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
         handle(&e, data);
     }
     ++g_tick;
+    UpdateSpin();
+    if (g_spin.front >= 0) {
+        ft_event e{};
+        e.type = FT_FRONT;
+        e.screen = g_spin.front;
+        g_spin.front = -1;
+        handle(&e, data);
+    }
     UpdateGame();
     UpdateArrange();
     UpdateVisibility();
+    UpdateAttention();
+    UpdateAim();
     UpdateLasers();
     UpdateControls();
     UpdateGuides();
@@ -1916,7 +2349,7 @@ bool ft_vr_keyboard_show(int index) {
     const double fx = -head.m[0][2], fz = -head.m[2][2], n = std::sqrt(fx * fx + fz * fz) + 1e-9;
     const double at[3] = {head.m[0][3] + fx / n * kKeyboardAhead, head.m[1][3] - kKeyboardBelow,
                           head.m[2][3] + fz / n * kKeyboardAhead};
-    keyboard::SetLasers(g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning));
+    keyboard::SetLasers(LasersByMode());
     g_steamInFront = SteamInFront();
     if (g_steamInFront) {
         g_asidePose = FacingPose(at, head);
@@ -1924,7 +2357,9 @@ bool ft_vr_keyboard_show(int index) {
         std::printf("keyboard: waiting for Steam to close\n");
         return true;
     }
-    return keyboard::Show(FacingPose(at, head));
+    if (!keyboard::Show(FacingPose(at, head))) return false;
+    AnnounceOverlay("frametop.keyboard");
+    return true;
 }
 
 void ft_vr_keyboard_hide(void) {
@@ -1959,6 +2394,8 @@ void ft_vr_keyboard_hide(void) {
 //                             ~100 ms (it landed on something else), KWin gets it anyway
 //   state         -> "ok <mode> <manual 0|1> <wrist deg> <gesture hand> <gesture deg>
 //                     <controllers> <game running 0|1> <ingames>"
+//   spin next|prev|<degrees>  turn every panel in the room about your head (see the lazy
+//                             susan) -> "ok <degrees turned>"
 //   cutouts on|off|state      hand cutouts (see handcut.h) -> "ok <on|off> <ready|idle|unavailable>
 //                             <last composite ms> ms, predict <on|off> lead <ms> ms"
 //   cutouts predict on|off    move the hands ahead along their velocity (on by default)
@@ -1996,6 +2433,7 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         Screen *s = Find(n);
         if (!s) return (void)std::snprintf(reply, size, "error no screen %d", n);
         EndDrag(*s);
+        g_spin.base.erase(n - 1);
         SetAbsolute(*s, PanelPose(x, y, z, yaw, pitch, roll));
         std::snprintf(reply, size, "ok");
     } else if (std::sscanf(cmd, "width %d %lf", &n, &w) == 2) {
@@ -2102,6 +2540,17 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         g_manual = always ? !want : want;
         UpdateVisibility();
         std::snprintf(reply, size, "ok %s", want ? "shown" : "hidden");
+    } else if (std::sscanf(cmd, "pause %15s", word) == 1) {
+        if (!std::strcmp(word, "on") || !std::strcmp(word, "off")) {
+            const bool on = !std::strcmp(word, "on");
+            if (on != g_paused)
+                std::printf("%s\n", on ? "paused for a VR game: everything hidden, KWin slowed down" : "resumed");
+            g_paused = on;
+            UpdateVisibility();
+        } else if (std::strcmp(word, "state") != 0) {
+            return (void)std::snprintf(reply, size, "error pause on|off|state");
+        }
+        std::snprintf(reply, size, "ok %s", g_paused ? "paused" : "running");
     } else if (std::sscanf(cmd, "ingames %15s", word) == 1) {
         if (!std::strcmp(word, "hide")) g_inGames = InGames::Hide;
         else if (!std::strcmp(word, "visible")) g_inGames = InGames::Visible;
@@ -2151,6 +2600,7 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         Mat m{};
         for (int k = 0; k < 12; ++k) m.m[k / 4][k % 4] = r[k];
         EndDrag(*s);
+        g_spin.base.erase(n - 1);
         SetAbsolute(*s, m);
         std::snprintf(reply, size, "ok");
     } else if (int k0; std::sscanf(cmd, "sub %d %d %d %d %d %d", &n, &k0, &x0, &y0, &w0, &h0) == 6 ||
@@ -2178,6 +2628,8 @@ void ft_vr_command(const char *cmd, char *reply, int size) {
         if ((g_press.buttons & ButtonBit(BTN_LEFT)) && g_press.device != kNone && !IsHandController(g_press.device))
             g_press.upAt = g_tick + 9;
         std::snprintf(reply, size, "ok");
+    } else if (std::sscanf(cmd, "spin %15s", word) == 1) {
+        SpinCommand(word, reply, size);
     } else if (std::strncmp(cmd, "state", 5) == 0) {
         std::snprintf(reply, size, "ok %s %d %.0f %s %.0f %s %d %s", ModeName(), g_manual ? 1 : 0, g_wristAngle,
                       g_gestureHand.c_str(), g_gestureAngle, LasersName(), g_gameRunning ? 1 : 0,

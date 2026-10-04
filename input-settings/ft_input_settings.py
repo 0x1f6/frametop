@@ -9,11 +9,15 @@ to the input relay over its control socket (@frametop_relay):
   - Controllers: the same for the Frame controllers' buttons, minus the gaze actions (gaze
     mode is a mouse feature). They're read by the pointer helper through SteamVR input
     (@ft_pointer_helper: vrstatus, vrglobal), and a mapped button is taken from games.
-  - Keyboard: when Frametop's keyboard opens, and key combinations for any action (Meta+Shift+F
-    floats a window unless the rules have their own list).
+  - Keyboard: when Frametop's keyboard opens, and key combinations for any action, a command
+    of your own too ("command:CMD"), or a modifier tapped alone (a Meta tap opens Steam's menu
+    and Meta+Shift+F floats a window, unless the rules have their own list).
   - Pointer: speed, dot size, distance and the rest, applied live.
   - Ignored panels: SteamVR overlays the pointer passes through (POINTER_IGNORE), by app or
     one by one. The helper lists them (@ft_pointer_helper "overlays").
+  - Game optimization: pausing Frametop while a VR game runs, so it leaves the CPU and GPU to the game
+    (input/game_pause.py, in the relay: "pause on|off|?"): pause now, pause by itself during VR
+    games, the controller gesture that pauses and resumes, what happens to the desktop, a sound.
   - Gaze: the pointer's gaze mode (@ft_pointer_helper "gaze") and the gaze service
     (gaze/ft-gazed, @ft_gazed: status, forget, reload), with its eye tracker (SteamVR's or
     our own) and eye bias (GAZE_TRACKER, GAZE_EYE in frametop.conf).
@@ -60,6 +64,7 @@ DEFAULT_BUTTONS = {0x110: "left", 0x111: "right", 0x112: "middle", 0x113: "back"
 ACTION_LABELS = {
     "left": "Left click", "right": "Right click", "middle": "Middle click", "back": "Back",
     "scroll_up": "Scroll up", "scroll_down": "Scroll down", "dashboard": "Toggle SteamVR dashboard",
+    "steam_menu": "Open Steam menu / close dashboard",
     "recenter": "Recenter pointer", "pointer_toggle": "Pointer on/off",
     "follow_toggle": "Head follow on/off (experimental)", "gaze_toggle": "Gaze pointer on/off (experimental)",
     "gaze_precision": "Gaze precision: hold to steer, release to click",
@@ -71,6 +76,9 @@ ACTION_LABELS = {
     "sens_down": "Slower pointer", "layout_reset": "Reset desktop screen layout",
     "screens_toggle": "Hide/show desktop screens", "keyboard_toggle": "Open/close keyboard",
     "float_toggle": "Float window in VR / put it back", "dock_all": "Put all floating windows back",
+    "pause_toggle": "Pause/resume Frametop (for VR games)",
+    "spin_next": "Spin the panels: next one on the right to the front",
+    "spin_prev": "Spin the panels: next one on the left to the front",
     "key": "Pass through as key",
     "none": "Do nothing",
 }
@@ -93,6 +101,13 @@ CONTROLLER_BUTTONS = {
     "right/bumper": "Right bumper", "right/trigger": "Right trigger", "right/grip": "Right grip",
     "right/thumbstick": "Right stick click",
 }
+# Pausing for VR games (input/game_pause.py): the gesture a rules file without "pause_gesture" gets,
+# both thumbsticks clicked together twice, and what can happen to the desktop.
+DEFAULT_PAUSE_GESTURE = {"buttons": ["left/thumbstick", "right/thumbstick"], "presses": 2}
+PAUSE_DESKTOP_MODES = {"hide": "Hide it and slow it down (windows stay open)",
+                       "close": "Close it (windows close; it starts again when you resume)"}
+PAUSE_REASONS = {"game": "a VR game started", "gesture": "controller gesture", "command": "ft-pause",
+                 "settings": "from here"}
 # Gaze mode is a mouse and keyboard feature (docs/gaze-controllers.md; the relay's GAZE_ACTIONS).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
 CONTROLLER_ACTIONS = [a for a in ACTION_LABELS if a not in ("key", "none") + GAZE_ACTIONS]
@@ -102,6 +117,8 @@ KEYBOARD_ONLY = ("gaze_left", "gaze_right")
 # Profiles (docs/profiles.md): "profile:NAME" opens one (the relay runs ft-layout use NAME).
 LAYOUT_PATH = os.path.expanduser("~/.config/frametop-layout.json")
 PROFILE = "profile:"
+# "command:CMD": the relay runs CMD with sh -c (key combinations only, here).
+COMMAND = "command:"
 
 
 def profile_actions():
@@ -113,11 +130,17 @@ def profile_actions():
 def action_label(a):
     if a.startswith(PROFILE):
         return f"Open profile {a[len(PROFILE):]}"
+    if a.startswith(COMMAND):
+        return f"Run: {a[len(COMMAND):]}"
     return ACTION_LABELS.get(a, a)
 
 
 def is_profile(a):
     return a.startswith(PROFILE) and len(a) > len(PROFILE)
+
+
+def is_command(a):
+    return a.startswith(COMMAND) and bool(a[len(COMMAND):].strip())
 
 
 def mappable(a):
@@ -126,8 +149,8 @@ def mappable(a):
 
 
 def shortcut_mappable(a):
-    """An action a key combination can have: the gaze ones too."""
-    return a in SHORTCUT_ACTIONS or is_profile(a)
+    """An action a key combination can have: the gaze ones and commands too."""
+    return a in SHORTCUT_ACTIONS or is_profile(a) or is_command(a)
 # Gaze mode settings (pointer helper), like POINTER_SETTINGS.
 GAZE_SETTINGS = [
     ("POINTER_GAZE_RETAKE", "Look away to hand back", 5, 1, 45, 0.5, "°"),
@@ -141,9 +164,11 @@ GAZE_MOUSE = {"precision": "Gaze precision: hold to steer with the mouse, releas
 # Key combinations ("key_bindings" in the rules): modifiers, either side folded into the left code.
 MODIFIER_CODES = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
 MODIFIER_NAMES = {29: "Ctrl", 42: "Shift", 56: "Alt", 125: "Meta"}
-# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): Meta+J and
-# Meta+K click at the gaze, Meta+Shift+F floats a window.
-DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
+# What a rules file without "key_bindings" gets (the relay's DEFAULT_KEY_BINDINGS): a Meta tap
+# opens Steam's menu, Meta+J and Meta+K click at the gaze, Meta+Shift+F floats a window,
+# Meta+Alt+Tab and Meta+Alt+Shift+Tab spin the panels.
+DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
+                        "42+125+33": "float_toggle", "56+125+15": "spin_next", "42+56+125+15": "spin_prev"}
 
 
 def key_bindings(rules):
@@ -151,8 +176,12 @@ def key_bindings(rules):
     counts as its own)."""
     bound = rules.get("key_bindings")
     return dict(bound) if isinstance(bound, dict) else dict(DEFAULT_KEY_BINDINGS)
-# The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias.
+# The gaze service's settings (gaze/ft-gazed): whose eye tracking, and the eye bias. GAZE_TRACKER
+# can also be auto (the default): ours when it's installed, else SteamVR's.
 GAZE_TRACKERS = {"steam": "SteamVR's eye tracker", "own": "our own eye tracker"}
+# Our tracker's frame grabber (gaze/tracker/install.sh), on the host: this runs in the dev
+# container, which has the host's /etc under /run/host.
+EYEGRAB = ("/etc/frametop/ft-eyegrab", "/run/host/etc/frametop/ft-eyegrab")
 GAZE_EYES = {"auto": "auto", "left": "left eye", "right": "right eye"}
 # Pointer settings: key, label, default, min, max, step, unit.
 POINTER_SETTINGS = [
@@ -278,6 +307,7 @@ class Backend(QObject):
     gazeChanged = Signal()
     driverChanged = Signal()
     panelsChanged = Signal()
+    pauseChanged = Signal()
     activity = Signal(str)  # device id
     captured = Signal(int, str)  # code, name
     capturedController = Signal(str, str)  # button, label
@@ -295,6 +325,7 @@ class Backend(QObject):
         self._capture_vr = False
         self._capture_combo = ""  # the action a key combination is being captured for
         self._combo_mods = set()
+        self._combo_tap = None  # a modifier pressed alone, nothing since: released, it's a tap
         self._vr = {}  # the helper's vrstatus, {} when it doesn't answer
         self._vr_at = 0.0
         self._gaze = {}  # ft-gazed's status, {} when it isn't running
@@ -304,6 +335,8 @@ class Backend(QObject):
         self._check_asked = 0.0  # when quickcal or calibrate went to the gaze service (its errors)
         self._driver_block = ""  # set by _check_driver
         self._panels = None  # SteamVR's overlays, from the helper; None until it answers
+        self._pause = {}  # the relay's pause state ("pause ?"), {} when it doesn't answer
+        self._pause_at = 0.0
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.sock.bind("")  # autobind an abstract address the relay can reply to
         self.sock.setblocking(False)
@@ -336,6 +369,7 @@ class Backend(QObject):
 
     def _refresh(self):
         self._send("devices")
+        self._send("pause ?")
         self._send("vrstatus", HELPER)
         self._send("gaze ?", HELPER)
         if not self._send("status", GAZED) and self._gaze:
@@ -349,6 +383,9 @@ class Backend(QObject):
         if self._gaze_mode is not None and now - self._gaze_at > 5:
             self._gaze_mode = None
             self.gazeChanged.emit()
+        if self._pause and now - self._pause_at > 5:
+            self._pause = {}
+            self.pauseChanged.emit()
 
     def _check_driver(self):
         block = driver_block()
@@ -387,13 +424,20 @@ class Backend(QObject):
             if t == "devices":
                 self._nodes = msg.get("nodes", [])
                 self._pointer_mode = bool(msg.get("pointer_mode"))
-                self._relay_ok = True
+                was_ok, self._relay_ok = self._relay_ok, True
+                if not was_ok:
+                    self.pauseChanged.emit()  # (pauseStatus' "old")
                 self.devicesChanged.emit()
             elif t == "overlays":
                 panels = [o for o in msg.get("list", []) if isinstance(o, dict) and isinstance(o.get("key"), str)]
                 if panels != self._panels:
                     self._panels = panels
                     self.panelsChanged.emit()
+            elif t == "pause":
+                self._pause_at = time.monotonic()
+                if msg != self._pause:
+                    self._pause = msg
+                    self.pauseChanged.emit()
             elif t == "vrstatus":
                 self._vr = msg
                 self._vr_at = time.monotonic()
@@ -408,13 +452,16 @@ class Backend(QObject):
                 self.activity.emit(msg["id"])
                 code, value = int(msg["code"]), msg["value"]
                 if code in MODIFIER_CODES:
-                    (self._combo_mods.add if value else self._combo_mods.discard)(MODIFIER_CODES[code])
+                    mod = MODIFIER_CODES[code]
+                    if value == 1:
+                        self._combo_tap = None if self._combo_mods else mod
+                    (self._combo_mods.add if value else self._combo_mods.discard)(mod)
+                    if value == 0 and self._combo_tap == mod:
+                        self._end_shortcut_capture(str(mod))  # the relay's modifier tap
                 elif value == 1 and code < BTN_MISC:
-                    self._save_shortcut("+".join(str(c) for c in sorted(self._combo_mods) + [code]),
-                                        self._capture_combo)
-                    self._capture_combo = ""
-                    self._combo_mods = set()
-                    self.shortcutCaptureChanged.emit()
+                    self._end_shortcut_capture("+".join(str(c) for c in sorted(self._combo_mods) + [code]))
+                elif value == 1:
+                    self._combo_tap = None  # a mouse button: no tap
             elif t == "event":
                 self.activity.emit(msg["id"])
                 if (self._capture_id and msg["id"] == self._capture_id and msg["type"] == "key"
@@ -798,6 +845,108 @@ class Backend(QObject):
         else:
             self.message.emit("The pointer helper isn't running (frametop-pointer.service)", True)
 
+    # --- pausing for VR games ---
+    @Property("QVariantMap", notify=pauseChanged)
+    def pauseStatus(self):
+        """The relay's pause state, and a line saying it ("relay": False when it doesn't answer)."""
+        st = self._pause
+        if not st:
+            # "old": the relay answers, but not about pausing (it predates it).
+            return {"relay": False, "old": self._relay_ok, "paused": False,
+                    "summary": "Unknown: the input relay " + ("can't pause" if self._relay_ok else "isn't answering")}
+        if st.get("paused"):
+            reason = PAUSE_REASONS.get(st.get("reason"), st.get("reason") or "")
+            summary = f"Paused since {time.strftime('%H:%M', time.localtime(st.get('since') or time.time()))}"
+            summary += f" ({reason})" if reason else ""
+            if st.get("ends_with_game"):
+                summary += ", until the game ends"
+        else:
+            summary = "Running" + (", with a VR game" if st.get("game") else "")
+        if st.get("busy"):
+            summary += "; working on it…"
+        return {"relay": True, "paused": bool(st.get("paused")), "summary": summary,
+                "gestureReader": bool(st.get("gesture_reader"))}
+
+    @Slot(bool)
+    def setPaused(self, on):
+        if self._send(f"pause {'on' if on else 'off'} settings"):
+            QTimer.singleShot(300, self._refresh)
+        else:
+            self.message.emit("The input relay isn't running (frametop-input-relay.service)", True)
+
+    def _set_rule(self, key, value, text):
+        rules = read_json(RULES_PATH)
+        rules[key] = value
+        self._save_rules(rules)
+        self.message.emit(text, False)
+
+    @Property(bool, notify=mappingsChanged)
+    def pauseAuto(self):
+        return read_json(RULES_PATH).get("pause_auto", True) is not False
+
+    @Slot(bool)
+    def setPauseAuto(self, on):
+        self._set_rule("pause_auto", bool(on), "VR games pause Frametop" if on else "VR games no longer pause Frametop")
+
+    @Property("QVariantList", constant=True)
+    def pauseDesktopModes(self):
+        return [{"value": k, "text": v} for k, v in PAUSE_DESKTOP_MODES.items()]
+
+    @Property(str, notify=mappingsChanged)
+    def pauseDesktop(self):
+        mode = read_json(RULES_PATH).get("pause_desktop")
+        return mode if mode in PAUSE_DESKTOP_MODES else "hide"
+
+    @Slot(str)
+    def setPauseDesktop(self, mode):
+        if mode in PAUSE_DESKTOP_MODES:
+            self._set_rule("pause_desktop", mode, "Paused, the desktop: " + PAUSE_DESKTOP_MODES[mode].split(" (")[0].lower())
+
+    @Property(bool, notify=mappingsChanged)
+    def pauseSound(self):
+        return read_json(RULES_PATH).get("pause_sound", True) is not False
+
+    @Slot(bool)
+    def setPauseSound(self, on):
+        self._set_rule("pause_sound", bool(on), "A sound on pause and resume" if on else "No sound on pause and resume")
+
+    @Property("QVariantList", constant=True)
+    def gestureButtons(self):
+        return [{"value": "", "text": "None"}] + [{"value": b, "text": label} for b, label in CONTROLLER_BUTTONS.items()]
+
+    @Property("QVariantMap", notify=mappingsChanged)
+    def pauseGesture(self):
+        """{"first", "second" ("" for none), "presses"} (the relay's game_pause.gesture_of)."""
+        spec = read_json(RULES_PATH).get("pause_gesture", DEFAULT_PAUSE_GESTURE)
+        buttons = [b for b in (spec or {}).get("buttons", []) if b in CONTROLLER_BUTTONS][:2] \
+            if isinstance(spec, dict) and isinstance(spec.get("buttons"), list) else []
+        presses = 1 if len(buttons) == 2 and spec.get("presses") == 1 else 2
+        return {"first": buttons[0] if buttons else "", "second": buttons[1] if len(buttons) > 1 else "",
+                "presses": presses}
+
+    @Slot(str, str, int)
+    def setPauseGesture(self, first, second, presses):
+        """No first button: no gesture. One button always takes two presses."""
+        buttons = list(dict.fromkeys(b for b in (first, second) if b in CONTROLLER_BUTTONS))
+        if not buttons:
+            self._set_rule("pause_gesture", None, "No controller gesture pauses Frametop")
+            return
+        presses = 1 if len(buttons) == 2 and presses == 1 else 2
+        self._set_rule("pause_gesture", {"buttons": buttons, "presses": presses},
+                       "Pause gesture: " + self.gestureText(buttons, presses))
+
+    @staticmethod
+    def gestureText(buttons, presses):
+        names = " and ".join(CONTROLLER_BUTTONS[b] for b in buttons)
+        together = " together" if len(buttons) == 2 else ""
+        return f"{names}{together}, {'twice' if presses == 2 else 'once'}"
+
+    @Property(str, notify=mappingsChanged)
+    def pauseGestureText(self):
+        g = self.pauseGesture
+        buttons = [b for b in (g["first"], g["second"]) if b]
+        return self.gestureText(buttons, g["presses"]) if buttons else "None"
+
     # --- gaze ---
     def _gaze_status(self, status):
         now = time.monotonic()
@@ -890,6 +1039,8 @@ class Backend(QObject):
     # --- key combinations ("key_bindings") ---
     def comboName(self, combo):
         parts = [int(c) for c in combo.split("+") if c.isdigit()]
+        if len(parts) == 1 and parts[0] in MODIFIER_NAMES:
+            return MODIFIER_NAMES[parts[0]] + " tap"
         return "+".join(MODIFIER_NAMES.get(c) or self.codeName(c).removeprefix("KEY_").title() for c in parts)
 
     @Property("QVariantList", notify=mappingsChanged)
@@ -900,7 +1051,8 @@ class Backend(QObject):
 
     @Property("QVariantList", constant=True)
     def shortcutActions(self):
-        return [{"value": a, "text": action_label(a)} for a in SHORTCUT_ACTIONS + profile_actions()]
+        return [{"value": a, "text": action_label(a)} for a in SHORTCUT_ACTIONS + profile_actions()] + \
+            [{"value": COMMAND, "text": "Run a command…"}]
 
     @Property(bool, notify=shortcutCaptureChanged)
     def capturingShortcut(self):
@@ -911,12 +1063,20 @@ class Backend(QObject):
         if shortcut_mappable(action):
             self._capture_combo = action
             self._combo_mods = set()
+            self._combo_tap = None
             self._send("watch 60")
             self.shortcutCaptureChanged.emit()
 
     @Slot()
     def cancelShortcutCapture(self):
         self._capture_combo = ""
+        self.shortcutCaptureChanged.emit()
+
+    def _end_shortcut_capture(self, combo):
+        self._save_shortcut(combo, self._capture_combo)
+        self._capture_combo = ""
+        self._combo_mods = set()
+        self._combo_tap = None
         self.shortcutCaptureChanged.emit()
 
     def _save_shortcut(self, combo, action):
@@ -935,9 +1095,25 @@ class Backend(QObject):
 
     @Property(str, notify=gazeChanged)
     def gazeTracker(self):
-        """Whose eye tracking the gaze service uses: "steam" or "own" (GAZE_TRACKER)."""
-        v = read_conf().get("GAZE_TRACKER", "steam")
-        return v if v in GAZE_TRACKERS else "steam"
+        """Whose eye tracking the gaze service uses: "steam" or "own" (GAZE_TRACKER; auto is
+        ours when it's installed)."""
+        v = read_conf().get("GAZE_TRACKER", "auto")
+        if v in GAZE_TRACKERS:
+            return v
+        return "own" if self.gazeOwnInstalled else "steam"
+
+    @Property(bool, notify=gazeChanged)
+    def gazeTrackerAuto(self):
+        """GAZE_TRACKER is auto (or missing): ours once it's installed, without a choice here."""
+        return read_conf().get("GAZE_TRACKER", "auto") not in GAZE_TRACKERS
+
+    @Property(bool, notify=gazeChanged)
+    def gazeOwnInstalled(self):
+        """Is our own tracker installed? The gaze service says (it also checks ft-eyes' Python in
+        its checkout); without it, whether the frame grabber is."""
+        if "own_installed" in self._gaze:
+            return bool(self._gaze["own_installed"])
+        return any(os.path.exists(p) for p in EYEGRAB)
 
     @Property(str, notify=gazeChanged)
     def gazeEye(self):
@@ -989,6 +1165,12 @@ class Backend(QObject):
             self.message.emit("The gaze service read the calibration again", False)
         else:
             self.message.emit("The gaze service isn't running (frametop-gaze.service)", True)
+
+    @Slot()
+    def keepGazeAwake(self):
+        """The Gaze page is open: the gaze service doesn't idle meanwhile (its status stays live,
+        and a check opens without waiting for the tracker). The page renews this every 10 s."""
+        self._send("wake 30", GAZED)
 
     @Slot()
     def gazeQuickCheck(self):
