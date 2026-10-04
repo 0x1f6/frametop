@@ -12,9 +12,7 @@
 //   - a resize tab on the bottom right corner: drag it to set the width (the height
 //     follows the screen's resolution).
 //   - a reset button left of the bar: every screen back in its layout, around where you
-//     are now (`ft-layout apply`, like Meta+Shift+R). Where the screens leave the
-//     controllers to a VR game, aiming a controller at it turns SteamVR's laser mouse on for
-//     that button alone (UpdateResetLaser), so it can be clicked in a game.
+//     are now (`ft-layout apply`, like Meta+Shift+R).
 //   The controls are translucent, like SteamVR's own, and brighten under a laser. They
 //   are invisible until a laser (a controller's, or the 3D mouse's) lands on or passes very close to
 //   one of them (UpdateControls).
@@ -44,7 +42,10 @@
 //     default it's off while a game (a scene app) runs: the screens stay up over the game,
 //     the controllers stay in it, and the 3D mouse (its own laser mode) or the dashboard
 //     works the screens. Modes: always, outside_games (default), dashboard (never on its
-//     own; also for flatscreen games, which aren't scene apps).
+//     own; also for flatscreen games, which aren't scene apps). Where the mode leaves the
+//     controllers to the game, pointing a controller at a panel (a screen, a floating window
+//     and its popups, their controls, the keyboard) turns the laser on for it until you
+//     point away, like SteamVR's own floating windows (UpdateAim).
 //   - during a VR game the screens hide unless the dashboard is open (g_inGames, default),
 //     or stay visible over it; the hotkey still shows them.
 //   - paused ("pause on", from the input relay when Frametop pauses for a VR game,
@@ -237,7 +238,7 @@ constexpr double kRollSnap = 2.5;    // degrees from level where rolling snaps l
 constexpr double kRollStep = 5;      // degrees per scroll notch on the roll button
 constexpr float kChromeIdle = 0.55f; // the controls' opacity without a laser on them
 constexpr long kControlsLinger = 35; // ticks (~0.4 s) the controls stay after a laser leaves
-constexpr long kResetLinger = 45;    // ticks (~0.5 s) the reset button keeps the laser mouse on
+constexpr long kAimLinger = 25;      // ticks (~0.3 s) a panel keeps the laser on after the aim leaves it
 long g_tick = 0;                     // ft_vr_poll calls
 bool g_vr = false;                   // connected to SteamVR (ft-screens --no-vr runs without it)
 constexpr vr::TrackedDeviceIndex_t kNone = vr::k_unTrackedDeviceIndexInvalid;
@@ -275,8 +276,7 @@ struct Screen {
     float controls = 0;                       // the controls' fade, 0 (hidden) .. 1
     bool controlsUp = false;                  // the controls' overlays are shown
     long nearUntil = 0;                       // a laser was near the controls until this tick
-    long resetNearUntil = 0;                  // a hand controller aimed at the reset button until this tick
-    bool resetLaser = false;                  // the reset button has MakeOverlaysInteractiveIfVisible
+    long aimUntil = 0;                        // a hand controller pointed at it until this tick (UpdateAim)
     vr::TrackedDeviceIndex_t pinTarget = kNone;  // moving: rides on this controller when let go
     vr::TrackedDeviceIndex_t onWrist = kNone;    // moving: the laser is in this controller's ring
     bool barLit = false;
@@ -910,26 +910,20 @@ void UpdateAttention() {
 
 
 // Controllers' lasers on the screens (see the top): the flag follows the mode and whether a
-// VR game runs.
+// VR game runs, and where the mode leaves the controllers to the game, whether one points at
+// the panel (UpdateAim).
+bool LasersByMode() { return g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning); }
+long g_keyboardAimUntil = 0;
+
 void UpdateLasers() {
-    const bool want = g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning);
+    const bool byMode = LasersByMode();
     for (auto &[i, s] : g_screens) {
+        const bool want = byMode || (s.visible && g_tick < s.aimUntil);
         if (s.lasers == want) continue;
         s.lasers = want;
         vr::VROverlay()->SetOverlayFlag(s.overlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, want);
     }
-}
-
-// The reset button in a VR game (or the dashboard mode), where the screens don't keep
-// SteamVR's laser mouse on: aiming a hand controller at it turns the laser mouse on for that
-// button alone, so the trigger clicks it, and the game gets the controllers back
-// kResetLinger ticks after the aim leaves it (a wider zone than the one that turns it on).
-void UpdateResetLaser(Screen &s) {
-    const bool want = s.resetButton != vr::k_ulOverlayHandleInvalid && s.visible && !s.lasers &&
-                      g_tick < s.resetNearUntil;
-    if (want == s.resetLaser) return;
-    s.resetLaser = want;
-    vr::VROverlay()->SetOverlayFlag(s.resetButton, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, want);
+    if (keyboard::Shown()) keyboard::SetLasers(byMode || g_tick < g_keyboardAimUntil);
 }
 
 // The distance from a laser's line to a point ahead of it, or -1 when it's behind.
@@ -947,11 +941,10 @@ double RayDistance(const Mat &d, const Mat &c) {
 // kControlsLinger ticks after it leaves, and while in use.
 void UpdateControls() {
     std::vector<Mat> lasers;
-    std::vector<bool> hands;  // the laser is a hand controller's (not the 3D mouse's)
     for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
         Mat d;
         if (vr::VRSystem()->GetTrackedDeviceClass(i) == vr::TrackedDeviceClass_Controller && LaserPose(i, &d))
-            lasers.push_back(d), hands.push_back(IsHandController(i));
+            lasers.push_back(d);
     }
     for (auto &[i, s] : g_screens) {
         Mat p;
@@ -977,16 +970,7 @@ void UpdateControls() {
                     break;
                 }
             }
-            if (s.resetButton != vr::k_ulOverlayHandleInvalid && !s.lasers) {
-                const Mat c = Mul(p, offsets[6]);
-                const double aim = s.grip * (s.resetLaser ? 2.0 : 0.9);
-                for (size_t k = 0; k < lasers.size(); ++k) {
-                    const double r = RayDistance(lasers[k], c);
-                    if (hands[k] && r >= 0 && r <= aim) s.resetNearUntil = g_tick + kResetLinger;
-                }
-            }
         }
-        UpdateResetLaser(s);
         const bool inUse = s.drag != Drag::None || std::any_of(std::begin(s.hover), std::end(s.hover), [](bool h) { return h; });
         const bool want = s.visible && (inUse || g_tick < s.nearUntil);
         // The controls stay shown while their screen is, just fully transparent when not
@@ -1512,6 +1496,81 @@ uint32_t LinuxButton(uint32_t vrButton) {
 void ReleaseAwayBy(vr::TrackedDeviceIndex_t dev, uint32_t vrButton, void (*handle)(const struct ft_event *, void *),
                    void *data) {
     if (g_press.buttons && dev == g_press.device) ReleaseAway(LinuxButton(vrButton), handle, data);
+}
+
+// Where a laser meets a panel's surface, in the panel's u (metres along it from the centre,
+// along the arc when curved) and v (up). OpenVR curves a screen into a cylinder toward its
+// front, centred `curve` metres in front of it (see OnSurface).
+bool RayOnSurface(const Screen &s, const Mat &p, const Mat &laser, double *u, double *v) {
+    const Mat inv = Inverse(p);
+    const double o[3] = {inv.m[0][0] * laser.m[0][3] + inv.m[0][1] * laser.m[1][3] + inv.m[0][2] * laser.m[2][3] + inv.m[0][3],
+                         inv.m[1][0] * laser.m[0][3] + inv.m[1][1] * laser.m[1][3] + inv.m[1][2] * laser.m[2][3] + inv.m[1][3],
+                         inv.m[2][0] * laser.m[0][3] + inv.m[2][1] * laser.m[1][3] + inv.m[2][2] * laser.m[2][3] + inv.m[2][3]};
+    double d[3];
+    for (int i = 0; i < 3; ++i) d[i] = -(inv.m[i][0] * laser.m[0][2] + inv.m[i][1] * laser.m[1][2] + inv.m[i][2] * laser.m[2][2]);
+    if (s.curve <= 0) {
+        if (std::fabs(d[2]) < 1e-6) return false;
+        const double t = -o[2] / d[2];
+        if (t <= 0) return false;
+        *u = o[0] + d[0] * t, *v = o[1] + d[1] * t;
+        return true;
+    }
+    // x^2 + (z - r)^2 = r^2, on the screen's side of the axis (z < r).
+    const double r = s.curve, oz = o[2] - r;
+    const double a = d[0] * d[0] + d[2] * d[2], b = 2 * (o[0] * d[0] + oz * d[2]), c = o[0] * o[0] + oz * oz - r * r;
+    const double disc = b * b - 4 * a * c;
+    if (a < 1e-9 || disc < 0) return false;
+    for (double t : {(-b - std::sqrt(disc)) / (2 * a), (-b + std::sqrt(disc)) / (2 * a)}) {
+        const double x = o[0] + d[0] * t, z = oz + d[2] * t;
+        if (t <= 0 || z >= 0) continue;
+        *u = r * std::atan2(x, -z), *v = o[1] + d[1] * t;
+        return true;
+    }
+    return false;
+}
+
+// Where the mode leaves the controllers to a VR game (see the top): a hand controller
+// pointing at a panel, its controls, or a floating window's popups keeps that panel's laser
+// on (UpdateLasers) until kAimLinger ticks after it points away, like SteamVR's own floating
+// windows. Leaving takes a wider margin than arriving, and a drag or a held button keeps it
+// on. The keyboard is one overlay, so SteamVR's own intersection test does there.
+void UpdateAim() {
+    if (LasersByMode()) return;
+    std::vector<Mat> lasers;
+    for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+        Mat d;
+        if (IsHandController(i) && LaserPose(i, &d)) lasers.push_back(d);
+    }
+    for (auto &[index, s] : g_screens) {
+        Mat p;
+        if (!s.visible || !ScreenPose(s, &p)) continue;
+        if (s.drag != Drag::None || (g_press.buttons && g_press.screen == index)) {
+            s.aimUntil = g_tick + kAimLinger;
+            continue;
+        }
+        const double m = s.grip * (g_tick < s.aimUntil ? 2.0 : 0.25), h = s.heightMetres();
+        // The panel and its controls: the bar row under it, the resize tab off its corner.
+        const double halfW = std::max(s.metres / 2 + s.grip, s.chrome / 2 + s.chrome * 0.12 + s.grip * 2) + m;
+        const double top = h / 2 + m, bottom = std::min(BarY(s) - s.grip, -(h / 2 + s.grip)) - m;
+        for (const Mat &l : lasers) {
+            double u, v;
+            if (!RayOnSurface(s, p, l, &u, &v)) continue;
+            bool on = std::fabs(u) <= halfW && v <= top && v >= bottom;
+            for (const auto &[k, sub] : s.subs) {
+                if (on || s.cropW <= 0) break;
+                const double su = (sub.x + sub.w / 2.0 - (s.cropX + s.cropW / 2.0)) * s.mpp;
+                const double sv = -(sub.y + sub.h / 2.0 - (s.cropY + s.cropH / 2.0)) * s.mpp;
+                on = std::fabs(u - su) <= sub.w * s.mpp / 2 + m && std::fabs(v - sv) <= sub.h * s.mpp / 2 + m;
+            }
+            if (on) {
+                s.aimUntil = g_tick + kAimLinger;
+                break;
+            }
+        }
+    }
+    if (keyboard::Shown())
+        for (const Mat &l : lasers)
+            if (keyboard::Aimed(l)) g_keyboardAimUntil = g_tick + kAimLinger;
 }
 
 const char *LasersName() {
@@ -2075,6 +2134,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     UpdateArrange();
     UpdateVisibility();
     UpdateAttention();
+    UpdateAim();
     UpdateLasers();
     UpdateControls();
     UpdateGuides();
@@ -2101,7 +2161,7 @@ bool ft_vr_keyboard_show(int index) {
     const double fx = -head.m[0][2], fz = -head.m[2][2], n = std::sqrt(fx * fx + fz * fz) + 1e-9;
     const double at[3] = {head.m[0][3] + fx / n * kKeyboardAhead, head.m[1][3] - kKeyboardBelow,
                           head.m[2][3] + fz / n * kKeyboardAhead};
-    keyboard::SetLasers(g_lasers == Lasers::Always || (g_lasers == Lasers::OutsideGames && !g_gameRunning));
+    keyboard::SetLasers(LasersByMode());
     g_steamInFront = SteamInFront();
     if (g_steamInFront) {
         g_asidePose = FacingPose(at, head);
