@@ -206,7 +206,7 @@ def check(label, got, want):
         failures.append(label)
 
 
-META, RMETA, SHIFT, CTRL, RCTRL, A, F, J, P = 125, 126, 42, 29, 97, 30, 33, 36, 25
+META, RMETA, SHIFT, CTRL, RCTRL, ALT, A, F, J, P, TAB = 125, 126, 42, 29, 97, 56, 30, 33, 36, 25, 15
 F24 = ["key 194 1", "key 194 0"]
 
 
@@ -264,6 +264,20 @@ def tests():
     check("Meta+Shift+P isn't typed", [k for k in typed() if k.startswith("key 25 ")], [])
     key(META, 1); key(J, 1); key(J, 0); key(META, 0)
     check("resumed: Meta+J is a combination again", typed(), ["key 125 1"] + F24 + ["key 125 0"])
+
+    use(None)  # the defaults: Meta+Alt+Tab and Meta+Alt+Shift+Tab spin the panels (ft-screens)
+    key(META, 1); key(ALT, 1); key(TAB, 1); key(TAB, 0); key(ALT, 0); key(META, 0)
+    got = typed()
+    check("Meta+Alt+Tab (default): spin next", [m for m in got if m.startswith("spin")], ["spin next"])
+    check("Meta+Alt+Tab: Tab isn't typed", [m for m in got if m.startswith("key 15 ")], [])
+    key(META, 1); key(ALT, 1); key(SHIFT, 1); key(TAB, 1); key(TAB, 0); key(SHIFT, 0); key(ALT, 0); key(META, 0)
+    check("Meta+Alt+Shift+Tab (default): spin prev", [m for m in typed() if m.startswith("spin")], ["spin prev"])
+    pause("on")
+    key(META, 1); key(ALT, 1); key(TAB, 1); key(TAB, 0); key(ALT, 0); key(META, 0)
+    check("paused: Meta+Alt+Tab doesn't spin", [m for m in typed() if m.startswith("spin")], [])
+    pause("off")
+    check("spinning works without pointer mode", (relay.needs_pointer("spin_next"), relay.needs_pointer("spin_prev")),
+          (False, False))
 
     check("an empty command isn't an action", relay.known_action("command:  "), False)
     check("steam_menu, pause_toggle and commands work without pointer mode",
