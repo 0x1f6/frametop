@@ -43,6 +43,8 @@ PACKAGES = {
     "kwin": "clicks near the far edge of a screen whose scale isn't 1; every screen comes back "
             "after a desktop restart; floating a window",
     "plasma-workspace": "the taskbar and panels after a desktop restart",
+    "at-spi2-core": "an AT-SPI-aware app appears on the nested desktop's accessibility bus; "
+                    "the registry stops and comes back after a desktop restart",
     "gamescope": "the headset's volume buttons with nothing focused; typing goes where you last clicked",
     "bluez": "a Bluetooth mouse reconnecting after it sleeps",
 }
@@ -156,6 +158,14 @@ def check_host():
         ("/usr/bin/kwin_wayland_wrapper", "FAIL", "the desktop can't start KWin"),
         ("/usr/bin/startplasma-wayland", "FAIL", "the desktop can't start Plasma"),
         ("/usr/bin/dbus-run-session", "FAIL", "the desktop can't start its session bus"),
+        ("/usr/bin/python3", "warn", "nested accessibility can't run its startup helper"),
+        ("/usr/bin/gdbus", "warn", "nested accessibility can't discover or check its bus"),
+        ("/usr/lib/at-spi-bus-launcher", "warn", "nested accessibility can't start its bus"),
+        ("/usr/lib/at-spi2-registryd", "warn", "nested accessibility has no fallback registry"),
+        ("/usr/share/dbus-1/services/org.a11y.Bus.service", "warn",
+         "nested accessibility can't activate its bus"),
+        ("/usr/share/dbus-1/accessibility-services/org.a11y.atspi.Registry.service", "warn",
+         "nested accessibility can't activate its registry natively"),
         (f"{STEAMVR_BIN}/vrcmd", "FAIL", "the 3D mouse can't find panels"),
         (f"{STEAMVR_BIN}/vrpathreg", "warn", "the pointer driver can't be installed or removed"),
         ("/usr/share/deckard/mesavars.sh", "warn", "the desktop starts without SteamOS's Mesa settings"),

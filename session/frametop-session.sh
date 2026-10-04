@@ -29,7 +29,7 @@ for var in $(compgen -e); do
   case $var in
     LD_LIBRARY_PATH | LD_PRELOAD | STEAM_* | Steam* | SRT_* | PRESSURE_VESSEL_* | MANGOHUD_* | \
       ENABLE_VK_LAYER_VALVE_steam_overlay_* | STEAMVIDEOTOKEN | QT_IM_MODULE | GTK_IM_MODULE | \
-      XMODIFIERS) unset "$var" ;;
+      XMODIFIERS | AT_SPI_BUS_ADDRESS) unset "$var" ;;
   esac
 done
 
@@ -189,6 +189,21 @@ if [ "$remote" = 1 ]; then
   touch "$runtime/remote-capable"
   "$here/remote-ctl.sh" start
 fi
+
+# AT-SPI: start the registry inside Plasma's autostart, after KWin has published the
+# nested displays. Starting it before startplasma could bind to the host's X display.
+# This config belongs only to Frametop; the host desktop's autostart is unchanged.
+autostart=$XDG_CONFIG_HOME/autostart/frametop-atspi.desktop
+mkdir -p "$(dirname "$autostart")"
+cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop accessibility
+Exec="$here/ft-atspi"
+X-KDE-autostart-phase=2
+OnlyShowIn=KDE;
+NoDisplay=true
+EOF
 
 # ft-floatd (floating windows) runs inside the Plasma session, on its D-Bus: started from
 # the session's autostart, which only this desktop reads (XDG_CONFIG_HOME above).
