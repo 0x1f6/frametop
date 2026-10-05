@@ -9,6 +9,7 @@
 # Options (piped, they go after "bash -s --"):
 #   --stable        the main branch: tested releases (the default for a new install)
 #   --experimental  the experimental branch: the newest features, less tested
+#   --branch NAME   another branch, such as a fix to test before it's released
 #   --dir DIR       where the repo goes (default ~/frametop)
 #   --clone-only    get or update the repo, but don't run install.sh
 #   --yes, --no-bluetooth   passed to install.sh (--yes also answers this script's question:
@@ -17,7 +18,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: get.sh [--stable | --experimental] [--dir DIR] [--clone-only] [--yes] [--no-bluetooth]
+usage: get.sh [--stable | --experimental | --branch NAME] [--dir DIR] [--clone-only] [--yes] [--no-bluetooth]
 piped: curl -fsSL https://deejanuz.github.io/frametop/get.sh | bash -s -- [options]
 EOF
 }
@@ -31,6 +32,7 @@ main() {
     case $1 in
       --stable) branch=main ;;
       --experimental) branch=experimental ;;
+      --branch) branch=${2:?--branch needs a branch name}; shift ;;
       --dir) dir=${2:?--dir needs a folder}; shift ;;
       --clone-only) clone_only=1 ;;
       --yes) yes=1; pass+=("$1") ;;
@@ -78,6 +80,11 @@ main() {
         *) echo "not 1 or 2: $answer" >&2; return 2 ;;
       esac
     fi
+  fi
+
+  if ! git ls-remote --exit-code --heads "$repo" "$branch" >/dev/null; then
+    echo "Frametop has no branch called $branch (or GitHub can't be reached)." >&2
+    return 1
   fi
 
   if [ ! -e "$dir" ]; then
