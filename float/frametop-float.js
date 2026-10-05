@@ -411,27 +411,36 @@ function run(c) {
     }
 }
 
-// The long poll has one failure mode: a reply that never comes (ft-floatd dying mid-call,
-// a D-Bus hiccup) leaves polling true forever and the script stops hearing commands until
-// KWin reloads it. A watchdog re-arms the poll if the reply is late by more than
-// ft-floatd's own timeout (POLL_SECONDS in ft_floatd.py) plus slack.
-const POLL_SECONDS = 20;
+// The long poll has one failure mode: a reply that never comes. KWin's callDBus never calls
+// back when a call fails (an error reply, ft-floatd gone, or its 25 s D-Bus timeout, which
+// ft-floatd blocked that long hits); it only logs "Received D-Bus message is error". Then
+// polling stays true and the script stops hearing commands until KWin reloads it. A watchdog
+// re-arms the poll. Its period must stay above that 25 s timeout, whatever ft-floatd's
+// POLL_SECONDS is: by then the call it gives up on has ended. The serial is for a reply that
+// still comes later (KWin stalled with the reply queued): it runs its commands (ft-floatd
+// sends each one once) but doesn't poll again. Two polls would answer each other for good,
+// since ft-floatd answers a waiting poll empty when the next one comes.
 const pollWatchdog = new QTimer();
 pollWatchdog.singleShot = true;
-pollWatchdog.interval = (POLL_SECONDS + 10) * 1000;
+pollWatchdog.interval = 30000;
 pollWatchdog.timeout.connect(() => {
     print("frametop-float: NextCommand didn't answer, polling again");
     polling = false;
     poll();
 });
+let pollSerial = 0;
 
 function poll() {
     if (polling) return;
     polling = true;
+    const serial = ++pollSerial;
     pollWatchdog.start();
     callDBus(SERVICE, PATH, IFACE, "NextCommand", reply => {
-        pollWatchdog.stop();
-        polling = false;
+        const current = serial === pollSerial;  // not a call the watchdog gave up on
+        if (current) {
+            pollWatchdog.stop();
+            polling = false;
+        }
         if (reply) {
             try {
                 JSON.parse(reply).forEach(run);
@@ -439,7 +448,7 @@ function poll() {
                 print("frametop-float: bad command " + reply + ": " + e);
             }
         }
-        poll();
+        if (current) poll();
     });
 }
 
