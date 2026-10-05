@@ -534,7 +534,8 @@ def capture_screens():
 # ---------------------------------------------------------------- gamescope (dashboard panels)
 
 def vrcmd(*args, timeout=10):
-    env = dict(os.environ, LD_LIBRARY_PATH=os.path.dirname(VRCMD))
+    # SteamVR's config folder: in the desktop, XDG_CONFIG_HOME is its own (docs/design.md).
+    env = dict(os.environ, LD_LIBRARY_PATH=os.path.dirname(VRCMD), XDG_CONFIG_HOME=os.path.expanduser("~/.config"))
     try:
         return subprocess.run([VRCMD, *args], capture_output=True, text=True, timeout=timeout, env=env).stdout
     except (OSError, subprocess.TimeoutExpired):

@@ -48,6 +48,13 @@ click with nothing taken after ACCEPT_WAIT, and a failed calibration names its m
 reason there and in the status. A right click or Meta+K ("calquit") closes the panel. The pointer hides meanwhile ("calpanel 1",
 renewed every second; the helper shows it again by itself when that stops).
 
+Our tracker's first calibration: before it has one, ft-eyes publishes no gaze (it maps pupils
+to a gaze only with a calibration), so there's no gaze to hold still. Its calibration runs
+anyway ("blind"): someone in the headset (SteamVR's tracker sees an eye) and ft-eyes answering
+are enough to start it, each dot stands in for the gaze, and a click takes the CHECK_WINDOW up
+to it. ft-eyes then checks that each pupil was seen and held still in that window (calib-point)
+and says why not. Without this, a fresh install could never calibrate our tracker.
+
 What a capture teaches:
   our tracker   quick and five: a click ("click T YAW PITCH", like a pointer lesson); full:
                 calib-start, a calib-point for each dot, calib-fit (its calibration)
@@ -336,8 +343,16 @@ class Checks:
         return time.monotonic() - self.seen_at < within
 
     def can_run(self):
-        """Someone's in the headset and the tracker is sending."""
+        """Someone's in the headset and the tracker is sending. Our tracker sends no gaze before
+        its first calibration: then ft-eyes answering (calibrated() is False only once it has)
+        is enough, since the calibration is what it needs (see "first calibration" at the top)."""
+        if self.blind():
+            return self.eyes_seen()
         return self.eyes_seen() and time.monotonic() - self.svc.last_sample < 2
+
+    def blind(self):
+        """Our tracker is in use, running, and not calibrated yet: it has no gaze to send."""
+        return self.svc.kind == "own" and self.calibrated() is False
 
     def on_gaze_on(self):
         self.full_armed = True
@@ -356,7 +371,7 @@ class Checks:
         if not self.can_run() and self.svc.waking():
             return  # the tracker is still starting (the service idled)
         if not self.can_run():
-            why = ("the eye tracker isn't sending" if now - self.svc.last_sample >= 2
+            why = ("the eye tracker isn't sending" if now - self.svc.last_sample >= 2 and not self.blind()
                    else "no eyes seen (is the headset on?)")
         elif now < self.full_retry_at:
             return
@@ -408,6 +423,9 @@ class Checks:
         if not self.can_run():
             return "error the headset is off or the tracker isn't sending"
         own = svc.kind == "own"
+        blind = self.blind()
+        if blind and kind != "full":
+            return "error our tracker isn't calibrated yet: use Calibrate"
         if kind == "full" and own:
             reply = ask(EYES, "calib-start", 3.0)
             if not reply.startswith("ok"):
@@ -416,8 +434,10 @@ class Checks:
         now = time.monotonic()
         self.check = {"kind": kind, "reason": reason, "own": own, "dots": check_dots(kind, own), "i": 0,
                       "started": now, "shown": now, "run": [], "accept": False, "done_at": None, "tries": 0,
-                      "skipped": 0, "captured": 0, "points": {}, "reasons": {}, "fit_reasons": set(), "note": ""}
-        log(f"{kind} check: {reason}")
+                      "skipped": 0, "captured": 0, "points": {}, "reasons": {}, "fit_reasons": set(), "note": "",
+                      "blind": blind}
+        log(f"{kind} check: {reason}" + (" (our tracker's first: no gaze yet, so each click takes the look "
+                                         "up to it)" if blind else ""))
         if kind == "full":
             st = ask(SCREENS, "state", 0.5).split()
             if len(st) >= 3 and st[0] == "ok":
@@ -519,6 +539,12 @@ class Checks:
             return
         if c["own"]:
             src = s["src"].get("own") or {}
+            if c["blind"]:
+                # Our tracker's first calibration: no gaze yet, so the dot stands in for it (the
+                # gaze can't seem to move) and a click takes the look up to it. ft-eyes checks
+                # the pupils held still (see the top).
+                yaw, pitch, _ = c["dots"][c["i"]]
+                src = {"hy": yaw, "hp": pitch}
         else:
             src = s["src"].get("mmap1") or {}
             if "hy" not in src:
