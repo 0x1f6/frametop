@@ -171,23 +171,22 @@ Or by hand: `cd ~/frametop && git pull && ./install.sh`.
 
 ## Uninstall
 
+In a terminal on the headset, run:
+
 ```
-./desktops.sh uninstall                # the launcher's Desktop entry goes back to the stock desktop
-./desktops.sh relay uninstall
-pointer/helper/run.sh uninstall
-power/run.sh uninstall
-pointer/driver/install.sh uninstall    # then restart SteamVR
-input-settings/install.sh uninstall
-display-settings/install.sh uninstall
-remote/install.sh uninstall
-setup/bluetooth/install.sh uninstall   # if you installed the Bluetooth fixes
-hands/run.sh uninstall                 # if you installed hand tracking by hand
-gaze/run.sh uninstall                  # if you installed the gaze service
-gaze/tracker/install.sh uninstall      # if you installed our own eye tracker's frame grabber
-gaze/probe/install.sh uninstall        # if you installed the gaze probe
+curl -fsSL https://deejanuz.github.io/frametop/uninstall.sh | bash
 ```
 
-Your settings stay: `~/.config/frametop.conf`, `frametop-input.json` (button maps and key combinations), `frametop-layout.json` (the layout and profiles), `frametop-float.json`, and `frametop-remote/` in `~/.config`, and the gaze calibration in `~/.local/state/frametop/gaze`. So does the desktop's own Plasma setup, in `~/.config/frametop`. Delete them too for a clean slate.
+It works in two steps, so it never takes away the keyboard, mouse, or desktop you're using while it runs:
+
+1. It stops Frametop from starting. Launch a program → Desktop opens the stock desktop again, and Frametop's services, its SteamVR driver, its menu entries, and the system files of our eye tracker and the Bluetooth fixes are removed (those need your `sudo` password). Everything running now keeps running until you restart the headset, and it offers to restart it for you.
+2. After the restart, run the same command again. It deletes the code in `~/frametop`, and asks whether to delete your settings, any eye or hand recordings, and the build container (1–2 GB) too.
+
+To see what it would do without changing anything, add `-s -- --dry-run` after `bash`. If the code isn't in `~/frametop`, add `-s -- --dir <folder>`. From the repo, the same script is `./uninstall.sh`.
+
+Don't delete `~/frametop` by hand before you uninstall and restart: the desktop and the input relay run from it, and without it Launch a program → Desktop no longer opens anything. If you've already deleted it, the command above still works, since it doesn't need the repo.
+
+Unless you ask for them to go, your settings stay: `~/.config/frametop.conf`, `frametop-input.json` (button maps and key combinations), `frametop-layout.json` (the layout and profiles), `frametop-float.json`, and `frametop-remote/` in `~/.config`, the gaze calibration in `~/.local/state/frametop`, and the desktop's own Plasma setup in `~/.config/frametop`. A later install picks them up again.
 
 ## How it works
 
@@ -197,6 +196,7 @@ A Plasma session runs nested inside ft-screens (`screens/`), a small Wayland com
 | --- | --- |
 | `get.sh` | The one-line installer: picks stable or experimental, clones or updates the repo, and runs `install.sh`. |
 | `install.sh` | The one-step installer. Safe to re-run. |
+| `uninstall.sh` | The uninstaller: run it, restart the headset, and run it again. It doesn't need the rest of the repo. |
 | `desktops.sh` | Start, stop, and configure the desktop, and install the input relay. |
 | `screens/` | ft-screens, the compositor (wlroots and OpenVR). |
 | `session/` | The desktop session script and its config example. |
