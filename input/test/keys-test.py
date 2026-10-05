@@ -95,7 +95,8 @@ def read_rules(path=None):
 
 
 relay.read_rules = read_rules
-relay.read_config = lambda path=None: {"POINTER": "0"}
+conf = {"POINTER": "0"}  # ~/.config/frametop.conf, as the relay reads it
+relay.read_config = lambda path=None: dict(conf)
 
 # The fake devices: /dev/input/event900 (keyboard) and event901 (mouse), each a pipe.
 kb_r, kb_w = os.pipe()
@@ -264,6 +265,38 @@ def tests():
     check("Meta+Shift+P isn't typed", [k for k in typed() if k.startswith("key 25 ")], [])
     key(META, 1); key(J, 1); key(J, 0); key(META, 0)
     check("resumed: Meta+J is a combination again", typed(), ["key 125 1"] + F24 + ["key 125 0"])
+
+    # Pointer mode: a click held into a pause comes up as it starts, then the pointer hides
+    # (stand_down); the release that comes during the pause reaches no one.
+    helper = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    helper.bind(relay.HELPER)
+    helper.settimeout(0.05)
+
+    def clicks():
+        """The helper's button commands and hides since the last call (not the claim pulse)."""
+        got = []
+        while True:
+            try:
+                m = helper.recv(256).decode()
+            except socket.timeout:
+                return got
+            if m == "hide" or (m.startswith("btn ") and not m.startswith("btn a ")):
+                got.append(m)
+
+    conf["POINTER"] = "1"
+    use({})
+    key(relay.BTN_LEFT, 1, ms_w)
+    time.sleep(0.5)  # the claim pulse, 0.3 s after the pointer wakes
+    check("pointer mode: a held left button reaches the helper", clicks(), ["btn trigger 1"])
+    pause("on")
+    check("pause with the left button held: it comes up, then the pointer hides", clicks(),
+          ["btn trigger 0", "hide"])
+    key(relay.BTN_LEFT, 0, ms_w)
+    check("paused: its release reaches no one", clicks(), [])
+    pause("off")
+    key(relay.BTN_LEFT, 1, ms_w); key(relay.BTN_LEFT, 0, ms_w)
+    check("resumed: a click goes to the helper again", clicks(), ["btn trigger 1", "btn trigger 0"])
+    conf["POINTER"] = "0"
 
     use(None)  # the defaults: Meta+Alt+Tab and Meta+Alt+Shift+Tab spin the panels (ft-screens)
     key(META, 1); key(ALT, 1); key(TAB, 1); key(TAB, 0); key(ALT, 0); key(META, 0)
