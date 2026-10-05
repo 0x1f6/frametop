@@ -498,8 +498,9 @@ class Pointer:
         self.pending = 0
         self.pending_since = 0.0
         self.gaze_awake_until = 0.0  # the helper's gaze mode keeps the pointer until then
-        # Driver buttons this pointer pressed and hasn't released (trigger, b, x, joystick):
-        # pausing drops releases, so stand_down has to send them itself.
+        # Driver buttons this pointer pressed and hasn't released (trigger, b, x, joystick: the
+        # left, right, middle and back actions, from a mouse button, a mapped controller button
+        # or a key combination): pausing drops releases, so stand_down has to send them itself.
         self.driver_down = set()
 
     def send(self, command, droppable=False):
@@ -713,21 +714,39 @@ class Pointer:
         return wait
 
     def stand_down(self):
-        """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
-        for driver in sorted(self.driver_down):  # pausing drops releases; a button a gaze
-            self.send(f"btn {driver} 0")         # drag held into the pause stays down otherwise
+        """Frametop is pausing: a pulse under way ends now, and the pointer lets go.
+
+        A click held into the pause (driver_down) comes up here, since pausing drops its
+        release; otherwise the driver keeps the button down and the virtual controller
+        reconnects with it pressed on resume. Gaze holds (gazekey, gazedrag, precision) aren't
+        tracked here: the helper ends them itself when the pointer hides.
+
+        The releases go before "hide", and "hide" follows them even when the pointer was off
+        already (the idle timeout or pointer_toggle with a button held): a helper built before
+        releases stopped waking it would wake on one and connect the virtual controller
+        during the game.
+
+        Not covered: gaze mode's held-back press (the helper's aim, before it becomes a real
+        press) turns into a click on its release. The helper drops it without a click when it
+        reads "hide" in the same loop as the release, as it normally does. If its socket was
+        full, the rest of these wait in the queue (send), "hide" can land a loop later, and
+        that press clicks once as the pause starts."""
+        releases = [f"btn {driver} 0" for driver in sorted(self.driver_down)]
         self.driver_down.clear()
         if self.system_release is not None:
-            self.send("btn system 0")
+            releases.append("btn system 0")
         if self.claim_release is not None:
-            self.send("btn a 0")
+            releases.append("btn a 0")
         if self.scroll_until is not None:
-            self.send("scroll 0 0")
+            releases.append("scroll 0 0")
+        for command in releases:
+            self.send(command)
         self.system_at = self.system_release = self.claim_at = self.claim_release = self.scroll_until = None
         self.dx = self.dy = self.pending = 0
         self.gaze_awake_until = 0.0
-        if self.active:
+        if self.active or releases:
             self.send("hide")
+        if self.active:
             self.active = False
             log("pointer off (paused)")
 
