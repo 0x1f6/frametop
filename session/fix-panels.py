@@ -13,7 +13,8 @@ The session runs this before Plasma starts, so nothing races Plasma for the file
 panel numbered at or past the screen count moves to screen 0, with its system tray's
 containment, and keeps its widgets and settings. A panel is left where it is when screen
 0 already has a panel on that edge: it comes back by itself if the screens do. The file
-is backed up once per repair (<file>.ft-bak), and the changes go through kwriteconfig6.
+is backed up before the first repair (<file>.ft-bak, and only then: a later repair never
+overwrites that original), and the changes go through kwriteconfig6.
 
   fix-panels.py [--screens N] [--file APPLETSRC] [--check]
     --screens  the desktop's screen count (default: the configured layout's)
@@ -125,7 +126,9 @@ def main(argv):
         print(f"{screens} screen(s)")
         return 1 if moves or kept else 0
 
-    if moves:
+    if moves and not os.path.exists(path + ".ft-bak"):
+        # The backup holds the config as it was before the first repair, so a later run
+        # can't overwrite it with an already-repaired state.
         shutil.copy2(path, path + ".ft-bak")
     for pid, was, ids in moves:
         for cid in ids:
