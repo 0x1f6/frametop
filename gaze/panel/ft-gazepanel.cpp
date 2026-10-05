@@ -22,6 +22,8 @@
 //                                look, capture (a ring filling to progress), done,
 //                                fail, off
 //   title <text> / text <text>   a line at the top / at the bottom (empty to clear)
+//   note <text>                  a warning line just above the bottom one, in orange (red on
+//                                the bright round): why a dot wasn't taken (empty to clear)
 //   eye <0|1> <r> <g> <b> <signal 0..1|-1> <seen 0..1|-1> <word>
 //                                fit: an eye's card (0 left): its state in that colour, the
 //                                tracker's signal, the share of the last 10 s it was seen
@@ -45,6 +47,7 @@
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <gbm.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -143,7 +146,7 @@ struct Panel {
     double wDeg = kQuickDeg;  // across
     std::vector<uint8_t> px;
     double bg = 0.05;
-    std::string title, text;
+    std::string title, text, note;
     bool dotOn = false;
     double dotYaw = 0, dotPitch = 0, progress = 0;
     std::string state = "off";
@@ -268,6 +271,9 @@ void Draw(Panel &p) {
     const int titleSize = int(pxPerDeg * (p.full ? 1.5 : 1.1)), textSize = int(pxPerDeg * (p.full ? 1.2 : 0.9));
     Text(p, p.title, titleSize, p.w / 2, int(titleSize * 1.2), faint);
     Text(p, p.text, textSize, p.w / 2, p.h - int(textSize * 1.3), faint);
+    // Under the full calibration's lowest dots (RING degrees down) and over the text.
+    if (light) Text(p, p.note, textSize, p.w / 2, p.h - int(textSize * 2.8), 0.7, 0.12, 0.05);
+    else Text(p, p.note, textSize, p.w / 2, p.h - int(textSize * 2.8), 1.0, 0.62, 0.3);
     if (p.fit) DrawFit(p, pxPerDeg, textSize, faint);
     if (!p.dotOn || p.state == "off") return;
     double x, y;
@@ -468,7 +474,7 @@ int main(int argc, char **argv) {
                 p.w = p.full ? kFullW : p.fit ? kFitW : kQuickPx;
                 p.h = p.full ? kFullH : p.fit ? kFitH : kQuickPx;
                 p.wDeg = p.full ? kFullDeg : p.fit ? kFitDeg : kQuickDeg;
-                p.title.clear(), p.text.clear(), p.dotOn = false, p.state = "off";
+                p.title.clear(), p.text.clear(), p.note.clear(), p.dotOn = false, p.state = "off";
                 p.eyes[0] = p.eyes[1] = EyeCard{}, p.hints.clear();
                 place();
                 visible = dirty = true;  // shown with its first picture
@@ -496,6 +502,8 @@ int main(int argc, char **argv) {
                 p.title = buf[5] == ' ' ? buf + 6 : "", dirty = true;
             } else if (!std::strncmp(buf, "text", 4)) {
                 p.text = buf[4] == ' ' ? buf + 5 : "", dirty = true;
+            } else if (!std::strncmp(buf, "note", 4)) {
+                p.note = buf[4] == ' ' ? buf + 5 : "", dirty = true;
             } else if (std::sscanf(buf, "%15s", word) == 1 && !std::strcmp(word, "ping")) {
                 reply = visible ? "ok shown" : "ok hidden";
             } else {
@@ -517,7 +525,11 @@ int main(int argc, char **argv) {
             if (!shown) ov->ShowOverlay(h), shown = true;
             dirty = false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(visible ? 10 : 50));
+        // Until a command comes, or 10 ms while shown (SteamVR's events). Hidden, it waits up to a
+        // second: it woke 20 to 30 times a second for nothing, the main cost left with gaze idle.
+        // A closed stdin (--watch-stdin) wakes it too, so quitting doesn't wait.
+        pollfd fds[2] = {{sock, POLLIN, 0}, {0, POLLIN, 0}};
+        poll(fds, watchStdin ? 2 : 1, visible ? 10 : 1000);
     }
     ov->DestroyOverlay(h);
     buffers.Drop();

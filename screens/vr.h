@@ -17,7 +17,8 @@ struct ft_dmabuf {
     int fd[4];
 };
 
-enum ft_event_type { FT_MOTION, FT_BUTTON, FT_SCROLL, FT_LEAVE, FT_QUIT, FT_KEY, FT_KEYBOARD_CLOSED };
+// FT_FRONT: a spin (the lazy susan) brought panel `screen` to straight ahead: typing goes there.
+enum ft_event_type { FT_MOTION, FT_BUTTON, FT_SCROLL, FT_LEAVE, FT_QUIT, FT_KEY, FT_KEYBOARD_CLOSED, FT_FRONT };
 
 struct ft_event {
     enum ft_event_type type;
@@ -25,6 +26,7 @@ struct ft_event {
     double x, y;      // FT_MOTION: buffer pixels from the top left
     uint32_t button;  // FT_BUTTON: linux BTN_*
     bool pressed;
+    bool controller;  // FT_BUTTON: from a hand controller's laser (not the 3D mouse's)
     double dx, dy;    // FT_SCROLL: notches (positive dy: scroll down)
     uint32_t key;     // FT_KEY: linux KEY_* from our keyboard (pressed: down or up)
 };
@@ -35,6 +37,16 @@ void ft_vr_shutdown(void);
 int ft_vr_modifiers(uint32_t format, uint64_t *out, int max);
 // The screens are showing (by the visibility mode; not counting a wrist-pinned screen).
 bool ft_vr_screens_shown(void);
+// Frametop is paused for a VR game ("pause on"): everything is hidden, and KWin slows down.
+bool ft_vr_paused(void);
+// How much of a screen you see, for its frame rate (compositor.c): hidden (or out of view),
+// in view, or focused (you look at it, or a laser or the mouse is on it). Focused without
+// SteamVR (--no-vr) or for an unknown screen.
+enum ft_attention { FT_HIDDEN, FT_IN_VIEW, FT_FOCUSED };
+enum ft_attention ft_vr_screen_attention(int index);
+// The display's refresh rate and the time since its last vsync, in seconds. False without
+// them (no SteamVR, or the headset isn't reporting).
+bool ft_vr_vsync(double *since, double *hz);
 // A panel for screen `index`, width in metres, placed in a row in front of the head.
 void ft_vr_screen_create(int index, double metres, int count);
 void ft_vr_screen_destroy(int index);

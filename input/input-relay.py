@@ -14,8 +14,7 @@ keyboard node for its extra buttons). Roles, from ~/.config/frametop-input.json
 (written by the Frametop Input Settings app):
   pointer      grabbed; drives the universal 3D mouse (default for devices with a mouse node)
   passthrough  keys go to the desktop; grabbed only while typing goes there, otherwise only observed,
-               e.g. for the Meta dashboard shortcut (default for keyboards; the shortcut is off
-               unless META_DASHBOARD=1 is in ~/.config/frametop.conf)
+               for the key combinations below (default for keyboards)
   ignore       not grabbed, only observed for identification in the settings app
 Buttons and keys of pointer devices go through a per-device map to actions
 (left, right, middle, back, scroll_up, scroll_down, dashboard, recenter,
@@ -31,20 +30,30 @@ gaze_quickcal = the gaze service's one-dot check ("quickcal" to @ft_gazed), sens
 layout_reset = put the desktop screens back in their saved layout, screens_toggle = hide or show the desktop screens,
 keyboard_toggle = open or close Frametop's keyboard, float_toggle = float the desktop window under the
 pointer (else the active one) in VR, or put it back if it floats, dock_all = put every floating
-window back (both to ft-floatd, @frametop_float), profile:NAME = switch to that profile (ft-layout
-use NAME: its screens and apps; docs/profiles.md), key = pass through as a key, none).
+window back (both to ft-floatd, @frametop_float), spin_next and spin_prev = turn every panel in the
+room about your head so the next one to the right or left comes to the front (ft-screens' "spin",
+Meta+Alt+Tab and Meta+Alt+Shift+Tab by default), profile:NAME = switch to that profile (ft-layout
+use NAME: its screens and apps; docs/profiles.md), steam_menu = open the SteamVR dashboard on
+Steam's menu, or close the dashboard (steam/ft-steam menu, through Steam's UI), pause_toggle =
+pause Frametop for a VR game, or resume it (game_pause.py), command:CMD = run
+CMD with sh -c (on the host, as this service: its environment, output to its log, and
+COMMAND_PATH, so ft-layout, ft-float and ft-steam need no path), key = pass through as a key, none).
 
 Frame controller buttons can be mapped too ("controller_buttons": {"right/a": action} in the
 rules file; any action but key and the gaze ones, GAZE_ACTIONS: gaze mode is a mouse feature,
 docs/gaze-controllers.md). So can key combinations on any keyboard ("key_bindings":
 {"29+56+34": action}, evdev codes joined by "+", modifiers first and left-hand codes for
 either side, here Ctrl+Alt+G): the combination does the action, and its last key isn't typed.
-A rules file without "key_bindings" gets DEFAULT_KEY_BINDINGS (Meta+J: gaze_left, Meta+K:
-gaze_right, Meta+Shift+F: float_toggle); one with its own, even an empty one, doesn't. The float
-actions work without pointer mode too. A combination with Meta also sends the desktop an F24 press
-and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and a gaze
-click isn't Meta+click (KWin's window move and resize). Another key while Meta is still held gives
-the desktop Meta back. The controllers aren't input devices here, only SteamVR sees
+A modifier on its own ("125": Meta) is a tap: pressed and released with no other key, mouse
+button, or scroll in between; the desktop gets an F24 press before its release, so Plasma's
+launcher doesn't open on a Meta tap that's bound. A rules file without "key_bindings" gets
+DEFAULT_KEY_BINDINGS (Meta tap: steam_menu, Meta+J: gaze_left, Meta+K: gaze_right, Meta+Shift+F:
+float_toggle); one with its own, even an empty one, doesn't. The float, profile, Steam menu,
+pause and command actions work without pointer mode too. A combination with Meta also sends the desktop an
+F24 press and Meta's release right away: so letting go of Meta doesn't open Plasma's launcher, and
+a gaze click isn't Meta+click (KWin's window move and resize). Another key while Meta is still
+held gives the desktop Meta back. While typing goes to Steam, keyboards aren't grabbed, so Steam
+or the game sees a combination's keys too. The controllers aren't input devices here, only SteamVR sees
 them, so the pointer helper reads them with SteamVR input and sends "vrbtn <button> 1|0".
 It only takes the buttons the relay tells it to ("vrbind <button>..." to @ft_pointer_helper,
 sent on start, reload, and when the helper says "vrhello"), and only while no game runs,
@@ -86,6 +95,12 @@ keyboards) get their volume entries remapped to unused stand-in codes, so their
 other keys keep working for SteamVR; a device without a keymap that has only volume
 keys (the headset's pmic_resin) is grabbed. The keymaps go back when the relay exits.
 
+Frametop can pause for VR games (game_pause.py: by hand, with a controller gesture, or by itself
+while a game runs). Paused, it stops the services that cost the game CPU and GPU, and the relay
+plays a plain one: the pointer devices feed the virtual mouse and keyboard as without pointer
+mode, typing goes to Steam, and mapped buttons and key combinations do only pause_toggle,
+steam_menu and command:CMD (game_pause.PAUSED_ACTIONS).
+
 Pointer mode (POINTER=1 in ~/.config/frametop.conf) sends pointer devices to
 the ft-pointer helper (pointer/helper), which drives the ft_pointer
 SteamVR driver. With POINTER=0, pointer devices go to the virtual mouse and
@@ -98,7 +113,10 @@ Control socket (abstract datagram @frametop_relay, JSON replies to the sender):
   vrcapture <s>     take every controller button for s seconds (0: stop), so the settings
                     app can capture one; watchers see them as events with id frame_controller
   vrbtn, vrhello, gazeawake   from the pointer helper (above)
+  vrgame 1|0        from the pointer helper: a VR game runs (on a change and every 5 s), for pausing
   textfield 1|0     from the desktop's input method (above)
+  pause on|off|toggle [reason]   pause Frametop or resume it (input/ft-pause; the gesture reader)
+  pause ?           the pause state, as {"t": "pause", ...}
 
 Runs on the Frame host as a user service (frametop-input-relay.service). The
 virtual devices are parked in systemd's file descriptor store, so a relay
@@ -112,6 +130,7 @@ kernel's evdev and uinput interfaces.
 """
 import array
 import atexit
+import collections
 import errno
 import fcntl
 import json
@@ -124,18 +143,21 @@ import subprocess
 import sys
 import time
 
+import game_pause
+
 # Linux input constants (include/uapi/linux/input-event-codes.h, input.h, uinput.h).
 EV_SYN, EV_KEY, EV_REL, EV_MSC = 0x00, 0x01, 0x02, 0x04
 SYN_REPORT = 0
 BTN_MISC, KEY_MAX = 0x100, 0x2FF
 KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
+SCROLLS = {0x06, REL_WHEEL, 0x0B, 0x0C}  # REL_HWHEEL, REL_WHEEL and their _HI_RES
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
-KEY_VOLUMEDOWN, KEY_VOLUMEUP = 114, 115
-# Volume keys are remapped to KEY_MACRO29 and KEY_MACRO30: above 255, so X11 can't
-# carry them, and bound to nothing in the default keymap.
-VOLUME_STANDIN = {KEY_VOLUMEUP: 0x2AC, KEY_VOLUMEDOWN: 0x2AD}
+KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP = 113, 114, 115
+# Volume keys are remapped to KEY_MACRO28, KEY_MACRO29 and KEY_MACRO30: above 255, so X11
+# can't carry them, and bound to nothing in the default keymap.
+VOLUME_STANDIN = {KEY_MUTE: 0x2AB, KEY_VOLUMEUP: 0x2AC, KEY_VOLUMEDOWN: 0x2AD}
 VOLUME_ORIGINAL = {v: k for k, v in VOLUME_STANDIN.items()}
 VOLUME_CODES = set(VOLUME_STANDIN) | set(VOLUME_ORIGINAL)
 BUS_USB, BUS_BLUETOOTH, BUS_VIRTUAL = 0x03, 0x05, 0x06
@@ -189,12 +211,16 @@ RULES_PATH = os.path.expanduser("~/.config/frametop-input.json")
 ACTIONS = ("left", "right", "middle", "back", "scroll_up", "scroll_down", "dashboard", "recenter",
            "pointer_toggle", "follow_toggle", "gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right",
            "gaze_quickcal", "sens_up", "sens_down", "layout_reset", "screens_toggle", "keyboard_toggle", "float_toggle",
-           "dock_all", "key", "none")
+           "dock_all", "spin_next", "spin_prev", "steam_menu", "pause_toggle", "key", "none")
 # Gaze mode is a mouse feature: these never come from a controller button (docs/gaze-controllers.md).
 GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze_right", "gaze_quickcal")
-# Key combinations a rules file without "key_bindings" gets: Meta+J and Meta+K click at the gaze
-# (free on the Frametop desktop, and apps don't use Meta), Meta+Shift+F floats a window.
-DEFAULT_KEY_BINDINGS = {"125+36": "gaze_left", "125+37": "gaze_right", "42+125+33": "float_toggle"}
+# Key combinations a rules file without "key_bindings" gets: a Meta tap opens Steam's menu, Meta+J
+# and Meta+K click at the gaze (free on the Frametop desktop, and apps don't use Meta),
+# Meta+Shift+F floats a window, and Meta+Alt+Tab and Meta+Alt+Shift+Tab spin the panels around
+# you (ft-screens' lazy susan); not Meta+Tab, which is Cmd+Tab on a Mac reached through a remote
+# desktop like RustDesk.
+DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
+                        "42+125+33": "float_toggle", "56+125+15": "spin_next", "42+56+125+15": "spin_prev"}
 KEY_F24 = 194  # sent to the desktop with a Meta combination (see the top)
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
@@ -210,17 +236,37 @@ GAZED = "\0ft_gazed"
 FLOAT = "\0frametop_float"  # ft-floatd, floating windows in the Frametop desktop
 # Actions for ft-floatd ("float_toggle", "dock_all"): they don't need pointer mode.
 FLOAT_ACTIONS = {"float_toggle": b"float pointer", "dock_all": b"dock all"}
+# Actions for ft-screens: spin_next and spin_prev turn every panel in the room about your head,
+# so the next one to the right or left comes to the front. They don't need pointer mode either.
+SCREENS_ACTIONS = {"spin_next": b"spin next", "spin_prev": b"spin prev"}
 PROFILE = "profile:"  # "profile:NAME": switch to that profile (doesn't need pointer mode either)
+COMMAND = "command:"  # "command:CMD": run CMD (nor does this)
 
 
 def known_action(a):
-    return a in ACTIONS or (isinstance(a, str) and a.startswith(PROFILE) and len(a) > len(PROFILE))
+    return a in ACTIONS or (isinstance(a, str) and any(a.startswith(p) and a[len(p):].strip()
+                                                       for p in (PROFILE, COMMAND)))
 
 
 def needs_pointer(a):
-    return a not in FLOAT_ACTIONS and not a.startswith(PROFILE)
+    return a not in FLOAT_ACTIONS and a not in SCREENS_ACTIONS and a not in ("steam_menu", "pause_toggle") and not a.startswith((PROFILE, COMMAND))
+
+
+def works_paused(a):
+    """An action that still does something while Frametop is paused (game_pause.py)."""
+    return a in game_pause.PAUSED_ACTIONS or a.startswith(COMMAND)
+
+
+# What pressed pause_toggle, for the log (do_action's source).
+PAUSE_SOURCES = {"mouse": "mouse button", "keyboard": "key combination", "left": "controller button",
+                 "right": "controller button"}
 KEYS = "\0frametop_keys"  # keys of keyboards grabbed for the desktop, for other readers
-FT_LAYOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "layout", "ft-layout")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FT_LAYOUT = os.path.join(REPO, "layout", "ft-layout")
+FT_STEAM = os.path.join(REPO, "steam", "ft-steam")
+# Commands ("command:CMD") find Frametop's own tools (ft-layout, ft-float, ft-steam) on their PATH.
+COMMAND_PATH = ":".join([os.path.join(REPO, d) for d in ("layout", "float", "steam")]
+                        + [os.environ.get("PATH", "/usr/local/bin:/usr/bin")])
 DEFAULT_BUTTONS = {BTN_LEFT: "left", BTN_RIGHT: "right", BTN_MIDDLE: "middle",
                    BTN_SIDE: "back", BTN_EXTRA: "back"}
 
@@ -383,9 +429,13 @@ class Volume:
 
     def key(self, fd, code, value, now):
         if value == 1:
-            self.held = (fd, code)
-            self.step(code)
-            self.next_at = now + self.DELAY
+            if VOLUME_ORIGINAL.get(code, code) == KEY_MUTE:
+                subprocess.Popen(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                self.held = (fd, code)
+                self.step(code)
+                self.next_at = now + self.DELAY
         elif value == 0 and self.held == (fd, code):
             self.release()
 
@@ -421,14 +471,22 @@ class Pointer:
     CLAIM_PULSE = 0.06  # seconds the claim button (switchlaserhand, no click) is held
     RESUME_PAUSE = 1.5  # mouse idle this long, then moving again, re-claims the laser
     WAKE_WINDOW = 1.0  # seconds in which WAKE_COUNTS of motion must add up
+    QUEUE_MAX = 512  # commands kept while the helper is behind (see send)
+    MOVE_EVERY = 0.004  # mouse motion goes to the helper at most this often (see flush)
 
     def __init__(self, sensitivity, idle, wake_counts=40):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # Never blocks (see send): a stalled helper must not stall the keyboard, volume keys and pausing.
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+        # Commands the helper's full socket didn't take yet, in order: text, or [dyaw, dpitch] for
+        # mouse moves, which add up into one while they wait.
+        self.queue = collections.deque()
+        self.behind_logged = -60.0
         self.sensitivity = sensitivity  # degrees per mouse count
         self.idle = idle
         self.active = False
         self.last_used = 0.0
         self.dx = self.dy = 0
+        self.move_at = 0.0  # motion last went to the helper then
         self.scroll_until = None
         self.claim_at = None  # when to press the claim button
         self.claim_release = None
@@ -441,11 +499,59 @@ class Pointer:
         self.pending_since = 0.0
         self.gaze_awake_until = 0.0  # the helper's gaze mode keeps the pointer until then
 
-    def send(self, command):
-        try:
-            self.sock.sendto(command.encode(), HELPER)
-        except OSError:
-            pass  # helper not running (SteamVR not running)
+    def send(self, command, droppable=False):
+        """To the helper, in order, without blocking. While the helper doesn't keep up (place and
+        grabprobe hold it for seconds, and ft-gazed's 90 Hz gaze fills its socket meanwhile), commands
+        wait in the queue and go out from tick(). A droppable one (a scroll notch: scrolling seconds
+        late is no use) is dropped instead; presses, releases and the rest are kept, so no button
+        stays down. Moves add up (_move)."""
+        if not self.queue:
+            try:
+                self.sock.sendto(command.encode(), HELPER)
+                return
+            except BlockingIOError:
+                pass
+            except OSError:
+                return  # helper not running (SteamVR not running)
+        if not droppable:
+            self._queue(command)
+
+    def _move(self, dyaw, dpitch):
+        if self.queue and isinstance(self.queue[-1], list):
+            self.queue[-1][0] += dyaw
+            self.queue[-1][1] += dpitch
+            return
+        if not self.queue:
+            try:
+                self.sock.sendto(f"move {dyaw:.4f} {dpitch:.4f}".encode(), HELPER)
+                return
+            except BlockingIOError:
+                pass
+            except OSError:
+                return
+        self._queue([dyaw, dpitch])
+
+    def _queue(self, item):
+        if not self.queue and time.monotonic() - self.behind_logged > 60:
+            self.behind_logged = time.monotonic()
+            log("pointer helper is behind: holding its commands (logged once a minute)")
+        self.queue.append(item)
+        if len(self.queue) > self.QUEUE_MAX:
+            self.queue.popleft()  # stalled for long: the oldest goes
+
+    def drain(self):
+        """Send what waits, in order, as far as the helper takes it."""
+        while self.queue:
+            item = self.queue[0]
+            text = f"move {item[0]:.4f} {item[1]:.4f}" if isinstance(item, list) else item
+            try:
+                self.sock.sendto(text.encode(), HELPER)
+            except BlockingIOError:
+                return
+            except OSError:
+                self.queue.clear()  # the helper went away: nothing to deliver to
+                return
+            self.queue.popleft()
 
     def wake(self, now):
         if not self.active:
@@ -473,7 +579,7 @@ class Pointer:
         elif code == REL_Y:
             self.dy += value
         elif code == REL_WHEEL and value:
-            self.send(f"scroll 0 {1 if value > 0 else -1}")
+            self.send(f"scroll 0 {1 if value > 0 else -1}", droppable=True)
             self.scroll_until = now + self.SCROLL_PULSE
 
     def action(self, name, value, now, source="mouse"):
@@ -505,7 +611,7 @@ class Pointer:
             return  # the rest act on press
         elif name in ("scroll_up", "scroll_down"):
             self.wake(now)
-            self.send(f"scroll 0 {1 if name == 'scroll_up' else -1}")
+            self.send(f"scroll 0 {1 if name == 'scroll_up' else -1}", droppable=True)
             self.scroll_until = now + self.SCROLL_PULSE
         elif name == "dashboard":
             self.dashboard(now)
@@ -544,11 +650,16 @@ class Pointer:
             self.sensitivity *= 1.25 if name == "sens_up" else 0.8
             log(f"sensitivity {self.sensitivity:.4f} deg/count")
 
-    def flush(self):
-        if self.dx or self.dy:
-            # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
-            self.send(f"move {-self.dx * self.sensitivity:.4f} {-self.dy * self.sensitivity:.4f}")
-            self.dx = self.dy = 0
+    def flush(self, now=None):
+        """Send the motion so far. With now (a mouse's SYN_REPORT), only once MOVE_EVERY has passed
+        since the last: a 1000 Hz mouse sent the helper, which runs every 8 ms, 1000 datagrams a
+        second. tick() sends the rest when it's due; a button sends it first, so it lands there."""
+        if not (self.dx or self.dy) or (now is not None and now - self.move_at < self.MOVE_EVERY):
+            return
+        self.move_at = time.monotonic() if now is None else now
+        # Mouse right turns the ray right (negative yaw); mouse down tilts it down.
+        self._move(-self.dx * self.sensitivity, -self.dy * self.sensitivity)
+        self.dx = self.dy = 0
 
     def dashboard(self, now=None):
         """Toggle the SteamVR dashboard with the virtual controller's system button.
@@ -563,6 +674,8 @@ class Pointer:
         self.system_at = now + (0.4 if woke else 0.0)
 
     def tick(self, now):
+        self.drain()
+        self.flush(now)
         if self.system_at is not None and now >= self.system_at:
             self.send("btn system 1")
             self.system_at = None
@@ -587,7 +700,26 @@ class Pointer:
 
     def timeout(self):
         pending = (self.scroll_until, self.claim_at, self.claim_release, self.system_at, self.system_release)
-        return 0.02 if any(t is not None for t in pending) else 0.5
+        wait = 0.02 if self.queue or any(t is not None for t in pending) else 0.5
+        if self.dx or self.dy:  # motion held back by flush
+            wait = max(0.0, min(wait, self.move_at + self.MOVE_EVERY - time.monotonic()))
+        return wait
+
+    def stand_down(self):
+        """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
+        if self.system_release is not None:
+            self.send("btn system 0")
+        if self.claim_release is not None:
+            self.send("btn a 0")
+        if self.scroll_until is not None:
+            self.send("scroll 0 0")
+        self.system_at = self.system_release = self.claim_at = self.claim_release = self.scroll_until = None
+        self.dx = self.dy = self.pending = 0
+        self.gaze_awake_until = 0.0
+        if self.active:
+            self.send("hide")
+            self.active = False
+            log("pointer off (paused)")
 
 
 class Node:
@@ -672,27 +804,46 @@ def main():
     # desktop_until: typing goes to the Frametop desktop until then (ft-screens says so
     # every second); typing_applied: the grabs match that as of the last apply_roles().
     # vr_capture_until: every controller button is taken until then (the settings app capturing one).
-    state = {"pointer": None, "rules": {}, "meta_dashboard": False, "share_keys": False,
-             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0}
+    # pointer: the 3D mouse while it's in use, pointer_conf: the one the config asks for (they
+    # differ while Frametop is paused).
+    state = {"pointer": None, "pointer_conf": None, "rules": {}, "share_keys": False,
+             "desktop_until": 0.0, "typing_applied": None, "vr_capture_until": 0.0, "vr_bind_retry": False,
+             "pointer_holding": False}
+
+    def pause_changed(paused):
+        """Frametop paused or resumed (game_pause.py): the relay's own part."""
+        p = state["pointer_conf"]
+        if paused:
+            if p:
+                p.stand_down()
+            state["pointer"] = None
+            state["desktop_until"] = 0.0  # typing goes to Steam
+        else:
+            state["pointer"] = p
+        apply_roles()
+        vr_bind(time.monotonic())
+
+    pause = game_pause.GamePause(log, pause_changed, VR_BUTTONS)
 
     def load_config():
         conf = read_config()
         state["rules"] = read_rules()
-        state["meta_dashboard"] = conf.get("META_DASHBOARD", "0") == "1"
         state["share_keys"] = conf.get("SHARE_KEYS", "0") == "1"
         if conf.get("POINTER", "0") == "1":
-            p = state["pointer"] or Pointer(0.03, 30)
+            p = state["pointer_conf"] or Pointer(0.03, 30)
             p.sensitivity = float(conf.get("POINTER_SENSITIVITY", "0.03"))
             p.idle = float(conf.get("POINTER_IDLE", "30"))
             p.wake_counts = int(conf.get("POINTER_WAKE_COUNTS", "40"))
-            state["pointer"] = p
+            state["pointer_conf"] = p
             log(f"pointer mode: {p.sensitivity} deg/count, idle {p.idle} s, wake {p.wake_counts} counts")
         else:
-            state["pointer"] = None
+            state["pointer_conf"] = None
             log("pointer mode off: pointer devices feed the virtual mouse and keyboard")
+        state["pointer"] = None if pause.paused else state["pointer_conf"]
+        pause.configure(state["rules"])
 
     load_config()
-    meta_down = False  # Meta pressed with no other key yet: a tap toggles the dashboard
+    tap = None  # the modifier (folded, MODIFIERS) pressed alone, with nothing since: its release is a tap
     screens_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
     last_typing = 0.0  # the helper was last told of a key then (see "typing" at the top)
 
@@ -704,11 +855,14 @@ def main():
             state["vr_capture_until"] = 0.0
             buttons = " ".join(b for b, a in state["rules"]["controller_buttons"].items()
                                if b in VR_BUTTONS and known_action(a) and a not in ("key", "none")
-                               and a not in GAZE_ACTIONS) or "-"
+                               and a not in GAZE_ACTIONS and (not pause.paused or works_paused(a))) or "-"
             if state["rules"].get("controller_in_games"):
                 buttons = "+games " + buttons
+        state["vr_bind_retry"] = False
         try:
             screens_sock.sendto(f"vrbind {buttons}".encode(), HELPER)
+        except BlockingIOError:
+            state["vr_bind_retry"] = True  # the helper is behind: again on the next loop
         except OSError:
             pass  # helper not running; it says vrhello when it starts
 
@@ -748,7 +902,13 @@ def main():
 
     def do_action(action, value, now, source="mouse"):
         """A mapped mouse or controller button, or key combination (pointer mode only, but
-        for FLOAT_ACTIONS and profiles)."""
+        for the actions needs_pointer() says don't)."""
+        if action == "pause_toggle":
+            if value == 1:
+                pause.toggle(PAUSE_SOURCES.get(source, source), now)
+            return
+        if pause.paused and not works_paused(action):
+            return
         if action == "keyboard_toggle":
             if value == 1 and vr_keyboard_mode() != "never":
                 vr_keyboard("toggle")
@@ -758,10 +918,28 @@ def main():
                 subprocess.Popen([FT_LAYOUT, "use", action[len(PROFILE):]], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                 log(action)
+        elif action == "steam_menu":
+            if value == 1:
+                # Talks to Steam's UI for a moment; its errors go to this service's log.
+                subprocess.Popen([FT_STEAM, "menu"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 start_new_session=True)
+                log(action)
+        elif action.startswith(COMMAND):
+            if value == 1:
+                subprocess.Popen(["sh", "-c", action[len(COMMAND):]], stdin=subprocess.DEVNULL,
+                                 env=dict(os.environ, PATH=COMMAND_PATH), start_new_session=True)
+                log(action)
         elif action in FLOAT_ACTIONS:
             if value == 1:
                 try:
                     screens_sock.sendto(FLOAT_ACTIONS[action], FLOAT)
+                except OSError:
+                    pass  # the Frametop desktop isn't running
+                log(action)
+        elif action in SCREENS_ACTIONS:
+            if value == 1:
+                try:
+                    screens_sock.sendto(SCREENS_ACTIONS[action], SCREENS)
                 except OSError:
                     pass  # the Frametop desktop isn't running
                 log(action)
@@ -776,14 +954,20 @@ def main():
     def key_binding(code, value, now):
         """A key from a keyboard: does it complete a key combination ("key_bindings")? True if
         it was taken for one (then it isn't typed)."""
-        nonlocal meta_down
+        nonlocal tap
         if code in MODIFIERS:
-            (held_modifiers.add if value else held_modifiers.discard)(MODIFIERS[code])
+            mod = MODIFIERS[code]
+            if value == 1:
+                tap = mod if not held_modifiers and not combos_down else None
+            (held_modifiers.add if value else held_modifiers.discard)(mod)
             if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
                 (held_meta.add if value else held_meta.discard)(code)
                 if value == 0 and code in meta_hidden:
                     meta_hidden.discard(code)
                     return True  # the desktop already had it come up (below)
+            if value == 0 and tap == mod:
+                tap = None
+                modifier_tap(mod, now)
             return False
         if value == 1 and code not in combos_down and meta_hidden:
             # Another key while Meta is still held after a combination: the desktop gets Meta
@@ -800,15 +984,14 @@ def main():
             return value == 2 and code in combos_down
         combo = "+".join(str(c) for c in sorted(held_modifiers) + [code])
         action = state["rules"]["key_bindings"].get(combo)
-        if not known_action(action) or action in ("key", "none"):
+        if not known_action(action) or action in ("key", "none") or (pause.paused and not works_paused(action)):
             return False
         combos_down[code] = action
         if held_meta - meta_hidden:
             # The desktop saw Meta go down. Another key in between keeps its release from
-            # opening Plasma's launcher (and Meta from toggling the dashboard here), and Meta
-            # comes up there now: KWin takes Meta with a mouse button for moving or resizing
-            # windows, which would swallow a gaze click. Its real release is dropped (above).
-            meta_down = False
+            # opening Plasma's launcher, and Meta comes up there now: KWin takes Meta with a
+            # mouse button for moving or resizing windows, which would swallow a gaze click.
+            # Its real release is dropped (above).
             to_screens(KEY_F24, 1)
             to_screens(KEY_F24, 0)
             for c in sorted(held_meta - meta_hidden):
@@ -818,6 +1001,20 @@ def main():
             do_action(action, 1, now, "keyboard")
         log(f"key combination {combo}: {action}")
         return True
+
+    def modifier_tap(mod, now):
+        """A modifier pressed and released alone: its binding, if it has one ("125": Meta tap)."""
+        action = state["rules"]["key_bindings"].get(str(mod))
+        if not known_action(action) or action in ("key", "none") or (pause.paused and not works_paused(action)):
+            return
+        # The desktop gets a key in between before the release goes there, so the tap isn't one
+        # there too: a Meta tap would open Plasma's launcher.
+        to_screens(KEY_F24, 1)
+        to_screens(KEY_F24, 0)
+        if state["pointer"] or not needs_pointer(action):
+            do_action(action, 1, now, "keyboard")
+            do_action(action, 0, now, "keyboard")
+        log(f"key combination {mod}: {action}")
 
 
     screens_down = set()  # keys the desktop was told went down and not yet up (see reconcile_desktop_keys)
@@ -1009,7 +1206,7 @@ def main():
             try:
                 if cmd == "keyboard":
                     # From ft-screens (unbound, no reply): where typing goes, repeated every second.
-                    desktop = len(words) > 1 and words[1] == "desktop"
+                    desktop = len(words) > 1 and words[1] == "desktop" and not pause.paused
                     state["desktop_until"] = now + 3.0 if desktop else 0.0
                     continue
                 if cmd == "vrbtn" and len(words) == 3 and words[1] in VR_BUTTONS and words[2] in ("0", "1"):
@@ -1017,6 +1214,20 @@ def main():
                     continue
                 if cmd == "vrhello":
                     vr_bind(now)
+                    pause.helper_started()
+                    continue
+                if cmd == "vrgame" and len(words) == 2:
+                    pause.game_state(words[1] == "1", now)
+                    continue
+                if cmd == "pause" and len(words) >= 2 and words[1] in ("on", "off", "toggle", "?"):
+                    # From input/ft-pause, the settings app, or the gesture reader (unbound, no reply).
+                    reason = words[2] if len(words) > 2 else "command"
+                    if words[1] == "toggle":
+                        pause.toggle(reason, now)
+                    elif words[1] != "?":
+                        pause.set(words[1] == "on", reason, now)
+                    if addr:
+                        reply(addr, pause.status())
                     continue
                 if cmd == "textfield" and len(words) == 2:
                     text_field(words[1] == "1")
@@ -1028,7 +1239,8 @@ def main():
                 if not addr:
                     continue  # unbound sender, nowhere to reply
                 if cmd == "devices":
-                    reply(addr, {"t": "devices", "pointer_mode": state["pointer"] is not None,
+                    reply(addr, {"t": "devices", "pointer_mode": state["pointer_conf"] is not None,
+                                 "paused": pause.paused,
                                  "actions": ACTIONS,
                                  "nodes": [n.describe() for n in nodes.values() if n.candidate]})
                 elif cmd == "watch":
@@ -1094,6 +1306,11 @@ def main():
                 # New here: a new device, or one that came back in the same place.
                 for old in [n for n in nodes.values() if n.path == path]:
                     drop(old, "replaced by a new device node")
+                # A new node is root's alone until udev gives it to the input group, a moment
+                # after it appears. Opened in that gap, it would fail and never be tried
+                # again: leave it for the next scan instead.
+                if not os.access(path, os.R_OK):
+                    continue
                 seen[path] = ino
                 node = probe(path)
                 if node and node.volume_keys and not take_volume(node):
@@ -1105,17 +1322,29 @@ def main():
             if added:
                 apply_roles()
 
+        # The 3D mouse connecting or letting go moves a hand role, so the pause gesture's reader
+        # looks the controllers up again (game_pause.py).
+        holding = bool(state["pointer_conf"] and state["pointer_conf"].active)
+        if holding != state["pointer_holding"]:
+            state["pointer_holding"] = holding
+            pause.controllers_changed()
         ready, _, _ = select.select(list(nodes) + [control], [], [],
-                                    volume.timeout(now, pointer.timeout() if pointer else 0.5))
+                                    min(volume.timeout(now, pointer.timeout() if pointer else 0.5), pause.timeout(now)))
         now = time.monotonic()
         if pointer:
             pointer.tick(now)
+        elif state["pointer_conf"]:
+            state["pointer_conf"].drain()  # paused: what waited still goes, in order
+        if state["vr_bind_retry"]:
+            vr_bind(now)
         volume.tick(now)
+        pause.tick(now)
         if state["vr_capture_until"] and now >= state["vr_capture_until"]:
             vr_bind(now)  # capture over: back to the mapped buttons
         if (now < state["desktop_until"]) != state["typing_applied"] or waiting:
             waiting = apply_roles()
         for fd in ready:
+            pointer = state["pointer"]  # (a pause or resume in this batch changes it)
             if fd is control:
                 handle_control(now)
                 continue
@@ -1136,44 +1365,41 @@ def main():
                 if etype in (EV_KEY, EV_REL):
                     broadcast(node, etype, VOLUME_ORIGINAL.get(code, code) if node.remapped else code,
                               value, now)
+                if (etype == EV_KEY and value == 1 and code not in MODIFIERS) or (etype == EV_REL and code in SCROLLS):
+                    tap = None  # a key, button or scroll in between: a modifier's release isn't a tap
                 if etype == EV_KEY and ((node.remapped and code in VOLUME_ORIGINAL)
                                         or (node.grabbed and code in VOLUME_STANDIN)):
                     volume.key(fd, code, value, now)
-                    if value == 1:
-                        meta_down = False  # Meta used as a modifier, not a tap
                     continue
                 if node.role == "volume":
                     continue
                 if node.role != "pointer":
-                    # Observed only, unless typing goes to the desktop. With META_DASHBOARD=1,
-                    # a Meta tap on any keyboard toggles the dashboard.
+                    # Observed only, unless typing goes to the desktop. Key combinations work on
+                    # any pass-through keyboard.
+                    if (node.role == "passthrough" and etype == EV_KEY and node.grabbed
+                            and code < BTN_MISC and value in (0, 1)):
+                        # Shared as pressed, key combinations included: the Meta release a
+                        # combination keeps from the desktop must still reach frame-voice, or
+                        # it waits for that release before typing anything.
+                        share_key(node, code, value)
+                        if value:
+                            node.held.add(code)
+                        else:
+                            node.held.discard(code)
                     if node.role == "passthrough" and etype == EV_KEY and code < BTN_MISC and key_binding(code, value, now):
                         continue
                     if node.role == "passthrough" and etype == EV_KEY:
                         if value == 1 and code < BTN_MISC and now - last_typing >= 0.25:
                             last_typing = now
-                            screens_sock.sendto(b"typing", HELPER)
+                            try:
+                                screens_sock.sendto(b"typing", HELPER)
+                            except OSError:
+                                pass  # helper not running (SteamVR not running)
                         to_screens(code, value)
-                        if node.grabbed and code < BTN_MISC and value in (0, 1):
-                            share_key(node, code, value)
-                            if value:
-                                node.held.add(code)
-                            else:
-                                node.held.discard(code)
-                    if (pointer and state["meta_dashboard"] and node.role == "passthrough"
-                            and etype == EV_KEY):
-                        if code in (KEY_LEFTMETA, KEY_RIGHTMETA):
-                            if value == 1:
-                                meta_down = True
-                            elif value == 0 and meta_down:
-                                meta_down = False
-                                pointer.dashboard()
-                        elif value == 1:
-                            meta_down = False  # Meta used as a modifier, not a tap
                     continue
                 if etype == EV_KEY:
                     action = buttons.get(str(code), DEFAULT_BUTTONS.get(code, "key"))
-                    if pointer and action not in ("key", "none"):
+                    if (pointer or action == "pause_toggle") and action not in ("key", "none"):
                         do_action(action, value, now)
                         continue
                     if action == "none":
@@ -1192,7 +1418,7 @@ def main():
                         mouse.emit(etype, code, value)
                 elif etype == EV_SYN and code == SYN_REPORT:
                     if pointer:
-                        pointer.flush()
+                        pointer.flush(now)
                     mouse.sync()
                     keyboard.sync()
 

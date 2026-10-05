@@ -13,7 +13,7 @@
 //     scale first ("scale <screen> <s>", from ft-layout).
 //
 // Usage: ft-screens [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]...
-//                   [--spares N] [-- COMMAND ARGS...]
+//                   [--spares N] [--rates F,V,H] [-- COMMAND ARGS...]
 //   --socket    Wayland socket name in $XDG_RUNTIME_DIR (default ft-screens-0)
 //   --control   the control socket's abstract name (default ft_screens)
 //   --no-vr     run without SteamVR, for tests next to the running desktop: no panels, no
@@ -22,6 +22,8 @@
 //   --screen    one per screen, in KWin's order (default: 3440x1440@2.4)
 //   --spares    KWin's outputs after the screens: spares for floating windows (ft-floatd
 //               turns them on and sizes them; see docs/floating-windows.md)
+//   --rates     frame rates in Hz for screens you look at, the rest you see, and hidden ones
+//               (0: every display frame; default 0,15,1; see frame_interval)
 //   COMMAND     run with WAYLAND_DISPLAY set to our socket (e.g. the Frametop session)
 // Runs in the dev container (wlroots 0.20); KWin connects from the host.
 #define _GNU_SOURCE
@@ -33,7 +35,9 @@
 #include <string.h>
 #include <stddef.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -58,8 +62,15 @@
 #include <wlr/util/log.h>
 
 #include "vr.h"
+#include "controller-click.h"
 
 #define MAX_SCREENS 24  // screens and spare outputs
+// A screen counts as playing a video while its last VIDEO_COMMITS commits each redrew at
+// least VIDEO_AREA percent of it, at VIDEO_HZ or more; for VIDEO_HOLD ms after that stops.
+#define VIDEO_COMMITS 8
+#define VIDEO_AREA 6
+#define VIDEO_HZ 10
+#define VIDEO_HOLD 1500
 
 struct config {
     int width, height;
@@ -79,6 +90,13 @@ struct screen {
     int buffer_width, buffer_height;
     struct wlr_xdg_toplevel_decoration_v1 *decoration;  // answered on the first commit
     struct wl_listener commit, destroy, decoration_destroy, set_title;
+    // Its frame rate (see tick): when its last frame callback went (ms), and what its recent
+    // commits looked like, to tell a video playing on it.
+    uint32_t frame_sent;
+    uint32_t commit_ms[VIDEO_COMMITS];
+    unsigned commit_at;
+    unsigned big;          // a bit per recent commit: it redrew at least VIDEO_AREA percent
+    uint32_t video_until;  // counts as a video until then (ms)
 };
 
 // Per client buffer: forget its import when it goes away.
@@ -103,7 +121,16 @@ struct server {
     int spares;
     struct wl_list buffers;  // tracked_buffer
     struct wl_event_source *tick;
+    int tick_fd;  // timerfd, at absolute times in step with the display's vsync (see schedule)
+    int64_t period_ns, base_ns, synced_ns;  // the display's frame time, a tick time, last sync
+    double phase_ms;                        // ticks come this long after a vsync
+    // Frame rates in Hz for each attention level (0: every display frame), and a remote
+    // viewer's lease: until then (ms) every screen gets full rate ("watch").
+    int rate[3];
+    uint32_t watch_until;
+    uint32_t typed_ms;  // the last key sent to the desktop: its screen counts as focused
     struct screen *pointer_focus;
+    struct ft_controller_click controller_click;
     pid_t child;
     // Where typing goes: the screens after a click on one, Steam after a click on another
     // panel. The input relay grabs the keyboards while it's the screens (see keys_update).
@@ -147,6 +174,25 @@ static void track_buffer(struct server *s, struct wlr_buffer *buffer) {
 
 // ---------------------------------------------------------------- screens
 
+// A video (or anything moving over a large area) on a screen you don't look at keeps the
+// full frame rate (see frame_interval): its commits keep redrawing much of it, and keep
+// coming as fast as its rate lets them. A cursor blinking or a spinner turning redraws a
+// small part, and a page changing now and then doesn't keep coming.
+static void note_damage(struct screen *sc, struct wlr_surface *surface, struct wlr_buffer *buffer) {
+    int n = 0;
+    const pixman_box32_t *r = pixman_region32_rectangles(&surface->buffer_damage, &n);
+    int64_t area = 0;
+    for (int i = 0; i < n; ++i) area += (int64_t)(r[i].x2 - r[i].x1) * (r[i].y2 - r[i].y1);
+    const bool big = area * 100 >= (int64_t)buffer->width * buffer->height * VIDEO_AREA;
+    const unsigned all = (1u << VIDEO_COMMITS) - 1;
+    sc->big = ((sc->big << 1) | big) & all;
+    const uint32_t t = now_ms();
+    const uint32_t oldest = sc->commit_ms[sc->commit_at];  // the commit VIDEO_COMMITS ago
+    sc->commit_ms[sc->commit_at] = t;
+    sc->commit_at = (sc->commit_at + 1) % VIDEO_COMMITS;
+    if (sc->big == all && t - oldest <= VIDEO_COMMITS * 1000 / VIDEO_HZ) sc->video_until = t + VIDEO_HOLD;
+}
+
 static void screen_commit(struct wl_listener *l, void *data) {
     struct screen *sc = wl_container_of(l, sc, commit);
     struct wlr_xdg_surface *xdg = sc->toplevel->base;
@@ -170,6 +216,7 @@ static void screen_commit(struct wl_listener *l, void *data) {
     if (!buffer) return;
     sc->frame_pending = true;
     ++sc->commits;
+    note_damage(sc, xdg->surface, buffer);
     sc->buffer_width = buffer->width, sc->buffer_height = buffer->height;
     if (buffer == sc->held) return;
     struct wlr_dmabuf_attributes a;
@@ -292,8 +339,27 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
         return;
     }
     if (e->screen < 0 || e->screen >= MAX_SCREENS || !s->screens[e->screen]) return;
+    struct ft_event filtered = *e;
+    if (e->screen < s->n_config &&
+        !ft_controller_click_filter(&s->controller_click, &filtered, s->scale[e->screen])) return;
+    e = &filtered;
+    if (e->screen < 0 || e->screen >= MAX_SCREENS || !s->screens[e->screen]) return;
     struct screen *sc = s->screens[e->screen];
     struct wlr_surface *surface = sc->toplevel->base->surface;
+    if (e->type == FT_FRONT) {
+        // A spin brought this panel to the front: typing goes to it, as after a click there,
+        // and ft-floatd makes its window (or the top one on a screen) KWin's active window.
+        wlr_seat_keyboard_notify_enter(s->seat, surface, NULL, 0, NULL);
+        s->keys_clicked = true;
+        char msg[32];
+        snprintf(msg, sizeof msg, "front %d", e->screen + 1);
+        struct sockaddr_un addr = {.sun_family = AF_UNIX};
+        const char name[] = "frametop_float";
+        memcpy(addr.sun_path + 1, name, sizeof name - 1);
+        sendto(s->relay_fd, msg, strlen(msg), MSG_DONTWAIT, (struct sockaddr *)&addr,
+               offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
+        return;
+    }
     const uint32_t t = now_ms();
     const double x = e->x / s->scale[e->screen], y = e->y / s->scale[e->screen];  // KWin's units
     switch (e->type) {
@@ -374,9 +440,64 @@ static void keys_update(struct server *s) {
            offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
 }
 
-// Every ~11 ms (90 Hz): SteamVR events, and frame callbacks for screens that committed.
-static int tick(void *data) {
+// How often a screen gets its frame callback (ms; 0 every tick). KWin draws a screen only
+// after its callback, and its apps wait for theirs, so this is the screen's frame rate:
+// full where you look (ft_vr_screen_attention) and for a video, lower for the rest of what
+// you see, and about once a second for what you don't (hidden, behind you, paused for a VR
+// game). A screen nothing changes on costs nothing at any rate: KWin commits only when
+// something on it moved. A remote viewer ("watch") sees every screen at full rate.
+static uint32_t frame_interval(struct server *s, struct screen *sc, uint32_t t) {
+    if ((int32_t)(s->watch_until - t) > 0) return 0;
+    enum ft_attention a = ft_vr_screen_attention(sc->index);
+    if (a == FT_IN_VIEW && (int32_t)(sc->video_until - t) > 0) a = FT_FOCUSED;
+    if (a != FT_FOCUSED && t - s->typed_ms < 1500 &&
+        s->seat->keyboard_state.focused_surface == sc->toplevel->base->surface)
+        a = FT_FOCUSED;  // typing on it while looking elsewhere
+    const int hz = s->rate[a];
+    return hz > 0 ? 1000 / hz : 0;
+}
+
+static int64_t mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+// Ticks come once per display frame, phase_ms after its vsync: KWin gets its frame callbacks
+// early in the frame and has the rest of it to draw before vrcompositor takes the panels.
+// The vsync is read from SteamVR once a second, and the ticks run at absolute times between
+// reads, so they keep their place (a timer set again after each tick, as before, slid
+// through the frame and came about 85 times a second at 90 Hz). Without SteamVR's timing
+// they still come at the display's rate (90 Hz until known). While paused, every 100 ms.
+static void schedule(struct server *s) {
+    const int64_t now = mono_ns();
+    int64_t next;
+    if (ft_vr_paused()) {
+        next = now + 100000000LL;
+    } else {
+        double since, hz;
+        if (now - s->synced_ns >= 1000000000LL) {
+            s->synced_ns = now;
+            if (ft_vr_vsync(&since, &hz)) {
+                const int64_t period = (int64_t)(1e9 / hz);
+                if (llabs(period - s->period_ns) > 100000) wlr_log(WLR_INFO, "display at %.1f Hz", hz);
+                s->period_ns = period;
+                s->base_ns = now - (int64_t)(since * 1e9) + (int64_t)(s->phase_ms * 1e6);
+                while (s->base_ns > now) s->base_ns -= s->period_ns;
+            }
+        }
+        next = s->base_ns + ((now - s->base_ns) / s->period_ns + 1) * s->period_ns;
+    }
+    struct itimerspec its = {.it_value = {.tv_sec = next / 1000000000LL, .tv_nsec = next % 1000000000LL}};
+    timerfd_settime(s->tick_fd, TFD_TIMER_ABSTIME, &its, NULL);
+}
+
+// Each tick: SteamVR events, and frame callbacks for screens that committed and are due.
+static int tick(int fd, uint32_t mask, void *data) {
     struct server *s = data;
+    uint64_t expirations;
+    const ssize_t got = read(fd, &expirations, sizeof expirations);  // clears it; how many doesn't matter
+    (void)got;
     ft_vr_poll(handle_vr_event, s);
     if (++s->ticks % 9 == 0) keys_update(s);
     if (s->kb_close_at && s->ticks >= s->kb_close_at) {
@@ -388,14 +509,17 @@ static int tick(void *data) {
     }
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint32_t t = now_ms();
+    // Due within half a tick counts as due, so 15 Hz is every 6th tick at 90 Hz, not 7th.
+    const uint32_t slack = ft_vr_paused() ? 50 : (uint32_t)(s->period_ns / 2000000);
     for (int i = 0; i < MAX_SCREENS; ++i) {
         struct screen *sc = s->screens[i];
-        if (sc && sc->frame_pending) {
-            sc->frame_pending = false;
-            wlr_surface_send_frame_done(sc->toplevel->base->surface, &now);
-        }
+        if (!sc || !sc->frame_pending || t - sc->frame_sent + slack < frame_interval(s, sc, t)) continue;
+        sc->frame_pending = false;
+        sc->frame_sent = t;
+        wlr_surface_send_frame_done(sc->toplevel->base->surface, &now);
     }
-    wl_event_source_timer_update(s->tick, 11);
+    schedule(s);
     return 0;
 }
 
@@ -420,6 +544,7 @@ static bool key_held(const struct wlr_keyboard *kb, uint32_t code) {
 // One key to the focused screen, through the seat's keyboard so its xkb state and
 // modifiers stay right.
 static void send_key(struct server *s, uint32_t code, int pressed) {
+    s->typed_ms = now_ms();
     struct wlr_keyboard_key_event ev = {
         .time_msec = now_ms(), .keycode = code, .update_state = true,
         .state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED};
@@ -514,7 +639,18 @@ static int control_readable(int fd, uint32_t mask, void *data) {
         unsigned code;
         int value, index, w, h;
         double scale;
-        if (sscanf(buf, "size %d %d %d", &index, &w, &h) == 3) {
+        char tail;
+        if (strcmp(buf, "controller-click?") == 0) {
+            snprintf(reply, sizeof reply,
+                "{\"supported\":true,\"threshold\":%.3f,\"held\":%s,\"dragging\":%s,\"suppressedMotions\":%lu,\"clicks\":%lu,\"drags\":%lu}",
+                s->controller_click.threshold, s->controller_click.held ? "true" : "false",
+                s->controller_click.dragging ? "true" : "false", s->controller_click.suppressed,
+                s->controller_click.clicks, s->controller_click.drags);
+        } else if (sscanf(buf, "controller-click %lf %c", &scale, &tail) == 1) {
+            if (!isfinite(scale) || scale < 0 || scale > 64 || s->controller_click.buttons)
+                snprintf(reply, sizeof reply, "error threshold or held controller button");
+            else { s->controller_click.threshold = scale; snprintf(reply, sizeof reply, "ok"); }
+        } else if (sscanf(buf, "size %d %d %d", &index, &w, &h) == 3) {
             // A new resolution for a screen, live: KWin resizes the screen to match. (KWin makes
             // it this size times its scale; ft-floatd sends spares' sizes divided by theirs.)
             const int min_w = index - 1 < s->n_config ? 320 : 64, min_h = index - 1 < s->n_config ? 200 : 64;
@@ -561,6 +697,38 @@ static int control_readable(int fd, uint32_t mask, void *data) {
             } else {
                 handle_vr_event(&e, s);
                 snprintf(reply, sizeof reply, "ok");
+            }
+        } else if (sscanf(buf, "watch %d", &value) == 1) {
+            // A remote viewer is watching for that many seconds (vnc-bridge.sh renews it).
+            s->watch_until = now_ms() + (uint32_t)(value < 0 ? 0 : value > 60 ? 60 : value) * 1000;
+            snprintf(reply, sizeof reply, "ok");
+        } else if (sscanf(buf, "rates %d %d %d", &index, &w, &h) == 3) {
+            // Frame rates in Hz: focused, in view, hidden (0: every display frame).
+            if (index < 0 || w < 0 || h < 0 || index > 240 || w > 240 || h > 240) {
+                snprintf(reply, sizeof reply, "error rates <focused> <in view> <hidden> (Hz, 0 full)");
+            } else {
+                s->rate[FT_FOCUSED] = index, s->rate[FT_IN_VIEW] = w, s->rate[FT_HIDDEN] = h;
+                wlr_log(WLR_INFO, "frame rates: focused %d, in view %d, hidden %d (0 full)", index, w, h);
+                snprintf(reply, sizeof reply, "ok");
+            }
+        } else if (sscanf(buf, "phase %lf", &scale) == 1) {
+            // Ticks this long after the vsync (ms), for tuning.
+            if (!(scale >= 0 && scale < 20)) snprintf(reply, sizeof reply, "error phase <ms after vsync>");
+            else s->phase_ms = scale, s->synced_ns = 0, snprintf(reply, sizeof reply, "ok");
+        } else if (strcmp(buf, "rates?") == 0) {
+            // "ok <focused> <in view> <hidden> <display Hz> <phase ms> <watched>" and a line per
+            // screen: "<screen> hidden|view|focused <ms between frames> <video 0|1>".
+            static const char *names[] = {"hidden", "view", "focused"};
+            const uint32_t t = now_ms();
+            int at = snprintf(reply, sizeof reply, "ok %d %d %d %.1f %.1f %d", s->rate[FT_FOCUSED],
+                              s->rate[FT_IN_VIEW], s->rate[FT_HIDDEN], 1e9 / s->period_ns, s->phase_ms,
+                              (int32_t)(s->watch_until - t) > 0);
+            for (int i = 0; i < MAX_SCREENS && at < (int)sizeof reply; ++i) {
+                struct screen *sc = s->screens[i];
+                if (!sc) continue;
+                at += snprintf(reply + at, sizeof reply - at, "\n%d %s %u %d", i + 1,
+                               names[ft_vr_screen_attention(i)], frame_interval(s, sc, t),
+                               (int32_t)(sc->video_until - t) > 0);
             }
         } else if (strcmp(buf, "toplevels") == 0) {
             int n = 0, at = 0;
@@ -641,8 +809,14 @@ static bool setup_dmabuf(struct server *s) {
 
 int main(int argc, char **argv) {
     struct server s = {0};
+    // About 0.9 degrees on a 3.4 m wide 3440-pixel screen 2 m away; 8 (the first default,
+    // about 0.2 degrees) needed a very still hand to click (headset test 2026-10-03).
+    s.controller_click.threshold = 32;
     for (int i = 0; i < MAX_SCREENS; ++i) s.scale[i] = 1;
     s.kb_screen = -1;
+    s.rate[FT_FOCUSED] = 0, s.rate[FT_IN_VIEW] = 15, s.rate[FT_HIDDEN] = 1;
+    s.period_ns = 1000000000LL / 90;
+    s.phase_ms = 1;
     const char *socket_name = "ft-screens-0", *control_name = "ft_screens";
     char **command = NULL;
     s.vr = true;
@@ -655,6 +829,11 @@ int main(int argc, char **argv) {
             s.spares = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-vr") == 0) {
             s.vr = false;
+        } else if (strcmp(argv[i], "--rates") == 0 && i + 1 < argc) {
+            if (sscanf(argv[++i], "%d,%d,%d", &s.rate[FT_FOCUSED], &s.rate[FT_IN_VIEW], &s.rate[FT_HIDDEN]) != 3) {
+                fprintf(stderr, "bad --rates %s (want FOCUSED,IN_VIEW,HIDDEN in Hz, 0 full)\n", argv[i]);
+                return 2;
+            }
         } else if (strcmp(argv[i], "--screen") == 0 && i + 1 < argc && s.n_config < MAX_SCREENS) {
             struct config *c = &s.config[s.n_config];
             c->metres = 0;
@@ -670,7 +849,7 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr,
                     "usage: %s [--socket NAME] [--control NAME] [--no-vr] [--screen WxH@METRES]... "
-                    "[--spares N] [-- COMMAND ARGS...]\n",
+                    "[--spares N] [--rates F,V,H] [-- COMMAND ARGS...]\n",
                     argv[0]);
             return 2;
         }
@@ -722,8 +901,10 @@ int main(int argc, char **argv) {
     s.relay_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     wl_event_loop_add_fd(s.loop, control, WL_EVENT_READABLE, control_readable, &s);
 
-    s.tick = wl_event_loop_add_timer(s.loop, tick, &s);
-    wl_event_source_timer_update(s.tick, 11);
+    s.tick_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    s.base_ns = mono_ns();
+    s.tick = wl_event_loop_add_fd(s.loop, s.tick_fd, WL_EVENT_READABLE, tick, &s);
+    schedule(&s);
     wl_event_loop_add_signal(s.loop, SIGINT, stop, &s);
     wl_event_loop_add_signal(s.loop, SIGTERM, stop, &s);
     wl_event_loop_add_signal(s.loop, SIGCHLD, child_exited, &s);
@@ -736,6 +917,18 @@ int main(int argc, char **argv) {
             perror(command[0]);
             _exit(127);
         }
+    }
+
+    // Ahead of the desktop's programs for the CPU, after the session started (it would
+    // inherit it): KWin waits for our ticks to draw. SteamOS lets users go to nice -8
+    // (RLIMIT_NICE 28) once they raise their soft limit; without that, as before.
+    if (s.vr) {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NICE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+            rl.rlim_cur = rl.rlim_max;
+            setrlimit(RLIMIT_NICE, &rl);
+        }
+        if (setpriority(PRIO_PROCESS, 0, -5) != 0) wlr_log(WLR_INFO, "can't raise our priority (nice -5); running at 0");
     }
 
     wl_display_run(s.display);

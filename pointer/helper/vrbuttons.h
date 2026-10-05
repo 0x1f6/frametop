@@ -111,6 +111,14 @@ class ControllerButtons {
         }
     }
 
+    // Whether Poll reads any button now (the main loop can't sleep long while it does).
+    bool Watching(bool inGame) const {
+        if (!ok_ || (inGame && !games_ && !capture_)) return false;
+        for (int i = 0; i < kCount; ++i)
+            if (bound_[i]) return true;
+        return false;
+    }
+
     // {"manifest":true,"global":false,"bound":[...],"active":[...]}: active = bound and
     // delivered (a controller that has the button is on, and SteamVR lets us have it).
     std::string Status() const {

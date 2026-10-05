@@ -3,6 +3,7 @@
 //
 //   ft-handreplay DIR [--oracle N] [--slow F] [--timeline FILE] [--threads N] [--models DIR]
 //             [--from S] [--to S] [--contrast MODE|PALM/HAND] (clahe[:CLIP], none, stretch)
+//             [--sides file|0|1|auto]
 //
 // --oracle N: every N-th set, also search every tile of every camera (slow), to see
 //             which hands were there to find. Compares that with what the tracker had.
@@ -27,18 +28,29 @@
 //             views, hand scale, then its 21 world landmarks (the model's own 3D pose, averaged
 //             over its views, times the scale; metres, hand-centred) and its 21 published
 //             points (head frame). For studying gestures (pinch against typing, a fist).
+// --sides file|0|1|auto: the side cameras' names as DIR/sides.json says they should be (file, the
+//             default: ft-hands writes one with every recording; hands/rec/sides.py has the rule;
+//             without one, as recorded), as recorded (0), exchanged (1), or as ft-hands' auto
+//             decides them from the recorded names (track/sides.h): exchanged from the set it decides on,
+//             the tracker's views moving with their images (Tracker::exchange). The side check runs in every mode, and the report
+//             says what it found and when: seconds into the recording, and after how long of
+//             hands (from the first set with a hand in view).
 // --depth FILE: per processed set, a line per hand for tools/depth_report.py: its views'
 //             cameras, triangulation residual, hand scale, measured and published palm, and
 //             each view's one-view palm (Tracker::single_view at the hand's scale). The
 //             header has each camera's centre and focal length.
 #include "pinch.h"
 #include "record.h"
+#include "sides.h"
 #include "tracker.h"
+
+#include <json/json.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
@@ -76,7 +88,7 @@ int main(int argc, char **argv) {
     double keep_presence = 0.5;   // landmark presence a tracked view needs to stay
     PinchParams pinch_params;
     GripParams grip_params;
-    std::string use = "mono", color_left = "color_video0", color_crop = "subtract";
+    std::string use = "mono", color_left = "color_video0", color_crop = "subtract", sides = "file";
     std::string timeline, depth, poses, models = std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1) + "../models/ncnn";
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -91,6 +103,7 @@ int main(int argc, char **argv) {
         else if (a == "--cost") cost = true;
         else if (a == "--keep-presence" && more) keep_presence = std::atof(argv[++i]);
         else if (a == "--cams" && more) use = argv[++i];
+        else if (a == "--sides" && more) sides = argv[++i];
         else if (a == "--pinch-begin" && more) pinch_params.begin_m = std::atof(argv[++i]);
         else if (a == "--pinch-end" && more) pinch_params.end_m = std::atof(argv[++i]);
         else if (a == "--pinch-triangulated") pinch_params.triangulated = true;
@@ -120,6 +133,24 @@ int main(int argc, char **argv) {
     std::vector<std::vector<uint8_t>> px;
     if (!in.next(cams, px)) return std::fprintf(stderr, "%s: no sets\n", dir.c_str()), 1;
     if (use != "mono" && use != "color" && use != "all") return std::fprintf(stderr, "--cams mono|color|all\n"), 1;
+    if (sides != "file" && sides != "0" && sides != "1" && sides != "auto")
+        return std::fprintf(stderr, "--sides file|0|1|auto\n"), 1;
+    // --sides file: from which set on the recorded names need exchanging (hands/rec/sides.py)
+    std::vector<std::pair<int, bool>> file_runs = {{0, false}};
+    if (sides == "file") {
+        std::ifstream f(dir + "/sides.json");
+        Json::Value v;
+        Json::CharReaderBuilder b;
+        std::string e;
+        if (f && Json::parseFromStream(b, f, &v, &e) && v["swapped"].isBool()) {
+            file_runs.clear();
+            for (const Json::Value &r : v["names_swapped"])
+                file_runs.push_back({r[0].asInt(), r[1].asBool() != v["swapped"].asBool()});
+            if (file_runs.empty()) file_runs = {{0, v["swapped"].asBool()}};
+            std::printf("side cameras: %s.json says swapped %s (%s)\n", (dir + "/sides").c_str(),
+                        v["swapped"].asBool() ? "true" : "false", v["decided_by"].asString().c_str());
+        }
+    }
     if (use != "mono") {
         std::vector<std::string> nodes;
         for (auto &c : cams)
@@ -136,6 +167,21 @@ int main(int argc, char **argv) {
     }
     Pool pool(threads, {2, 3, 4});
     Tracker tracker(used, nets, pool);
+    // The side cameras (see the top): names_swapped exchanges slam_left's and slam_right's names
+    // as sets are read.
+    bool names_swapped = sides == "1";
+    std::map<std::string, Camera> mono;
+    for (auto &[name, c] : used)
+        if (name.rfind("color_", 0) != 0) mono[name] = c;
+    SideCheck side_check(mono);
+    bool checking = side_check.usable();
+    int side_round = 0;
+    double first_hand_ts = -1;
+    std::string side_report;
+    auto rename = [&](const std::string &n) -> std::string {
+        if (!names_swapped) return n;
+        return n == "slam_left" ? "slam_right" : n == "slam_right" ? "slam_left" : n;
+    };
     tracker.set_keep_presence(keep_presence);
     FILE *dp = depth.empty() ? nullptr : std::fopen(depth.c_str(), "w");
     FILE *pp = poses.empty() ? nullptr : std::fopen(poses.c_str(), "w");
@@ -164,13 +210,16 @@ int main(int argc, char **argv) {
     double grip_begin_ts[2] = {0, 0};
     std::vector<double> grip_len[2];
     do {
+        if (sides == "file")
+            for (auto &[first, rename] : file_runs)
+                if (index + 1 >= first) names_swapped = rename;
         std::map<std::string, Image> images;
         // the set's time: the mono cameras' when they're used (the color ones run on another
         // clock); color frames can repeat across sets, so a set that doesn't move time on is skipped
         uint64_t t = UINT64_MAX, t_color = UINT64_MAX;
         for (size_t i = 0; i < cams.size(); ++i) {
             if (!used.count(cams[i].name)) continue;
-            images[cams[i].name] = {px[i].data(), int(cams[i].width), int(cams[i].height), int(cams[i].width)};
+            images[rename(cams[i].name)] = {px[i].data(), int(cams[i].width), int(cams[i].height), int(cams[i].width)};
             uint64_t &ti = std::string(cams[i].name).rfind("color_", 0) == 0 ? t_color : t;
             ti = std::min(ti, cams[i].capture_ns);
         }
@@ -199,6 +248,30 @@ int main(int argc, char **argv) {
             busy_ms += ms;
             busy_until = t + uint64_t(ms * slow * 1e6) + 3'000'000;   // + the ring hand-off
             const std::vector<Seen> seen = tracker.views_now();
+            if (first_hand_ts < 0 && !seen.empty()) first_hand_ts = ts;
+            std::vector<Seen> side_views = seen;
+            if (checking)
+                for (Seen &v : side_check.probe(nets, pool, images, seen, int64_t(t))) side_views.push_back(v);
+            if (checking && side_check.add(side_views, int64_t(t)) > 0 && side_check.verdict() != SideCheck::Undecided) {
+                const bool backwards = side_check.verdict() == SideCheck::Swapped;
+                char line[400];
+                std::snprintf(line, sizeof line, "side cameras: %s %s at %.1f s (%.1f s after the first hand; %s)\n",
+                              side_round ? "check" : "decision",
+                              backwards ? (sides == "auto" ? "SWAPPED, exchanged" : "SWAPPED") : "as named", ts,
+                              ts - first_hand_ts, side_check.summary().c_str());
+                side_report += line;
+                if (tl) std::fprintf(tl, "%.3f %s", ts, line);
+                if (sides != "auto") {
+                    checking = false;   // file, 0, 1: report only
+                } else if (side_round == 0 || backwards) {
+                    if (backwards) names_swapped = !names_swapped, tracker.exchange("slam_left", "slam_right");
+                    side_check.reset();
+                    side_check.min_clean = 20, side_check.min_votes = 40;
+                    checking = ++side_round < 3;
+                } else {
+                    checking = false;
+                }
+            }
             grip.update(out, seen, int64_t(t));
             pinch.update(out, seen, int64_t(t), grip.gripping());
             next_ns = t + uint64_t((std::min(tracker.interval(), pinch.engaged() || grip.engaged() ? 1 / 30.0 : 1.0) - 0.005) * 1e9);
@@ -361,6 +434,12 @@ int main(int argc, char **argv) {
         std::printf("palm jitter (off a straight line through the last two updates): measured median %.1f mm, 90%% %.1f mm; "
                     "published median %.1f mm, 90%% %.1f mm\n", jit_raw[jit_raw.size() / 2], jit_raw[jit_raw.size() * 9 / 10],
                     jit_sm[jit_sm.size() / 2], jit_sm[jit_sm.size() * 9 / 10]);
+    if (!side_check.usable())
+        std::printf("side cameras: not both in this recording\n");
+    else
+        std::printf("%sside cameras %s: %s\n", side_report.c_str(), side_report.empty() ? "undecided" : "at the end",
+                    checking || side_report.empty() ? side_check.summary().c_str()
+                                                    : names_swapped ? "exchanged from the recorded names" : "as recorded");
     if (o_sets) {
         std::printf("oracle, %d sets: a left hand findable in %d, the tracker had it in %d (%.0f%%); right %d, had %d (%.0f%%)\n",
                     o_sets, o_left, o_left_hit, 100.0 * o_left_hit / std::max(o_left, 1), o_right, o_right_hit,

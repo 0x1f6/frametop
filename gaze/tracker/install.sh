@@ -2,8 +2,9 @@
 # Install (or remove) the frame grabber our own eye tracker needs: ft-eyegrab, as the system
 # service frametop-eyegrab.service. It copies the eye-camera frames, read-only, out of
 # SteamVR's eyetracking process into /dev/shm/frametop-eyes-cams for ft-eyes, and only while
-# ft-eyes wants them. The gaze service (gaze/ft-gazed) runs ft-eyes itself, when Eye tracker
-# is Own tracker or the gaze probe uses it.
+# ft-eyes wants them. The gaze service (gaze/ft-gazed) runs ft-eyes itself, when ours is the
+# tracker in use (GAZE_TRACKER=auto, the default, picks it once this is installed) or the gaze
+# probe uses it. install.sh offers this after gaze mode.
 # Needs host sudo, for the binary (/etc/frametop/ft-eyegrab, root's) and the unit: it asks for
 # the password in the terminal, on the Frame or from a PC, or runs SUDO_ASKPASS when that's set
 # (frame_sudo in scripts/_env.sh, which also takes it from the repo's .env).

@@ -57,6 +57,7 @@ void Recorder::add(const std::vector<SetFrame> &frames) {
             return;
         }
         queue_.push_back(std::move(rec));
+        ++added_;
     }
     wake_.notify_one();
 }

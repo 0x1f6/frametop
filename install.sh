@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install everything on the Steam Frame: the build container, Frametop (multi-screen
-# desktop, input relay, universal 3D mouse, settings app), and optionally gaze mode and the
-# Bluetooth fixes. Run it on the headset in a terminal, from this repo. It's safe to re-run,
+# desktop, input relay, universal 3D mouse, settings app), and optionally gaze mode, our own
+# eye tracker for it, and the Bluetooth fixes. Run it on the headset in a terminal, from this repo. It's safe to re-run,
 # for example after `git pull`. (Hand tracking, hands/, is deferred: it isn't offered here.)
 # (It also works from a PC over SSH; see "Developing from a PC" in the README.)
 #
 # Usage: ./install.sh [--yes] [--no-bluetooth]
-#   --yes           don't ask; installs gaze mode, skips the Bluetooth fixes and the SteamVR
-#                   restart
+#   --yes           don't ask; installs gaze mode, and our eye tracker if sudo can run without
+#                   a password prompt; skips the Bluetooth fixes and the SteamVR restart
 #   --no-bluetooth  don't offer the Bluetooth fixes
 set -euo pipefail
 
@@ -19,7 +19,7 @@ for arg in "$@"; do
   case $arg in
     --yes) assume_yes=1 ;;
     --no-bluetooth) bluetooth=0 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -38,6 +38,13 @@ ask() {  # ask "question" default(y|n)
   answer=${answer:-$2}
   [[ $answer =~ ^[Yy] ]]
 }
+# Can sudo run here without a password prompt (SUDO_ASKPASS, the repo's .env, a recent sudo)?
+# See frame_sudo in scripts/_env.sh.
+sudo_quiet() {
+  { [ "$FRAME_LOCAL" = 1 ] && [ -n "${SUDO_ASKPASS:-}" ]; } && return 0
+  grep -q '^steamos_root_pwd=.' "$REPO_ROOT/.env" 2>/dev/null && return 0
+  on_frame 'sudo -n true' 2>/dev/null
+}
 
 if [ "$FRAME_LOCAL" = 1 ]; then
   echo "Installing on this Steam Frame from $FRAME_REPO"
@@ -50,7 +57,7 @@ if [ "$FRAME_LOCAL" = 0 ] || [ -n "${SSH_CONNECTION:-}" ]; then
   echo "that need SteamVR start with it if it isn't running now."
 fi
 
-step "1/9 distrobox (container tool, installed in your home folder)"
+step "1/10 distrobox (container tool, installed in your home folder)"
 if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 else
@@ -60,25 +67,25 @@ else
 cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
 
-step "2/9 build container (Fedora 44 'dev', about 1-2 GB the first time)"
+step "2/10 build container (Fedora 44 'dev', about 1-2 GB the first time)"
 "$root/setup/dev-container.sh"
 
-step "3/9 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
+step "3/10 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
 "$root/desktops.sh" relay install
 
-step "4/9 3D mouse: SteamVR driver"
+step "4/10 3D mouse: SteamVR driver"
 "$root/pointer/driver/build.sh"
 "$root/pointer/driver/install.sh" install 2>&1 | grep -v xdg-open
 
-step "5/9 3D mouse: pointer helper service"
+step "5/10 3D mouse: pointer helper service"
 "$root/pointer/helper/build.sh"
 "$root/pointer/helper/run.sh" install
 
-step "6/9 power service (turns the displays off while the headset isn't used, even on a stand)"
+step "6/10 power service (turns the displays off while the headset isn't used, even on a stand)"
 "$root/power/build.sh"
 "$root/power/run.sh" install
 
-step "7/9 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
+step "7/10 multi-screen desktop (ft-screens), Frametop Input Settings, and Frametop Display Settings"
 "$root/screens/build.sh"
 "$root/desktops.sh" install >/dev/null
 "$root/input-settings/install.sh"
@@ -87,14 +94,44 @@ step "7/9 multi-screen desktop (ft-screens), Frametop Input Settings, and Framet
 on_frame "sed -i 's/^POINTER=0/POINTER=1/' ~/.config/frametop.conf; grep -q '^POINTER=' ~/.config/frametop.conf || echo 'POINTER=1' >> ~/.config/frametop.conf"
 echo "the launcher's Desktop entry now opens the multi-screen desktop; 3D mouse on (POINTER=1 in ~/.config/frametop.conf)"
 
-step "8/9 gaze mode (optional, experimental: the pointer goes where you look)"
+step "8/10 gaze mode (optional, experimental: the pointer goes where you look)"
+gaze=0
 if ask "Install gaze mode? You turn it on and calibrate it in Frametop Input Settings, on the Gaze page." y; then
   "$root/gaze/run.sh" install
+  gaze=1
 else
   echo "skipped. Install later with: gaze/run.sh install"
 fi
 
-step "9/9 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
+# Ours is gaze mode's default once it's installed (GAZE_TRACKER=auto). Without it, gaze mode
+# uses SteamVR's eye tracker.
+step "9/10 our own eye tracker for gaze mode (recommended: more accurate than SteamVR's)"
+if [ "$gaze" = 0 ]; then
+  echo "skipped: gaze mode isn't installed. Install it later with: gaze/tracker/install.sh"
+elif [ "$assume_yes" = 1 ] && ! sudo_quiet; then
+  echo "skipped: it needs your password (sudo), and --yes doesn't ask. Install it later with: gaze/tracker/install.sh"
+elif ask "Install our own eye tracker? Gaze mode then uses it instead of SteamVR's. Its frame grabber is a small system service, so it needs your password (sudo), and it downloads about 165 MB (numpy, OpenCV)." y; then
+  if "$root/gaze/tracker/install.sh" install; then
+    # Configs made before GAZE_TRACKER=auto say steam, which keeps SteamVR's.
+    tracker=$(on_frame "sed -n 's/^GAZE_TRACKER=\([a-z]*\).*/\1/p' ~/.config/frametop.conf | tail -1")
+    if [ "$tracker" = steam ] &&
+       ask "Your settings pick SteamVR's eye tracker (GAZE_TRACKER=steam, the old default). Use ours instead?" y; then
+      on_frame "sed -i 's~^GAZE_TRACKER=steam\b.*~GAZE_TRACKER=auto          # gaze service: auto = our own eye tracker when installed, else SteamVR | own | steam~' ~/.config/frametop.conf"
+      tracker=auto
+    fi
+    if [ "$tracker" = steam ]; then
+      echo "installed; your settings keep SteamVR's eye tracker (pick Own tracker on the Gaze page to use ours)"
+    else
+      echo "gaze mode uses our eye tracker: calibrate it once, with Calibrate on the Gaze page"
+    fi
+  else
+    echo "our eye tracker didn't install, so gaze mode uses SteamVR's. Try again with: gaze/tracker/install.sh"
+  fi
+else
+  echo "skipped: gaze mode uses SteamVR's eye tracker. Install ours later with: gaze/tracker/install.sh"
+fi
+
+step "10/10 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
 if [ "$bluetooth" = 1 ] && ask "Install the Bluetooth fixes? They need your password (sudo)." n; then
   "$root/setup/bluetooth/install.sh" install
 else

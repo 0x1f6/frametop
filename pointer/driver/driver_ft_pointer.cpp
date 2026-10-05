@@ -12,7 +12,7 @@
 //   aim <yaw_deg> <pitch_deg>   absolute direction (yaw 0 = -Z, the SteamVR forward)
 //   gaze                         follow the head (origin and direction) again
 //   distance <metres>            cursor distance from the anchor (default 1.5)
-//   pose <x> <y> <z> <yaw> <pitch>  exact pose, sent every frame by the ft-pointer helper
+//   pose <x> <y> <z> <yaw> <pitch>  exact pose, from the ft-pointer helper when it changes (it holds)
 //   posq <x> <y> <z> <qw> <qx> <qy> <qz>  exact pose with a full rotation (tilting a panel while moving it)
 //   btn <name> <0|1>             name: trigger, b, x, system, joystick, a (a = claim the laser, no click)
 //   scroll <x> <y>               joystick deflection -1..1
@@ -224,12 +224,23 @@ public:
         pose.result = ok ? TrackingResult_Running_OK : TrackingResult_Uninitialized;
         pose.deviceIsConnected = snapshot.visible;
         pose_ = pose;
-        VRServerDriverHost()->TrackedDevicePoseUpdated(objectId_, pose_, sizeof(DriverPose_t));
+        // Connected, the pose goes out every frame, as SteamVR expects of a tracked device.
+        // Disconnected, once: it says the same thing every frame after.
+        if (snapshot.visible || !reportedOff_) {
+            VRServerDriverHost()->TrackedDevicePoseUpdated(objectId_, pose_, sizeof(DriverPose_t));
+            reportedOff_ = !snapshot.visible;
+        }
 
+        // Inputs only when they change (and all of them the first time).
         auto input = VRDriverInput();
-        for (int i = 0; i < kButtons; ++i) input->UpdateBooleanComponent(buttons_[i], snapshot.buttons[i], 0);
-        input->UpdateScalarComponent(scrollX_, snapshot.scrollX, 0);
-        input->UpdateScalarComponent(scrollY_, snapshot.scrollY, 0);
+        for (int i = 0; i < kButtons; ++i)
+            if (!inputsSent_ || snapshot.buttons[i] != sentButtons_[i])
+                input->UpdateBooleanComponent(buttons_[i], sentButtons_[i] = snapshot.buttons[i], 0);
+        if (!inputsSent_ || snapshot.scrollX != sentScrollX_)
+            input->UpdateScalarComponent(scrollX_, sentScrollX_ = snapshot.scrollX, 0);
+        if (!inputsSent_ || snapshot.scrollY != sentScrollY_)
+            input->UpdateScalarComponent(scrollY_, sentScrollY_ = snapshot.scrollY, 0);
+        inputsSent_ = true;
     }
 
 private:
@@ -239,6 +250,10 @@ private:
     int32_t role_ = TrackedControllerRole_RightHand;
     bool hinted_ = false;  // whether the role hint currently claims role_
     DriverPose_t pose_{};
+    bool reportedOff_ = false;  // the disconnected pose has gone out (it isn't repeated)
+    // What the input components were last set to.
+    bool inputsSent_ = false, sentButtons_[kButtons] = {};
+    float sentScrollX_ = 0.f, sentScrollY_ = 0.f;
     VRInputComponentHandle_t buttons_[kButtons] = {};
     VRInputComponentHandle_t scrollX_ = 0, scrollY_ = 0;
 };
@@ -293,65 +308,102 @@ private:
         }
     }
 
+    // Parsed first, then applied under the lock, which RunFrame (vrserver's frame) takes too.
     void Handle(const char *cmd) {
-        std::lock_guard<std::mutex> guard(state_.lock);
+        enum { kNone, kPosq, kPose, kMove, kRecenter, kAim, kGaze, kHide, kShow, kRole, kBtn, kDistance, kScroll };
+        int kind = kNone;
         char name[32];
-        float a, b;
-        int v;
-        float x, y, z, qw, qx, qy, qz;
-        if (std::sscanf(cmd, "posq %f %f %f %f %f %f %f", &x, &y, &z, &qw, &qx, &qy, &qz) == 7) {
+        float f[7];
+        int v = 0, role = 0, button = -1;
+        if (std::sscanf(cmd, "posq %f %f %f %f %f %f %f", &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6]) == 7) {
+            kind = kPosq;
+        } else if (std::sscanf(cmd, "pose %f %f %f %f %f", &f[0], &f[1], &f[2], &f[3], &f[4]) == 5) {
+            kind = kPose;
+        } else if (std::sscanf(cmd, "move %f %f", &f[0], &f[1]) == 2) {
+            kind = kMove;
+        } else if (std::strncmp(cmd, "recenter", 8) == 0) {
+            kind = kRecenter;
+        } else if (std::sscanf(cmd, "aim %f %f", &f[0], &f[1]) == 2) {
+            kind = kAim;
+        } else if (std::strncmp(cmd, "gaze", 4) == 0) {
+            kind = kGaze;
+        } else if (std::strncmp(cmd, "hide", 4) == 0) {
+            kind = kHide;
+        } else if (std::strncmp(cmd, "show", 4) == 0) {
+            kind = kShow;
+        } else if (std::sscanf(cmd, "role %31s", name) == 1) {
+            role = !std::strcmp(name, "left")     ? TrackedControllerRole_LeftHand
+                   : !std::strcmp(name, "right")  ? TrackedControllerRole_RightHand
+                   : !std::strcmp(name, "stylus") ? TrackedControllerRole_Stylus
+                                                  : 0;
+            if (role) kind = kRole;
+        } else if (std::sscanf(cmd, "btn %31s %d", name, &v) == 2) {
+            for (int i = 0; i < kButtons; ++i)
+                if (std::strcmp(name, kButtonNames[i]) == 0) button = i;
+            if (button >= 0) kind = kBtn;
+        } else if (std::sscanf(cmd, "distance %f", &f[0]) == 1) {
+            kind = kDistance;
+        } else if (std::sscanf(cmd, "scroll %f %f", &f[0], &f[1]) == 2) {
+            kind = kScroll;
+        }
+        if (kind == kNone) return;
+
+        std::lock_guard<std::mutex> guard(state_.lock);
+        switch (kind) {
+        case kPosq:
             state_.explicitPose = true;
             state_.hasQuat = true;
             state_.gaze = false;
-            state_.pos[0] = x;
-            state_.pos[1] = y;
-            state_.pos[2] = z;
-            state_.quat[0] = qw;
-            state_.quat[1] = qx;
-            state_.quat[2] = qy;
-            state_.quat[3] = qz;
-        } else if (std::sscanf(cmd, "pose %f %f %f %f %f", &x, &y, &z, &a, &b) == 5) {
+            std::memcpy(state_.pos, f, sizeof state_.pos);
+            std::memcpy(state_.quat, f + 3, sizeof state_.quat);
+            break;
+        case kPose:
             state_.explicitPose = true;
             state_.hasQuat = false;
             state_.gaze = false;
-            state_.pos[0] = x;
-            state_.pos[1] = y;
-            state_.pos[2] = z;
-            state_.yaw = a;
-            state_.pitch = b;
-        } else if (std::sscanf(cmd, "move %f %f", &a, &b) == 2) {
+            std::memcpy(state_.pos, f, sizeof state_.pos);
+            state_.yaw = f[3];
+            state_.pitch = f[4];
+            break;
+        case kMove:
             state_.explicitPose = false;
             if (state_.gaze) state_.recenter = true;  // first move starts from the gaze
-            state_.yaw += a;  // wrap by hand: libm remainder() is GLIBC_2.43 in the build container
+            state_.yaw += f[0];  // wrap by hand: libm remainder() is GLIBC_2.43 in the build container
             while (state_.yaw > 180.f) state_.yaw -= 360.f;
             while (state_.yaw < -180.f) state_.yaw += 360.f;
-            state_.pitch = std::fmax(-85.f, std::fmin(85.f, state_.pitch + b));
-        } else if (std::strncmp(cmd, "recenter", 8) == 0) {
+            state_.pitch = std::fmax(-85.f, std::fmin(85.f, state_.pitch + f[1]));
+            break;
+        case kRecenter:
             state_.explicitPose = false;
             state_.recenter = true;
-        } else if (std::sscanf(cmd, "aim %f %f", &a, &b) == 2) {
+            break;
+        case kAim:
             state_.gaze = false;
-            state_.yaw = a;
-            state_.pitch = b;
-        } else if (std::strncmp(cmd, "gaze", 4) == 0) {
+            state_.yaw = f[0];
+            state_.pitch = f[1];
+            break;
+        case kGaze:
             state_.gaze = true;
-        } else if (std::strncmp(cmd, "hide", 4) == 0) {
+            break;
+        case kHide:
             state_.visible = false;
-        } else if (std::strncmp(cmd, "show", 4) == 0) {
+            break;
+        case kShow:
             state_.visible = true;
-        } else if (std::sscanf(cmd, "role %31s", name) == 1) {
-            state_.role = !std::strcmp(name, "left")     ? TrackedControllerRole_LeftHand
-                          : !std::strcmp(name, "right")  ? TrackedControllerRole_RightHand
-                          : !std::strcmp(name, "stylus") ? TrackedControllerRole_Stylus
-                                                         : state_.role;
-        } else if (std::sscanf(cmd, "btn %31s %d", name, &v) == 2) {
-            for (int i = 0; i < kButtons; ++i)
-                if (std::strcmp(name, kButtonNames[i]) == 0) state_.buttons[i] = v != 0;
-        } else if (std::sscanf(cmd, "distance %f", &a) == 1) {
-            state_.distance = std::fmax(0.3f, std::fmin(10.f, a));
-        } else if (std::sscanf(cmd, "scroll %f %f", &a, &b) == 2) {
-            state_.scrollX = a;
-            state_.scrollY = b;
+            break;
+        case kRole:
+            state_.role = role;
+            break;
+        case kBtn:
+            state_.buttons[button] = v != 0;
+            break;
+        case kDistance:
+            state_.distance = std::fmax(0.3f, std::fmin(10.f, f[0]));
+            break;
+        case kScroll:
+            state_.scrollX = f[0];
+            state_.scrollY = f[1];
+            break;
         }
     }
 
