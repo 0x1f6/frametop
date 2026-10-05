@@ -12,9 +12,10 @@ dropped, was lost until the config was deleted.
 The session runs this before Plasma starts, so nothing races Plasma for the file. Each
 panel numbered at or past the screen count moves to screen 0, with its system tray's
 containment, and keeps its widgets and settings. A panel is left where it is when screen
-0 already has a panel on that edge: it comes back by itself if the screens do. The file
-is backed up before the first repair (<file>.ft-bak, and only then: a later repair never
-overwrites that original), and the changes go through kwriteconfig6.
+0 already has a panel on that edge: it comes back by itself if the screens do. Before
+each repair the file is backed up to <file>.ft-bak.last, and <file>.ft-bak keeps it as it
+was before the first repair (a later repair never overwrites that one). The changes go
+through kwriteconfig6.
 
   fix-panels.py [--screens N] [--file APPLETSRC] [--check]
     --screens  the desktop's screen count (default: the configured layout's)
@@ -144,11 +145,16 @@ def main(argv):
         print(f"{screens} screen(s)")
         return 1 if moves or kept else 0
 
-    if moves and not os.path.exists(path + ".ft-bak"):
-        # The backup holds the config as it was before the first repair, so a later run
-        # can't overwrite it with an already-repaired state.
+    bak = path + ".ft-bak"
+    if moves:
         try:
-            backup(path, path + ".ft-bak")
+            if not os.path.exists(bak):
+                # The config as it was before the first repair: a later run never overwrites
+                # it with an already-repaired state.
+                backup(path, bak)
+            # The config as it was just before this repair, so this one can be undone too,
+            # keeping what changed since the first (a moved panel's old screen is only here).
+            backup(path, bak + ".last")
         except OSError as e:
             # No repair without a backup; the next start tries again.
             print(f"frametop: couldn't back up {path} ({e}); left the panels as they are", file=sys.stderr)
@@ -158,7 +164,8 @@ def main(argv):
             subprocess.run(["kwriteconfig6", "--file", os.path.abspath(path), "--group", "Containments",
                             "--group", cid, "--key", "lastScreen", "0"], check=True)
         print(f"frametop: panel {pid} was saved on screen {was}, which this desktop doesn't have "
-              f"({screens} screen(s)); moved it to the first screen (backup: {path}.ft-bak)", file=sys.stderr)
+              f"({screens} screen(s)); moved it to the first screen (backups: {bak}.last from before this "
+              f"repair, {bak} from before the first)", file=sys.stderr)
     for pid, was, why in kept:
         print(f"frametop: panel {pid} is saved on screen {was}, which this desktop doesn't have; "
               f"left there: {why}", file=sys.stderr)
