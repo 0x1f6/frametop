@@ -894,7 +894,11 @@ class Checks:
             self.back_since = None  # gone again before DON_DELAY
         elif self.back_since is not None and now - self.back_since >= DON_DELAY:
             self.away, self.back_since = False, None
-            self.full_armed = True  # a calibration that closed unfinished opens again
+            if not self.check:
+                # A calibration that closed unfinished opens again. Not one still open: gaze mode
+                # coming on wakes our tracker, so its eyes come back just as the calibration
+                # opens, and re-arming then opened a second one when the first ended.
+                self.full_armed = True
             self.auto_quick("the headset went on")
         if svc.kind == "own" and now - svc.own_at < 5:
             reseat = any(e.get("reseat") for e in (svc.own.get("eyes") or {}).values())
