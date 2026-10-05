@@ -26,7 +26,8 @@ for u in frametop-input-relay frametop-pointer frametop-power; do
 done
 echo "desktop: $(pgrep -x ft-screens >/dev/null && echo running || echo 'not running'), plasmashell: $(pgrep -c plasmashell || true)"
 echo "paused for VR games: $(cat /run/user/$(id -u)/frametop-pause.json 2>/dev/null || echo 'no (never paused since boot)')"
-LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrpathreg show 2>/dev/null | sed -n '/xternal/,$p'
+# SteamVR's config folder: a terminal in the desktop has the session's own (docs/design.md).
+XDG_CONFIG_HOME=$HOME/.config LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 /opt/steamvr/bin/linuxarm64/vrpathreg show 2>/dev/null | sed -n '/xternal/,$p'
 
 section "What Frametop needs from SteamOS (scripts/update-check.py)"
 python3 "$repo/scripts/update-check.py" 2>&1 || true
