@@ -6,7 +6,7 @@ title: Install the Frametop Hand Recorder
 
 The Hand Recorder records your hands with the Steam Frame's tracking cameras for Frametop's open hand dataset ([DeeJanuz/frametop-hands](https://huggingface.co/datasets/DeeJanuz/frametop-hands) on Hugging Face). These are the Konsole commands to install it.
 
-> **Fixed (October 5, 2026):** the recorder now works on headsets without the Arcturus color passthrough module too. If you installed it earlier and the camera check stopped with "Not all of the headset's tracking cameras are running (ft-camd publishes only 2 of 4 mono cameras ...)", run the commands under [Update](#update).
+> **Fixed in Frametop 0.2.1 (October 5, 2026):** the recorder now works on headsets without the Arcturus color passthrough module too. If you installed it earlier and the camera check stopped with "Not all of the headset's tracking cameras are running (ft-camd publishes only 2 of 4 mono cameras ...)", run the commands under [Update](#update).
 
 Join the [Frametop Discord](https://discord.gg/W3X9f7z3Bc) for questions and help with recording.
 
