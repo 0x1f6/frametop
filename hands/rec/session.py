@@ -1575,6 +1575,9 @@ class Session:
         self._save_session()
         self._log("side cameras: %s (%s, %s)" % ("SWAPPED" if swapped else "as named", new["decided_by"],
                                                   json.dumps(new["evidence"])))
+        if new["state"] == "forced, disagrees":
+            self._log("side cameras: HANDS_SWAP_SIDES in ~/.config/frametop.conf forces names the hands say are "
+                      "backwards; the recording goes by the hands. Set HANDS_SWAP_SIDES=auto.")
 
     def _sides_swapped(self):
         """session.json's decision: True, False, or None (not known yet)."""

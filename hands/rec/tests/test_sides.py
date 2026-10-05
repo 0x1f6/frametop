@@ -91,6 +91,29 @@ class RulesTest(unittest.TestCase):
         finally:
             shutil.rmtree(d)
 
+    def test_read_live_forced(self):
+        """HANDS_SWAP_SIDES=0 forced and the hands disagree: the hands are the truth, whether
+        ft-hands published them (built after 2026-10-06) or kept the forced value (before)."""
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "sides.json")
+
+            def live(**kw):
+                s = dict(pid=1, ring_ino=0, mode="0", names_swapped=False,
+                         updated_ns=time.clock_gettime_ns(time.CLOCK_MONOTONIC), **kw)
+                with open(path, "w") as f:
+                    json.dump(s, f)
+                return sides.read_live(path)
+
+            self.assertEqual(live(state="forced", swapped=False, decided_by="config")["swapped"], False)
+            self.assertEqual(live(state="forced, agrees", swapped=False, decided_by="config")["swapped"], False)
+            old = live(state="forced, disagrees", swapped=False, decided_by="config")
+            self.assertEqual((old["swapped"], old["decided_by"]), (True, "auto"))
+            new = live(state="forced, disagrees", swapped=True, decided_by="auto")
+            self.assertEqual((new["swapped"], new["decided_by"]), (True, "auto"))
+        finally:
+            shutil.rmtree(d)
+
 
 class TakesTest(unittest.TestCase):
     """A swapped session: one take's parts recorded before the decision (ft-camd's names) and
@@ -225,6 +248,22 @@ class SessionSidesTest(unittest.TestCase):
         self.assertFalse(s._sides_swapped())
         self.assertTrue(s._session_json["sides"]["reversed_from"]["swapped"])
         self.assertFalse(takes.read_json(os.path.join(self.tmp, "session.json"))["sides"]["swapped"])
+
+    def test_read_sides_forced(self):
+        """PR #4 on the dataset: HANDS_SWAP_SIDES=0 from the old example config, and the hands
+        disagree. The session takes the hands' answer, not the forced one."""
+        s = session.Session(os.path.join(self.tmp, "base"), {}, {}, "room", self.script, dry_run=True,
+                            hands_dir=self.tmp)
+        s.session_dir = self.tmp
+        s._session_json = {"sides": {"swapped": None}}
+        self.live(mode="0", state="forced", swapped=False, decided_by="config", names_swapped=False, evidence=None)
+        s._read_sides(force=True)
+        self.assertIs(s._sides_swapped(), False)
+        self.live(mode="0", state="forced, disagrees", swapped=False, decided_by="config", names_swapped=False)
+        s._read_sides(force=True)
+        self.assertIs(s._sides_swapped(), True)
+        self.assertEqual(s._session_json["sides"]["decided_by"], "auto")
+        self.assertEqual(s._session_json["sides"]["reversed_from"]["decided_by"], "config")
 
     def test_recorder_parts(self):
         calls = []

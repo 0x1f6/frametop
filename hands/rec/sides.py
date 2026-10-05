@@ -125,4 +125,9 @@ def read_live(path=None, ring_path=None, now_ns=None):
                 return None
         except OSError:
             return None
+    if (s.get("state") == "forced, disagrees" and s.get("swapped") is not None
+            and bool(s["swapped"]) == bool(s.get("names_swapped"))):
+        # An ft-hands built before 2026-10-06 kept a forced HANDS_SWAP_SIDES as the truth even
+        # when the hands disagreed. The hands are right: the truth is the other way round.
+        s = dict(s, swapped=not s["swapped"], decided_by="auto")
     return s
