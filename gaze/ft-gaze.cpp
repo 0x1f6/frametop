@@ -631,7 +631,9 @@ int main(int argc, char **argv) {
             if ((haveMmap = eyes.Open())) std::fprintf(stderr, "ft-gaze: eye-server.mmap open\n");
         }
 
-        // One line per new eye sample, or at 90 Hz without the mmap.
+        // One line per new eye sample, or at 90 Hz without a usable mmap: none, or one whose
+        // layout isn't known (yet). Our own tracker needs nothing from the mmap, so it keeps
+        // going then; the mmap's sources print as {"ok":0} and "eye" as null.
         EyeSample s;
         bool fresh = false;
         // Retry the layout when the eye server writes but we have no known layout, or
@@ -656,10 +658,11 @@ int main(int argc, char **argv) {
                              "ft-gaze: eye-server.mmap has eye data, but its layout is not recognized — eye tracking unavailable\n");
             }
         }
-        if (haveMmap && eyes.known && ReadSample(eyes, s) && s.n != lastN) {
+        const bool mmapOk = haveMmap && eyes.known;
+        if (mmapOk && ReadSample(eyes, s) && s.n != lastN) {
             fresh = true, lastN = s.n, lastNewSample = now;
         }
-        if (!haveMmap && now - lastEmit >= 1.0 / 90) fresh = true, s.t = now;
+        if (!mmapOk && now - lastEmit >= 1.0 / 90) fresh = true, s.t = now;
 
         if (fresh && hp.bPoseIsValid) {
             lastEmit = now;
@@ -667,7 +670,7 @@ int main(int argc, char **argv) {
             const auto list = screens.Get();
             const vr::HmdMatrix34_t &headNow = hp.mDeviceToAbsoluteTracking;
             vr::HmdMatrix34_t headThen = headNow;
-            if (haveMmap) history.At(s.t, headThen);
+            if (mmapOk) history.At(s.t, headThen);
 
             // SteamVR's action: a room-space origin and fixation point, turned into the head
             // frame so every source reports the same kind of angles.
@@ -695,7 +698,8 @@ int main(int argc, char **argv) {
             }
 
             std::string m1 = "{\"ok\":0}", m2 = m1, left = m1, right = m1, eye = "null";
-            if (haveMmap) {
+            // Only from a known layout: the unread sample's zeros would print an "unc" of 0 (eyes seen).
+            if (mmapOk) {
                 // lr: the angle between the two eyes' directions. It's a fraction of a degree
                 // normally; when the tracker loses one eye (or during a blink) it jumps.
                 auto lr = [](Vec3 l, Vec3 r) {
