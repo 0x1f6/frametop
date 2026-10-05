@@ -18,6 +18,8 @@ desktops.sh start | stop | restart | status | log [lines]
 
 When the VR launcher starts the desktop, it inherits the Steam client's environment. The session script drops the client's runtime from it (`LD_LIBRARY_PATH`, the `STEAM_*` settings, and the Steam overlay's Vulkan layer), so apps in the desktop use the system's libraries, including its video codecs, just as they would after a normal login.
 
+The nested session also starts an AT-SPI accessibility registry through `session/ft-atspi` in Plasma's autostart. It discovers the bus from this session, ignores an inherited host accessibility address, and leaves an existing registry alone. Accessibility errors do not stop the desktop. This supplies the registry infrastructure for apps that expose AT-SPI trees; it does not enable gaze snapping or force Chromium/Electron accessibility. After an approved desktop restart, an AT-SPI-aware app should be visible on the nested bus. See [design.md](design.md#nested-accessibility) for native activation, fallback lifecycle, and the isolated test command.
+
 KWin's blur and background contrast effects and its animations are off in this desktop, because KWin draws on the headset's GPU, which SteamVR needs. The session script turns them off once, the first time it starts (it leaves a setting you already have alone, and marks it done in `~/.config/frametop/frametoprc`), so turning them back on sticks. In the Frametop desktop, System Settings → Window Management → Desktop Effects has Blur and Background Contrast, and General Behavior has Animation speed. Or from a terminal, then restart the desktop:
 
 ```
