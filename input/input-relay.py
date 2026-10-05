@@ -498,6 +498,9 @@ class Pointer:
         self.pending = 0
         self.pending_since = 0.0
         self.gaze_awake_until = 0.0  # the helper's gaze mode keeps the pointer until then
+        # Driver buttons this pointer pressed and hasn't released (trigger, b, x, joystick):
+        # pausing drops releases, so stand_down has to send them itself.
+        self.driver_down = set()
 
     def send(self, command, droppable=False):
         """To the helper, in order, without blocking. While the helper doesn't keep up (place and
@@ -607,6 +610,10 @@ class Pointer:
             self.wake(now)
             self.flush()
             self.send(f"btn {driver} {value}")
+            if value == 1:
+                self.driver_down.add(driver)
+            else:
+                self.driver_down.discard(driver)
         elif value != 1:
             return  # the rest act on press
         elif name in ("scroll_up", "scroll_down"):
@@ -707,6 +714,9 @@ class Pointer:
 
     def stand_down(self):
         """Frametop is pausing: a pulse under way ends now, and the pointer lets go."""
+        for driver in sorted(self.driver_down):  # pausing drops releases; a button a gaze
+            self.send(f"btn {driver} 0")         # drag held into the pause stays down otherwise
+        self.driver_down.clear()
         if self.system_release is not None:
             self.send("btn system 0")
         if self.claim_release is not None:
