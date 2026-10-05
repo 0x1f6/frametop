@@ -85,12 +85,13 @@ In a game, Frametop's panels work like SteamVR's own floating windows: point a c
 
 ### The KWin script
 
-The KWin side is a script (`float/frametop-float.js`), not a C++ effect, because a script keeps working across KWin updates and an effect would have to match the host's exact KWin build. KWin scripts can call D-Bus but can't serve it, so ft-floatd's commands come back through a long poll: the script calls `NextCommand`, which answers when a command is ready, or empty after 20 seconds, under KWin's 25-second D-Bus timeout. A few things about KWin's script engine:
+The KWin side is a script (`float/frametop-float.js`), not a C++ effect, because a script keeps working across KWin updates and an effect would have to match the host's exact KWin build. KWin scripts can call D-Bus but can't serve it, so ft-floatd's commands come back through a long poll: the script calls `NextCommand`, which answers when a command is ready, or empty after 20 seconds, under KWin's 25-second D-Bus timeout. If no reply comes within 30 seconds, a watchdog calls again, and waits twice as long each time until a reply comes (up to 5 minutes). The 30 seconds have to stay above KWin's timeout, or a late reply would start a second poll. A few things about KWin's script engine:
 
 - `windowAdded` reports popups as windows of their own (`popupWindow` true, `transient` true) with their geometry.
 - Setting `frameGeometry` applies asynchronously: the app has to answer the new size first.
 - A script can't read a window's maximize mode, so the script counts a window as maximized when it fills its output's maximize area.
 - `globalThis` isn't defined. `print` goes to the journal unless `QT_FORCE_STDERR_LOGGING=1`.
+- `callDBus` never calls back when a call fails (an error reply, the name gone from the bus, or the 25-second timeout). KWin only logs `Received D-Bus message is error`, so a script that waits for the callback waits forever.
 
 The title bar's float button is Frametop's own window decoration (`decoration/`), written in QML for KWin's Aurorae engine, which loads it without compiling. A C++ fork of Breeze would have to match SteamOS's exact KDecoration build. A decoration can only make the window requests KWin offers it, so the button toggles keep-below, which has no visible effect on a window alone on its own output, and the script treats keep-below as the floating flag.
 
