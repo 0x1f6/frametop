@@ -35,6 +35,9 @@ KNOWN_GOOD = os.path.join(HOME, ".local/state/frametop/known-good.json")
 STEAMVR_BIN = "/opt/steamvr/bin/linuxarm64"
 LAUNCHER = os.path.join(HOME, ".local/share/applications/deckard-nested-desktop.desktop")
 VRPATHS = os.path.join(HOME, ".config/openvr/openvrpaths.vrpath")
+# The Frametop desktop has its own XDG_CONFIG_HOME (session/frametop-session.sh). An install from a
+# terminal there, before pointer/driver/install.sh set SteamVR's, left vrpathreg's registry here.
+STRAY_VRPATHS = os.path.join(HOME, ".config/frametop/openvr/openvrpaths.vrpath")
 BACKLIGHT = "/sys/class/backlight/ae94000.dsi.0/brightness"  # as in power/ft-powerd.cpp
 EYE_MMAP = "/dev/shm/eye-server.mmap"
 VRSERVER = "http://127.0.0.1:27062"  # its web socket: input/vrws.py
@@ -49,6 +52,8 @@ PACKAGES = {
             "after a desktop restart; floating a window; no blur behind the taskbar's menus",
     "plasma-workspace": "the taskbar and panels after a desktop restart; no DiscoverNotifier or "
                         "ibus-daemon inside the desktop",
+    "at-spi2-core": "an AT-SPI-aware app appears on the nested desktop's accessibility bus; "
+                    "the registry stops and comes back after a desktop restart",
     "gamescope": "the headset's volume buttons with nothing focused; typing goes where you last clicked",
     "bluez": "a Bluetooth mouse reconnecting after it sleeps",
 }
@@ -162,6 +167,14 @@ def check_host():
         ("/usr/bin/kwin_wayland_wrapper", "FAIL", "the desktop can't start KWin"),
         ("/usr/bin/startplasma-wayland", "FAIL", "the desktop can't start Plasma"),
         ("/usr/bin/dbus-run-session", "FAIL", "the desktop can't start its session bus"),
+        ("/usr/bin/python3", "warn", "nested accessibility can't run its startup helper"),
+        ("/usr/bin/gdbus", "warn", "nested accessibility can't discover or check its bus"),
+        ("/usr/lib/at-spi-bus-launcher", "warn", "nested accessibility can't start its bus"),
+        ("/usr/lib/at-spi2-registryd", "warn", "nested accessibility has no fallback registry"),
+        ("/usr/share/dbus-1/services/org.a11y.Bus.service", "warn",
+         "nested accessibility can't activate its bus"),
+        ("/usr/share/dbus-1/accessibility-services/org.a11y.atspi.Registry.service", "warn",
+         "nested accessibility can't activate its registry natively"),
         (f"{STEAMVR_BIN}/vrcmd", "FAIL", "the 3D mouse can't find panels"),
         (f"{STEAMVR_BIN}/vrpathreg", "warn", "the pointer driver can't be installed or removed"),
         ("/usr/share/deckard/mesavars.sh", "warn", "the desktop starts without SteamOS's Mesa settings"),
@@ -217,6 +230,14 @@ def check_host():
     else:
         report("FAIL", "pointer driver", "not registered with SteamVR; run pointer/driver/install.sh install, "
                "then restart SteamVR")
+    try:
+        with open(STRAY_VRPATHS) as f:
+            stray = json.load(f).get("runtime") is None
+    except (OSError, ValueError, AttributeError):
+        stray = False
+    if stray:
+        report("warn", "OpenVR path registry", f"{STRAY_VRPATHS} has no SteamVR in it, and hides SteamVR from "
+               "OpenVR programs started in the Frametop desktop; pointer/driver/install.sh install removes it")
 
     session = launcher_session()
     if session is None:
@@ -464,6 +485,8 @@ def main():
     # A terminal in the desktop has its session's runtime dir and bus; systemctl needs the real ones.
     os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{UID}"
     os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{UID}/bus"
+    # And its own config folder, where SteamVR's path registry isn't: OpenVR and vrcmd need ours.
+    os.environ["XDG_CONFIG_HOME"] = os.path.join(HOME, ".config")
 
     versions = current_versions()
     check_versions(versions)

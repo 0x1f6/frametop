@@ -75,7 +75,7 @@ step "3/10 input relay (keeps Bluetooth mice working in SteamVR, device roles, b
 
 step "4/10 3D mouse: SteamVR driver"
 "$root/pointer/driver/build.sh"
-"$root/pointer/driver/install.sh" install 2>&1 | grep -v xdg-open
+"$root/pointer/driver/install.sh" install
 
 step "5/10 3D mouse: pointer helper service"
 "$root/pointer/helper/build.sh"
