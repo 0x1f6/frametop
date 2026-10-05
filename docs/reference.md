@@ -223,7 +223,7 @@ Paused, Frametop leaves the headset's CPU and GPU to a VR game. The input relay 
 - The gaze service stops (`frametop-gaze`: ft-gazed, ft-gaze, our own eye tracker, the gaze panel), so nothing reads SteamVR's eye tracking. Our frame grabber, the root service `ft-eyegrab`, goes idle by itself 3 seconds after our eye tracker stops asking it for frames.
 - Hand tracking stops if it runs (`frametop-camd`, `frametop-hands`).
 - The desktop, as the Game optimization page of Frametop Input Settings says (`pause_desktop`): hidden (the default) or closed. Hidden, ft-screens hides every screen and floating window whatever the visibility mode, the hotkey, or the dashboard says, and gives KWin a frame callback once a second instead of every display frame. KWin draws a screen only after its frame callback, and its apps wait for theirs, so the desktop hardly draws, but its windows stay open. Remote desktop stops if it runs (`session/remote-ctl.sh`). Closed, `desktops.sh stop` closes the desktop and its windows, and resuming starts it again (about 12 seconds), in its start profile if it has one.
-- The relay lets go of the 3D mouse and feeds pointer devices to its virtual mouse and keyboard, as with `POINTER=0`. Typing goes to Steam. Mapped buttons and key combinations do nothing but pausing, the Steam menu, and commands; a key combination that does nothing is typed as usual.
+- The relay lets go of the 3D mouse, releasing any click still held on it (a mouse button, a mapped controller button, or a key combination), and feeds pointer devices to its virtual mouse and keyboard, as with `POINTER=0`. Typing goes to Steam. Mapped buttons and key combinations do nothing but pausing, the Steam menu, and commands; a key combination that does nothing is typed as usual.
 
 Resuming starts again only what pausing stopped, and plays a second sound. The pointer helper and ft-powerd keep running: they cost little, the helper is what says a game started, and stopping it would leave its virtual controller connected with its last pose.
 
@@ -239,6 +239,7 @@ input/ft-pause on | off | toggle   # pause or resume
 input/ft-pause status              # the state as JSON (the relay's "pause ?")
 input/vrws.py 10                   # the controllers' buttons from vrserver's web socket, for 10 s
 input/test/pause-test.py           # the gesture and the automatic pause, offline
+input/test/pause-buttons-test.py   # a click held into a pause comes up, offline
 ```
 
 The state outlives a relay restart, in `/run/user/UID/frametop-pause.json`. A SteamVR restart while paused starts the gaze service with it, and the relay stops it again when the pointer helper comes back.

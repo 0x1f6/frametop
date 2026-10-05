@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Offline test of the relay's pointer standing down when Frametop pauses: a driver button
-(a gaze drag, a gazekey click) that was still down when the pause started is released by
-stand_down, instead of staying down until resume. The pointer's socket is a recorder, so
-nothing reaches the helper, SteamVR, or the running relay.
+"""Offline test of the relay's pointer standing down when Frametop pauses: a click still held
+when the pause starts (a mouse button, a mapped controller button, or a key combination mapped
+to left, right, middle or back) is released by stand_down, and "hide" follows the release, even
+when the pointer was off already. Gaze holds (gazekey, gazedrag, precision) are the helper's
+to end, so stand_down sends nothing for them. The pointer's socket is a recorder, so nothing
+reaches the helper, SteamVR, or the running relay.
 
   input/test/pause-buttons-test.py [RELAY]
 """
@@ -47,41 +49,88 @@ def pointer():
     return p
 
 
+def since(p, mark):
+    """What the pointer sent the helper after mark (a length of p.sock.sent)."""
+    return p.sock.sent[mark:]
+
+
 # ---------------------------------------------------------------- the fix
 p = pointer()
-now = 10.0
-p.action("left", 1, now)  # a gaze drag: btn trigger 1, held
+p.action("left", 1, 10.0)  # a mouse click (or drag) held: btn trigger 1
 check("press reaches the helper", p.sock.sent, ["show", "recenter", "btn trigger 1"])
-check("the pointer knows the button is down", p.driver_down, {"trigger"})
-
+mark = len(p.sock.sent)
 p.stand_down()  # Frametop pauses while it's held
-check("stand_down releases the held button",
-      [s for s in p.sock.sent if s.startswith("btn")], ["btn trigger 1", "btn trigger 0"])
-check("nothing stays marked down", p.driver_down, set())
+check("stand_down releases the held button, then hides", since(p, mark), ["btn trigger 0", "hide"])
 
 # The release that pausing drops later is already covered: the button is no longer down,
-# so a stray release during the pause sends nothing extra.
-sent = len(p.sock.sent)
+# so a stray second stand_down sends nothing.
+mark = len(p.sock.sent)
 p.stand_down()
-check("a second stand_down sends nothing more", len(p.sock.sent), sent)
+check("a second stand_down sends nothing more", since(p, mark), [])
+
+# Two buttons down at once: a left drag tilted with the right button
+p = pointer()
+p.action("left", 1, 10.0)
+p.action("right", 1, 10.5)
+mark = len(p.sock.sent)
+p.stand_down()
+check("both held buttons are released, then it hides", since(p, mark), ["btn b 0", "btn trigger 0", "hide"])
+
+# A mapped controller button and a key combination take the same path as the mouse.
+p = pointer()
+p.action("middle", 1, 10.0, "right")  # a controller button mapped to middle
+p.action("back", 1, 10.1, "keyboard")  # a key combination mapped to back
+mark = len(p.sock.sent)
+p.stand_down()
+check("controller and key combination clicks are released too", since(p, mark),
+      ["btn joystick 0", "btn x 0", "hide"])
+
+# ---------------------------------------------------------------- the pointer already off
+# A release with no "hide" after it would wake a helper that wakes on any btn, connecting the
+# virtual controller during the game.
+p = pointer()
+p.idle = 30.0
+p.action("left", 1, 10.0)
+for t in (10.3, 10.4, 41.0):  # the claim pulse, then 30 s with no mouse input
+    p.tick(t)
+check("held 30 s with no mouse input: the pointer goes off", (p.active, p.sock.sent[-1]), (False, "hide"))
+mark = len(p.sock.sent)
+p.stand_down()
+check("idle with a button held: the release, then hide", since(p, mark), ["btn trigger 0", "hide"])
+
+p = pointer()
+p.action("left", 1, 10.0)
+p.action("pointer_toggle", 1, 10.5)
+mark = len(p.sock.sent)
+p.stand_down()
+check("pointer toggled off with a button held: the release, then hide", since(p, mark),
+      ["btn trigger 0", "hide"])
 
 # ---------------------------------------------------------------- the ordinary path
 p = pointer()
 p.action("left", 1, 10.0)
 p.action("left", 0, 11.0)  # released before the pause
-check("a released button isn't tracked", p.driver_down, set())
+mark = len(p.sock.sent)
 p.stand_down()
-check("stand_down sends no release for it",
-      [s for s in p.sock.sent if s.startswith("btn")], ["btn trigger 1", "btn trigger 0"])
+check("a button released before the pause: stand_down only hides", since(p, mark), ["hide"])
 
-# Two buttons down at once (chord: gazekey click during a head drag)
 p = pointer()
+p.idle = 30.0
 p.action("left", 1, 10.0)
-p.action("right", 1, 10.5)
+p.action("left", 0, 11.0)
+for t in (10.3, 10.4, 42.0):  # off by itself
+    p.tick(t)
+mark = len(p.sock.sent)
 p.stand_down()
-check("both held buttons are released",
-      sorted(s for s in p.sock.sent if s.startswith("btn")),
-      sorted(["btn trigger 1", "btn b 1", "btn trigger 0", "btn b 0"]))
+check("nothing held and the pointer off: stand_down sends nothing", since(p, mark), [])
+
+# Gaze holds go to the helper as their own commands, and it ends them when the pointer hides.
+p = pointer()
+p.action("gaze_left", 1, 10.0, "keyboard")  # Meta+J held
+p.action("gaze_drag", 1, 10.1, "mouse")
+mark = len(p.sock.sent)
+p.stand_down()
+check("gaze holds: stand_down sends only hide (the helper ends them)", since(p, mark), ["hide"])
 
 print()
 if failures:
