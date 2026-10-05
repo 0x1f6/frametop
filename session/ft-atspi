@@ -40,7 +40,8 @@ def run_registry(address, session):
                 call(address, DBUS, DBUS_PATH, DBUS + ".GetId")
             except subprocess.SubprocessError:
                 break  # Normal session shutdown or loss of its accessibility bus.
-            time.sleep(1)
+            # Each check starts two gdbus processes, and SteamVR needs the CPU.
+            time.sleep(5)
     finally:
         stop(registry)
 
