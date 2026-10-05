@@ -1146,8 +1146,9 @@ void EndDrag(Screen &s) {
     ApplyAlpha(s);
 }
 
-// Run `ft-layout <cmd>` in the background, logging to the desktop's runtime directory
-// (XDG_RUNTIME_DIR, else /tmp with O_NOFOLLOW: a symlink there must not be followed).
+// Run `ft-layout <cmd>` in the background, logging to the host's runtime directory
+// (XDG_RUNTIME_DIR, not the nested desktop's; else /tmp with O_NOFOLLOW: a symlink there
+// must not be followed). The desktop start truncates the same log.
 void RunLayout(const char *cmd) {
     char exe[PATH_MAX];
     if (!realpath("/proc/self/exe", exe)) return;

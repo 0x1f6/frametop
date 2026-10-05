@@ -175,7 +175,7 @@ layout/ft-layout hide N|all # hide a screen on its own, whatever the visibility 
 display-settings/install.sh # menu entries and the Meta+Shift+R and Meta+Shift+H shortcuts
 ```
 
-The layout is stored relative to your head when it's applied. `/tmp/frametop-layout.log` has the run from the last desktop start.
+The layout is stored relative to your head when it's applied. `/run/user/<uid>/frametop-layout.log`, in the host's runtime directory (not the nested desktop's `/run/user/<uid>/frametop`), has the run from the last desktop start and ft-screens' layout runs after it.
 
 ## Floating windows
 
