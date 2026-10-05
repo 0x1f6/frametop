@@ -115,12 +115,13 @@ constexpr size_t kVar1 = 0x177, kVar2 = 0x1b3;
 // x, y, right x, y). An eye's pair stops changing while the tracker can't see it.
 constexpr size_t kMeas = 0x1d3;
 constexpr size_t kNeed = 0x1f3 + 5;  // enough for either layout
+constexpr size_t kShifts[] = {0, 5};  // the layouts EyeFile::Detect knows: stable, 0.4.x beta
 
 struct EyeFile {
-    // Everything from the timestamp on is read at base + shift: 0 on Stable, 5 on the
-    // 0.4.x beta (see the constants above). known only once a ticking timestamp was found
-    // for the current shift; before that, reading would yield garbage that still passes
-    // the seqlock check below.
+    // Everything from the timestamp on is read at base + shift: 0 on stable, 5 on the
+    // 0.4.x beta (see the constants above). known once Detect has seen that layout's
+    // timestamp tick; before that, reading would yield garbage that still passes
+    // ReadSample's check.
     size_t shift = 0;
     bool known = false;
     const uint8_t *p = nullptr;
@@ -141,6 +142,9 @@ struct EyeFile {
         size = st.st_size;
         return true;
     }
+    // The sample counter, or 0 without the mapping: the one read the loop makes whether or
+    // not the file was there (Get, V and ReadSample need it).
+    uint32_t Counter() const { return p ? Get<uint32_t>(kCounter) : 0; }
     template <class T> T Get(size_t off) const {
         T v;
         std::memcpy(&v, p + off, sizeof v);
@@ -151,41 +155,53 @@ struct EyeFile {
         std::memcpy(f, p + off, sizeof f);
         return {f[0], f[1], f[2]};
     }
-    // A timestamp that is neither near the monotonic-raw clock nor advancing is not the
-    // live timestamp field.
-    bool TimePlausible(double t, double now) const {
-        return t > now - 2.0 && t <= now + 2.0;
-    }
+    // A live timestamp is near the clock it comes from (its samples are 17 ms or so old).
+    static bool TimePlausible(double t, double now) { return t > now - 2.0 && t <= now + 2.0; }
     // The eye directions are unit vectors, so their length is a second, independent check
     // next to the timestamp: a mere coincidence in one field does not confirm a layout.
     static bool UnitVec(Vec3 v) {
         const float n = v.x * v.x + v.y * v.y + v.z * v.z;
         return n > 0.81f && n < 1.21f;  // |v| within 0.9 .. 1.1
     }
-    // Try both layouts and keep the one whose timestamp actually ticks and whose eye
-    // directions are plausible. Safe to retry while the eye server is silent (headset off,
-    // no samples for a while): it only succeeds once data flows. Cheap: two reads ~60 ms
-    // apart per candidate. If neither candidate fits, known stays false and callers must
-    // treat eye tracking as unavailable (never emit samples from an unknown layout).
-    bool Detect(double now) {
-        for (const size_t cand : {size_t(0), size_t(5)}) {
-            if (size < kTime + cand + 8 || size < kFix1 + cand + 12) continue;
-            const double t0 = Get<double>(kTime + cand);
-            if (!TimePlausible(t0, now)) continue;
-            if (!UnitVec(V(kLeft1 + cand)) || !UnitVec(V(kRight1 + cand))) continue;
-            usleep(60000);
-            const double t1 = Get<double>(kTime + cand);
-            const double now2 = NowRaw();
-            if (t1 > t0 && TimePlausible(t1, now2)) {
-                shift = cand;
-                known = true;
-                return true;
-            }
-        }
-        shift = 0;
-        known = false;
-        return false;
+    bool Fits(size_t layout, double now) const {
+        return TimePlausible(Get<double>(kTime + layout), now) && UnitVec(V(kLeft1 + layout)) &&
+               UnitVec(V(kRight1 + layout));
     }
+
+    // Which layout is live, a step per pass of the loop, so it never stalls it. A layout
+    // fits when its timestamp is near the clock and its two set-1 directions are unit
+    // vectors; it's taken once its timestamp has moved on too, within kConfirm. That allows
+    // for 2 samples a second: the eye server writes 72 or 90 (15 were seen on the beta).
+    // kWaiting: call again on the next pass. kNone: no layout fits (a server that stopped,
+    // SteamVR's tracker warming up, or a layout we don't know), so the mmap stays unused;
+    // try again later. One detection per run is enough: the layout can't change under a
+    // running ft-gaze, since SteamVR starts the eye server that writes the file, and the
+    // gaze service stops and starts with SteamVR.
+    enum Detection { kWaiting, kFound, kNone };
+    static constexpr double kConfirm = 0.5;
+    static constexpr size_t kLayouts = sizeof kShifts / sizeof kShifts[0];
+    Detection Detect(double now) {
+        if (!fit_) {
+            for (size_t i = 0; i < kLayouts; ++i)
+                if (Fits(kShifts[i], now)) fit_ |= 1u << i, t0_[i] = Get<double>(kTime + kShifts[i]);
+            if (!fit_) return kNone;
+            since_ = now;
+            return kWaiting;
+        }
+        for (size_t i = 0; i < kLayouts; ++i)
+            if ((fit_ >> i & 1) && Get<double>(kTime + kShifts[i]) > t0_[i] && Fits(kShifts[i], now)) {
+                fit_ = 0, shift = kShifts[i], known = true;
+                return kFound;
+            }
+        if (now - since_ <= kConfirm) return kWaiting;
+        fit_ = 0;
+        return kNone;
+    }
+    bool Detecting() const { return fit_ != 0; }
+
+    // Detect's state: the layouts that fit at since_ (a bit each), and their timestamps then.
+    unsigned fit_ = 0;
+    double t0_[kLayouts] = {}, since_ = 0;
 };
 
 struct EyeSample {
@@ -573,15 +589,8 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "ft-gaze: action manifest %s: error %d\n", manifest.c_str(), int(me));
 
     EyeFile eyes;
-    const bool haveMmap = eyes.Open();
+    bool haveMmap = eyes.Open();
     std::fprintf(stderr, "ft-gaze: eye-server.mmap %s\n", haveMmap ? "open" : "not available");
-    // The mmap layout (the shift from the timestamp field on, see above) is detected at
-    // startup, and retried whenever fresh eye data arrives without a known layout.
-    // Until then, eye tracking counts as unavailable.
-    if (haveMmap) eyes.Detect(NowRaw());
-    if (haveMmap && eyes.known)
-        std::fprintf(stderr, "ft-gaze: eye-server.mmap layout: %s\n",
-                     eyes.shift ? "beta (+5)" : "stable");
 
     OwnFile ownFile;
     Screens screens;
@@ -599,12 +608,19 @@ int main(int argc, char **argv) {
     // over the dashboard. Games are told apart the way ft-screens does it, by the scene app.
     bool inGame = false;
     double nextGameCheck = 0;
-    // Layout detection runs only while the eye server is actually writing: the counter
-    // (0x38, unshifted in both layouts) ticks once per sample, so a silent server (headset
-    // off, gaze idle) causes neither retries nor journal noise. The "not recognized" line
-    // is rate-limited so an unrecognized but writing server doesn't flood the journal.
-    double nextLayoutCheck = 0, nextLayoutLog = 0, lastNewSample = 0;
-    uint32_t lastCounterSeen = 0;
+    // The mmap's layout (EyeFile::Detect) is looked for while it isn't known and the eye
+    // server writes: the counter (0x38 in both layouts) ticks once per sample, so a silent
+    // server (headset off) costs nothing and logs nothing. Until a layout is known, SteamVR's
+    // tracker counts as unavailable. "Not recognized" waits until no layout has fitted for
+    // kUnknownAfter of writing, longer than SteamVR's tracker takes to warm up after the
+    // headset goes on (about 20 s), then goes to the journal at most once a minute; ft-gazed
+    // shows it on the Gaze page.
+    constexpr double kUnknownAfter = 30;
+    double nextLayoutCheck = 0, nextLayoutLog = 0, lastWrite = 0, missSince = 0;
+    uint32_t lastCounterSeen = eyes.Counter();
+    // SteamVR's eye tracker creates the mmap a second or two after SteamVR starts, so it can
+    // be missing when we start: look for it again every 2 s until it's there.
+    double nextOpen = NowRaw() + 2.0;
 
     while (true) {
         const double now = NowRaw();
@@ -620,34 +636,43 @@ int main(int argc, char **argv) {
         sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &hp, 1);
         if (hp.bPoseIsValid) history.Add(now, hp.mDeviceToAbsoluteTracking);
 
-        // One line per new eye sample, or at 90 Hz without the mmap.
-        EyeSample s;
-        bool fresh = false;
-        // Retry the layout when the eye server writes but we have no known layout, or
-        // when samples that used to flow have stopped: the layout may change under us
-        // (a SteamVR restart replaces the mmap), and detection only needs the writer
-        // alive, never our samples.
-        const bool writing = eyes.Get<uint32_t>(kCounter) != lastCounterSeen;
-        if (writing) lastCounterSeen = eyes.Get<uint32_t>(kCounter);
-        if (haveMmap && writing && (!eyes.known || now - lastNewSample > 2.0) &&
-            now >= nextLayoutCheck) {
-            nextLayoutCheck = now + 1.0;
-            const bool was = eyes.known;
-            if (eyes.Detect(now)) {
-                lastN = 0;  // let the next sample count as new even if n repeated
-                if (!was)
-                    std::fprintf(stderr, "ft-gaze: eye-server.mmap layout: %s\n",
-                                 eyes.shift ? "beta (+5)" : "stable");
-            } else if (now >= nextLayoutLog) {
-                nextLayoutLog = now + 60.0;
-                std::fprintf(stderr,
-                             "ft-gaze: eye-server.mmap has eye data, but its layout is not recognized — eye tracking unavailable\n");
+        if (!haveMmap && now >= nextOpen) {
+            nextOpen = now + 2.0;
+            if ((haveMmap = eyes.Open())) {
+                std::fprintf(stderr, "ft-gaze: eye-server.mmap open\n");
+                lastCounterSeen = eyes.Counter();
             }
         }
-        if (haveMmap && eyes.known && ReadSample(eyes, s) && s.n != lastN) {
-            fresh = true, lastN = s.n, lastNewSample = now;
+
+        // One line per new eye sample, or at 90 Hz without a usable mmap: none, or one whose
+        // layout isn't known (yet). Our own tracker needs nothing from the mmap, so it keeps
+        // going then; the mmap's sources print as {"ok":0} and "eye" as null.
+        EyeSample s;
+        bool fresh = false;
+        const uint32_t counter = eyes.Counter();
+        const bool writing = haveMmap && counter != lastCounterSeen;
+        lastCounterSeen = counter;
+        if (writing) {
+            if (now - lastWrite > 2.0) missSince = 0;  // it was silent: start counting again
+            lastWrite = now;
         }
-        if (!haveMmap && now - lastEmit >= 1.0 / 90) fresh = true, s.t = now;
+        if (haveMmap && !eyes.known && (eyes.Detecting() || (writing && now >= nextLayoutCheck))) {
+            const EyeFile::Detection d = eyes.Detect(now);
+            if (d == EyeFile::kFound) {
+                std::fprintf(stderr, "ft-gaze: eye-server.mmap layout: %s\n", eyes.shift ? "beta (+5)" : "stable");
+            } else if (d == EyeFile::kNone) {
+                nextLayoutCheck = now + 1.0;
+                if (!missSince) missSince = now;
+                if (now - missSince >= kUnknownAfter && now >= nextLayoutLog) {
+                    nextLayoutLog = now + 60.0;
+                    std::fprintf(stderr, "ft-gaze: eye-server.mmap has eye data, but its layout is not recognized: "
+                                         "SteamVR's eye tracking is unavailable\n");
+                }
+            }
+        }
+        const bool mmapOk = haveMmap && eyes.known;
+        if (mmapOk && ReadSample(eyes, s) && s.n != lastN) fresh = true, lastN = s.n;
+        if (!mmapOk && now - lastEmit >= 1.0 / 90) fresh = true, s.t = now;
 
         if (fresh && hp.bPoseIsValid) {
             lastEmit = now;
@@ -655,7 +680,7 @@ int main(int argc, char **argv) {
             const auto list = screens.Get();
             const vr::HmdMatrix34_t &headNow = hp.mDeviceToAbsoluteTracking;
             vr::HmdMatrix34_t headThen = headNow;
-            if (haveMmap) history.At(s.t, headThen);
+            if (mmapOk) history.At(s.t, headThen);
 
             // SteamVR's action: a room-space origin and fixation point, turned into the head
             // frame so every source reports the same kind of angles.
@@ -683,7 +708,8 @@ int main(int argc, char **argv) {
             }
 
             std::string m1 = "{\"ok\":0}", m2 = m1, left = m1, right = m1, eye = "null";
-            if (haveMmap) {
+            // Only from a known layout: the unread sample's zeros would print an "unc" of 0 (eyes seen).
+            if (mmapOk) {
                 // lr: the angle between the two eyes' directions. It's a fraction of a degree
                 // normally; when the tracker loses one eye (or during a blink) it jumps.
                 auto lr = [](Vec3 l, Vec3 r) {
