@@ -33,6 +33,7 @@ EOF
 dry=0
 apps=$HOME/.local/share/applications
 override=$apps/deckard-nested-desktop.desktop
+native_copy=$apps/native-deckard-nested-desktop.desktop
 relay_unit=$HOME/.config/systemd/user/frametop-input-relay.service
 driver=$HOME/.local/share/frametop/ft_pointer
 vrpathreg=/opt/steamvr/bin/linuxarm64/vrpathreg
@@ -119,6 +120,7 @@ main() {
     step "Step 1 of 2: stop Frametop from starting"
     echo "This removes:"
     [ -n "$override" ] && echo "  - the launcher's Desktop entry (Launch a program -> Desktop opens the stock desktop again)"
+    [ -n "$native_copy" ] && echo "  - the native launcher's Desktop entry (use Desktop -> opens the stock desktop again)"
     for f in "${units[@]}"; do echo "  - the service $(basename "$f")"; done
     [ -d "$driver" ] && echo "  - the 3D mouse's SteamVR driver (ft_pointer)"
     [ ${#entries[@]} -gt 0 ] && echo "  - ${#entries[@]} menu entries (Frametop Display Settings, Input Settings, ...)"
@@ -130,6 +132,7 @@ main() {
     ask "Uninstall Frametop?" n || { echo "Nothing changed."; return 0; }
 
     [ -n "$override" ] && run rm -f "$override"
+    [ -n "$native_copy" ] && run rm -f "$native_copy"
     if [ ${#units[@]} -gt 0 ]; then
       for f in "${units[@]}"; do names+=("$(basename "$f")"); done
       run systemctl --user disable "${names[@]}" 2>/dev/null || true
