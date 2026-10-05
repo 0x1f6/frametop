@@ -98,6 +98,24 @@ def default_screens():
     return ft_layout.screen_count()
 
 
+def backup(path, dst):
+    """Copy path to dst whole or not at all. The copy goes to dst.tmp, reaches the disk, and
+    only then takes dst's name, so a copy cut off partway (a full disk, a crash, the battery)
+    never leaves a short dst behind, and a dst that's there already stays as it was."""
+    tmp = dst + ".tmp"
+    try:
+        shutil.copy2(path, tmp)
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--screens", type=int)
@@ -129,7 +147,12 @@ def main(argv):
     if moves and not os.path.exists(path + ".ft-bak"):
         # The backup holds the config as it was before the first repair, so a later run
         # can't overwrite it with an already-repaired state.
-        shutil.copy2(path, path + ".ft-bak")
+        try:
+            backup(path, path + ".ft-bak")
+        except OSError as e:
+            # No repair without a backup; the next start tries again.
+            print(f"frametop: couldn't back up {path} ({e}); left the panels as they are", file=sys.stderr)
+            return 1
     for pid, was, ids in moves:
         for cid in ids:
             subprocess.run(["kwriteconfig6", "--file", os.path.abspath(path), "--group", "Containments",

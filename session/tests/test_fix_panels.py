@@ -7,6 +7,7 @@ kwriteconfig6 on a copy. Nothing here touches the running desktop or its config.
 """
 import importlib.util
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -170,6 +171,28 @@ class Run(unittest.TestCase):
             groups = fp.parse(f.read())
         self.assertEqual(groups[("Containments", "10")]["lastScreen"], "0")
         self.assertEqual(groups[("Containments", "11")]["lastScreen"], "0")
+
+    def test_failed_backup_leaves_nothing(self):
+        """A backup cut off partway (a full disk; here a 1 KiB limit on file size) leaves no
+        backup and no temporary file behind, and the panels aren't touched without one. The
+        next start, with room, makes the backup and repairs."""
+        self.assertGreater(len(ISSUE_18), 1024)
+
+        def small_files():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        r = subprocess.run([sys.executable, SCRIPT, "--file", self.path, "--screens", "3"],
+                           capture_output=True, text=True, preexec_fn=small_files)
+        self.assertEqual(os.listdir(self.dir.name), [os.path.basename(self.path)])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("couldn't back up", r.stderr)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), ISSUE_18)
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.path + ".ft-bak") as f:
+            self.assertEqual(f.read(), ISSUE_18)
+        with open(self.path) as f:
+            self.assertEqual(fp.parse(f.read())[("Containments", "10")]["lastScreen"], "0")
 
 
 if __name__ == "__main__":
