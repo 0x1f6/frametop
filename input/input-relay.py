@@ -1021,7 +1021,7 @@ def main():
 
     def to_screens(code, value):
         """A key for the desktop screens (ft-screens decides whether it types)."""
-        if value in (0, 1) and code < BTN_MISC:
+        if value in (0, 1):
             try:
                 screens_sock.sendto(f"key {code} {value}".encode(), SCREENS)
             except OSError:
@@ -1371,9 +1371,7 @@ def main():
                                         or (node.grabbed and code in VOLUME_STANDIN)):
                     volume.key(fd, code, value, now)
                     continue
-                if node.role == "volume":
-                    continue
-                if node.role != "pointer":
+                if node.role != "pointer" and node.role != "volume":
                     # Observed only, unless typing goes to the desktop. Key combinations work on
                     # any pass-through keyboard.
                     if (node.role == "passthrough" and etype == EV_KEY and node.grabbed
