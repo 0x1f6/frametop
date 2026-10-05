@@ -141,6 +141,9 @@ struct EyeFile {
         size = st.st_size;
         return true;
     }
+    // The sample counter, or 0 without the mapping: the one read the loop makes whether or
+    // not the file was there (Get, V and ReadSample need it).
+    uint32_t Counter() const { return p ? Get<uint32_t>(kCounter) : 0; }
     template <class T> T Get(size_t off) const {
         T v;
         std::memcpy(&v, p + off, sizeof v);
@@ -573,7 +576,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "ft-gaze: action manifest %s: error %d\n", manifest.c_str(), int(me));
 
     EyeFile eyes;
-    const bool haveMmap = eyes.Open();
+    bool haveMmap = eyes.Open();
     std::fprintf(stderr, "ft-gaze: eye-server.mmap %s\n", haveMmap ? "open" : "not available");
     // The mmap layout (the shift from the timestamp field on, see above) is detected at
     // startup, and retried whenever fresh eye data arrives without a known layout.
@@ -605,6 +608,9 @@ int main(int argc, char **argv) {
     // is rate-limited so an unrecognized but writing server doesn't flood the journal.
     double nextLayoutCheck = 0, nextLayoutLog = 0, lastNewSample = 0;
     uint32_t lastCounterSeen = 0;
+    // SteamVR's eye tracker creates the mmap a second or two after SteamVR starts, so it can
+    // be missing when we start: look for it again every 2 s until it's there.
+    double nextOpen = NowRaw() + 2.0;
 
     while (true) {
         const double now = NowRaw();
@@ -620,6 +626,11 @@ int main(int argc, char **argv) {
         sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0, &hp, 1);
         if (hp.bPoseIsValid) history.Add(now, hp.mDeviceToAbsoluteTracking);
 
+        if (!haveMmap && now >= nextOpen) {
+            nextOpen = now + 2.0;
+            if ((haveMmap = eyes.Open())) std::fprintf(stderr, "ft-gaze: eye-server.mmap open\n");
+        }
+
         // One line per new eye sample, or at 90 Hz without the mmap.
         EyeSample s;
         bool fresh = false;
@@ -627,8 +638,9 @@ int main(int argc, char **argv) {
         // when samples that used to flow have stopped: the layout may change under us
         // (a SteamVR restart replaces the mmap), and detection only needs the writer
         // alive, never our samples.
-        const bool writing = eyes.Get<uint32_t>(kCounter) != lastCounterSeen;
-        if (writing) lastCounterSeen = eyes.Get<uint32_t>(kCounter);
+        const uint32_t counter = eyes.Counter();
+        const bool writing = haveMmap && counter != lastCounterSeen;
+        lastCounterSeen = counter;
         if (haveMmap && writing && (!eyes.known || now - lastNewSample > 2.0) &&
             now >= nextLayoutCheck) {
             nextLayoutCheck = now + 1.0;
