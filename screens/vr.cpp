@@ -1146,8 +1146,9 @@ void EndDrag(Screen &s) {
     ApplyAlpha(s);
 }
 
-// Run `ft-layout <cmd>` in the background, logging to the desktop's runtime directory
-// (XDG_RUNTIME_DIR, else /tmp with O_NOFOLLOW: a symlink there must not be followed).
+// Run `ft-layout <cmd>` in the background, logging to the host's runtime directory
+// (XDG_RUNTIME_DIR, not the nested desktop's; else /tmp with O_NOFOLLOW: a symlink there
+// must not be followed). The desktop start truncates the same log.
 void RunLayout(const char *cmd) {
     char exe[PATH_MAX];
     if (!realpath("/proc/self/exe", exe)) return;
@@ -1164,8 +1165,10 @@ void RunLayout(const char *cmd) {
     std::string arg(cmd);
     char *argv[] = {layout.data(), arg.data(), nullptr};
     pid_t pid;  // reaped by the compositor's SIGCHLD handler
-    if (posix_spawn(&pid, layout.c_str(), &io, nullptr, argv, environ) != 0)
-        std::printf("can't run %s\n", layout.c_str());
+    // A log that can't be opened (a symlink or a directory in its place) fails the spawn too.
+    const int rc = posix_spawn(&pid, layout.c_str(), &io, nullptr, argv, environ);
+    if (rc != 0)
+        std::printf("can't run %s (log %s): %s\n", layout.c_str(), logname.c_str(), std::strerror(rc));
     posix_spawn_file_actions_destroy(&io);
 }
 
