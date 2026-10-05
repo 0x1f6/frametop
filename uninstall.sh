@@ -11,8 +11,9 @@
 # desktop runs from the repo. So it goes in two steps:
 #   1. Frametop stops starting. The launcher's Desktop entry goes back to the stock desktop, and
 #      Frametop's services, SteamVR driver, menu entries, and system files (our eye tracker's
-#      frame grabber and the Bluetooth fixes, with sudo) are removed. What runs now keeps running
-#      until you restart the headset.
+#      frame grabber and the Bluetooth fixes, with sudo) are removed, and so are the file
+#      capabilities of hand tracking's camera broker (ft-camd, with sudo). What runs now keeps
+#      running until you restart the headset.
 #   2. After the restart, run it again. It deletes the code (~/frametop) and, if you want, your
 #      settings and the build container.
 # When nothing of Frametop is running, one run does both.
@@ -117,7 +118,7 @@ main() {
   exists "${eyegrab_files[@]}" "${bt_files[@]}" && sys=1
 
   if [ -n "$override" ] || [ ${#units[@]} -gt 0 ] || [ ${#entries[@]} -gt 0 ] || [ -d "$driver" ] ||
-     [ -n "$handsctl" ] || [ "$sys" = 1 ]; then
+     [ -n "$handsctl" ] || [ "$sys" = 1 ] || [ -n "$camd_caps" ]; then
     step "Step 1 of 2: stop Frametop from starting"
     echo "This removes:"
     [ -n "$override" ] && echo "  - the launcher's Desktop entry (Launch a program -> Desktop opens the stock desktop again)"
@@ -150,17 +151,20 @@ main() {
     [ -n "$handsctl" ] && run rm -f "$handsctl"
     if [ "$sys" = 1 ]; then
       echo "The system files need your password (sudo)."
-      if ! run sudo FTCAMD=$([ -n "$camd_caps" ] && echo "$camd") bash -c '
+      # $1 is ft-camd when it has capabilities to remove, else empty; the system files follow.
+      if ! run sudo bash -c '
+        camd=$1; shift
         for u in frametop-eyegrab steamframe-bt-fixups; do systemctl disable $u.service 2>/dev/null; done
         rm -f "$@"
         rmdir /etc/frametop /etc/steamframe /etc/systemd/system/bluetooth.service.d 2>/dev/null
-        [ -n "$FTCAMD" ] && [ -x "$FTCAMD" ] && setcap -r "$FTCAMD" 2>/dev/null
-        systemctl daemon-reload; true' sys "${eyegrab_files[@]}" "${bt_files[@]}"; then
+        [ -n "$camd" ] && [ -x "$camd" ] && setcap -r "$camd" 2>/dev/null
+        systemctl daemon-reload; true' sys "${camd_caps:+$camd}" "${eyegrab_files[@]}" "${bt_files[@]}"; then
         echo "warning: the system files weren't removed (no password?). Run this again to retry." >&2
       fi
     elif [ -n "$camd_caps" ]; then
       echo "ft-camd's file capabilities need your password (sudo) to remove."
-      run sudo setcap -r "$camd" || echo "warning: ft-camd keeps its capabilities; run 'sudo setcap -r $camd' later." >&2
+      run sudo setcap -r "$camd" ||
+        echo "warning: ft-camd keeps its capabilities (no password?). Run this again to retry." >&2
     fi
     [ "$dry" = 1 ] || echo "Frametop no longer starts."
   fi
