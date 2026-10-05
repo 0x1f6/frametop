@@ -411,10 +411,26 @@ function run(c) {
     }
 }
 
+// The long poll has one failure mode: a reply that never comes (ft-floatd dying mid-call,
+// a D-Bus hiccup) leaves polling true forever and the script stops hearing commands until
+// KWin reloads it. A watchdog re-arms the poll if the reply is late by more than
+// ft-floatd's own timeout (POLL_SECONDS in ft_floatd.py) plus slack.
+const POLL_SECONDS = 20;
+const pollWatchdog = new QTimer();
+pollWatchdog.singleShot = true;
+pollWatchdog.interval = (POLL_SECONDS + 10) * 1000;
+pollWatchdog.timeout.connect(() => {
+    print("frametop-float: NextCommand didn't answer, polling again");
+    polling = false;
+    poll();
+});
+
 function poll() {
     if (polling) return;
     polling = true;
+    pollWatchdog.start();
     callDBus(SERVICE, PATH, IFACE, "NextCommand", reply => {
+        pollWatchdog.stop();
         polling = false;
         if (reply) {
             try {
