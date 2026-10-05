@@ -7,6 +7,7 @@ kwriteconfig6 on a copy. Nothing here touches the running desktop or its config.
 """
 import importlib.util
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -143,13 +144,15 @@ class Run(unittest.TestCase):
         self.assertEqual(groups[("Containments", "11")]["lastScreen"], "0")
         self.assertEqual(groups[("Containments", "10", "Applets", "101")]["plugin"], "org.kde.plasma.kickoff")
         self.assertEqual(groups[("Containments", "25")]["lastScreen"], "8")  # a spare's desktop
-        with open(self.path + ".ft-bak") as f:
-            self.assertEqual(f.read(), ISSUE_18)
-        # A second run finds nothing to do and leaves the backup alone.
+        for bak in (".ft-bak", ".ft-bak.last"):
+            with open(self.path + bak) as f:
+                self.assertEqual(f.read(), ISSUE_18, bak)
+        # A second run finds nothing to do and makes no backup.
         os.remove(self.path + ".ft-bak")
+        os.remove(self.path + ".ft-bak.last")
         r = self.run_script()
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        self.assertFalse(os.path.exists(self.path + ".ft-bak"))
+        self.assertEqual(os.listdir(self.dir.name), [os.path.basename(self.path)])
         self.assertEqual(self.run_script("--check").returncode, 0)
 
     def test_no_config_yet(self):
@@ -157,53 +160,61 @@ class Run(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertEqual(self.run_script("--check").returncode, 0)
 
-    def test_backup_keeps_the_original(self):
-        """The backup is written once, before the first repair: a later run that repairs
-        again never overwrites it with an already-repaired state. Runs against a
-        kwriteconfig6 stub, so it works without Plasma's tools."""
-        stubdir = os.path.join(self.dir.name, "bin")
-        os.mkdir(stubdir)
-        stub = os.path.join(stubdir, "kwriteconfig6")
-        with open(stub, "w") as f:
-            f.write("""#!/bin/sh
-# Only what fix-panels.py uses: --file F --group Containments --group CID --key lastScreen 0
-file=; cid=; val=
-while [ $# -gt 0 ]; do
-  case $1 in
-    --file) file=$2; shift 2;;
-    --group) cid=$2; shift 2;;
-    --key) key=$2; shift 2;;
-    *) val=$1; shift;;
-  esac
-done
-awk -v cid="$cid" -v v="$val" '
-  $0 == "[Containments][" cid "]" { inblk = 1 }
-  /^\\[Containments\\]\\[[0-9]+\\]$/ && $0 != "[Containments][" cid "]" { inblk = 0 }
-  inblk && /^lastScreen=/ { print "lastScreen=" v; next }
-  { print }
-' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-""")
-        os.chmod(stub, 0o755)
-        env = {**os.environ, "PATH": stubdir + os.pathsep + os.environ["PATH"]}
+    def test_backup_is_written_once(self):
+        """A backup that's already there, the config before an earlier repair, stays as it
+        was, and the repair still goes ahead."""
+        with open(self.path + ".ft-bak", "w") as f:
+            f.write("the config before an earlier repair\n")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.path + ".ft-bak") as f:
+            self.assertEqual(f.read(), "the config before an earlier repair\n")
+        with open(self.path) as f:
+            groups = fp.parse(f.read())
+        self.assertEqual(groups[("Containments", "10")]["lastScreen"], "0")
+        self.assertEqual(groups[("Containments", "11")]["lastScreen"], "0")
 
-        def run(*args):
-            return subprocess.run([sys.executable, SCRIPT, "--file", self.path, "--screens", "3", *args],
-                                  capture_output=True, text=True, env=env)
+    def test_last_backup_is_from_before_each_repair(self):
+        """<file>.ft-bak.last is the config as it was just before the latest repair, so that
+        repair can be undone without losing what changed since the first; <file>.ft-bak stays
+        the config before the first repair. The log names both."""
+        bak = self.path + ".ft-bak"
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # The panel is lost again later, after a change of the user's own (another widget).
+        changed = ISSUE_18.replace("org.kde.plasma.kickoff", "org.kde.plasma.trash")
+        with open(self.path, "w") as f:
+            f.write(changed)
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(bak + ".last") as f:
+            self.assertEqual(f.read(), changed)
+        with open(bak) as f:
+            self.assertEqual(f.read(), ISSUE_18)
+        with open(self.path) as f:
+            self.assertEqual(fp.parse(f.read())[("Containments", "10")]["lastScreen"], "0")
+        self.assertIn(bak + ".last ", r.stderr)
+        self.assertIn(bak + " ", r.stderr)
 
-        r = run()
+    def test_failed_backup_leaves_nothing(self):
+        """A backup cut off partway (a full disk; here a 1 KiB limit on file size) leaves no
+        backup and no temporary file behind, and the panels aren't touched without one. The
+        next start, with room, makes the backup and repairs."""
+        self.assertGreater(len(ISSUE_18), 1024)
+
+        def small_files():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        r = subprocess.run([sys.executable, SCRIPT, "--file", self.path, "--screens", "3"],
+                           capture_output=True, text=True, preexec_fn=small_files)
+        self.assertEqual(os.listdir(self.dir.name), [os.path.basename(self.path)])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("couldn't back up", r.stderr)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), ISSUE_18)
+        r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
         with open(self.path + ".ft-bak") as f:
             self.assertEqual(f.read(), ISSUE_18)
-        # The desktop drifts: the panel is saved on the lost screen again, and with a
-        # different widget. A second repair runs — the backup must still hold the
-        # config as it was before the first repair, not this drifted state.
-        drifted = ISSUE_18.replace("org.kde.plasma.kickoff", "org.kde.plasma.trash")
-        with open(self.path, "w") as f:
-            f.write(drifted)
-        r = run()
-        self.assertEqual(r.returncode, 0, r.stderr)
-        with open(self.path + ".ft-bak") as f:
-            self.assertEqual(f.read(), ISSUE_18)  # still the pre-first-repair original
         with open(self.path) as f:
             self.assertEqual(fp.parse(f.read())[("Containments", "10")]["lastScreen"], "0")
 
