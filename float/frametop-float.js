@@ -420,11 +420,19 @@ function run(c) {
 // still comes later (KWin stalled with the reply queued): it runs its commands (ft-floatd
 // sends each one once) but doesn't poll again. Two polls would answer each other for good,
 // since ft-floatd answers a waiting poll empty when the next one comes.
+// When the watchdog fires again and again, ft-floatd is gone, and only starting it again
+// helps (it reloads the script then). Each failed call is a line in KWin's log, so the
+// script says so once and waits twice as long each time, up to 5 minutes. A reply starts
+// over at 30 s, so a lost reply is still polled again after 30 s.
+const POLL_WAIT = 30000, POLL_WAIT_MAX = 300000;
 const pollWatchdog = new QTimer();
 pollWatchdog.singleShot = true;
-pollWatchdog.interval = 30000;
+pollWatchdog.interval = POLL_WAIT;
+let pollLost = false;  // the watchdog fired, and no reply since
 pollWatchdog.timeout.connect(() => {
-    print("frametop-float: NextCommand didn't answer, polling again");
+    if (!pollLost) print("frametop-float: NextCommand didn't answer, polling again");
+    pollLost = true;
+    pollWatchdog.interval = Math.min(pollWatchdog.interval * 2, POLL_WAIT_MAX);
     polling = false;
     poll();
 });
@@ -439,6 +447,8 @@ function poll() {
         const current = serial === pollSerial;  // not a call the watchdog gave up on
         if (current) {
             pollWatchdog.stop();
+            pollWatchdog.interval = POLL_WAIT;
+            pollLost = false;
             polling = false;
         }
         if (reply) {
