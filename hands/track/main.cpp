@@ -27,7 +27,8 @@
 // default) tells from the hands it tracks (track/sides.h): once it's sure, it exchanges the two
 // cameras if they're backwards (the tracked views move with their images), and checks once
 // more. 0 and 1 force the naming (1: exchanged; --swap-sides is --sides 1); it still checks,
-// and warns if the hands disagree. The decision is published in /run/user/UID/frametop-hands/sides.json (see
+// and if the hands disagree it warns and publishes what the hands say as the truth ("swapped"),
+// so recordings are labelled right while tracking keeps the forced names. The decision is published in /run/user/UID/frametop-hands/sides.json (see
 // write_sides below) and, for recordings, in DIR/sides.json. --record-only can't tell (it tracks
 // nothing): under auto it records the ring's names as they are.
 //
@@ -507,14 +508,16 @@ int main(int argc, char **argv) {
         const bool backwards = v == SideCheck::Swapped;   // relative to the names as they are now
         const double after = (now - start) / 1e9;
         const std::string ev = side_check.json(), text = side_check.summary();
-        if (sides_mode != "auto") {   // forced: only say so
+        if (sides_mode != "auto") {   // forced: the names stay; if the hands disagree, they're the truth
             const std::string what = (sides_from == "option" ? "--sides " : "HANDS_SWAP_SIDES=") + sides_mode;
             if (backwards)
                 std::printf("side cameras: %s looks WRONG: the hands say the side cameras are the other way round (%s). "
-                            "Use auto.\n", what.c_str(), text.c_str());
+                            "Tracking keeps the forced names; recordings are labelled by the hands. Use auto.\n",
+                            what.c_str(), text.c_str());
             else
                 std::printf("side cameras: %s agrees with the hands (%s)\n", what.c_str(), text.c_str());
             sides_state = backwards ? "forced, disagrees" : "forced, agrees";
+            if (backwards) truth = !names_swapped, decided_by = "auto", decided_after_s = after;
             decision_evidence = ev;
             checking = false;
         } else if (side_round == 0 || backwards) {

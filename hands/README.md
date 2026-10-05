@@ -36,7 +36,7 @@ hands/run.sh uninstall
 
 Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides them), read when ft-camd and ft-hands start:
 
-- `HANDS_SWAP_SIDES=auto` (the default): ft-hands tells from the hands which side camera is which, and corrects ft-camd's names when they're backwards (see "Which camera is which" below). `1` forces them exchanged and `0` forces ft-camd's names; ft-hands still checks and logs a warning if the hands disagree.
+- `HANDS_SWAP_SIDES=auto` (the default): ft-hands tells from the hands which side camera is which, and corrects ft-camd's names when they're backwards (see "Which camera is which" below). `1` forces them exchanged and `0` forces ft-camd's names; ft-hands still checks, and if the hands disagree it logs a warning and publishes the hands' answer as the truth (`sides.json`), so recordings are labelled right. The example config said `0` until 2026-10-05; `scripts/conf-migrate.sh` (run by `install.sh` and `hands/rec/install.sh`) turns that untouched line into `auto`.
 - `HANDS_CPUS=5,6,7`: the CPUs the model threads run on (below).
 - `HANDS_CAMERAS` (`auto`), `HANDS_BRIGHT` (`all`), `HANDS_BRIGHT_ON` (40), `HANDS_BRIGHT_OFF` (25): which cameras ft-hands tracks with, as `--cams`, `--bright`, `--bright-on` and `--bright-off` (see ft-hands). `HANDS_CAMERAS=mono` also keeps ft-camd off the colour cameras.
 - `HANDS_COLOR_LEFT` (`color_video0`), `HANDS_COLOR_CROP` (`subtract`): how the colour module's calibration maps onto its images, as `--color-left` and `--color-crop`.

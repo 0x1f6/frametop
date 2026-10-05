@@ -23,6 +23,7 @@ case ${1:-install} in
     "$root/hands/rec/build.sh"
     echo "== 4/4 ft-camd's capabilities (asks for your password) and the menu entry"
     "$root/hands/run.sh" caps
+    "$root/scripts/conf-migrate.sh"   # HANDS_SWAP_SIDES=0, the old default, becomes auto
     fill_template "$root/hands/rec/ft-handrec.desktop" |
       on_frame "mkdir -p ~/.local/share/applications && cat > $entry"
     echo
