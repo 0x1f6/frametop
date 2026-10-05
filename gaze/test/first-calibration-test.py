@@ -201,8 +201,14 @@ helper_state["reply"] = "ok on worn"
 check("gaze mode on: the calibration opens by itself", wait(lambda: check_state().get("kind") == "full", 6), True)
 check("it runs blind (no gaze from ours yet)", check_state().get("blind"), True)
 check("nothing says it can't open", any("can't open" in m for m in logs), False)
+# Live 2026-10-05: turning gaze mode on woke our tracker, and the calibration opened before
+# DON_DELAY of eyes had passed, so "the headset went on" came while it was open. That re-armed
+# it, and a second calibration opened as soon as the first ended.
+svc.checks.away, svc.checks.back_since = True, None
 
 check("dot 1: a click takes it", take_dot(0), True)
+check("the headset went on while it was open",
+      wait(lambda: not svc.checks.away, gazecheck.DON_DELAY + 2) and bool(svc.checks.check), True)
 t0, t1, yaw, pitch = eyes_state["points"][0]
 dot = gazecheck.check_dots("full", True)[0]
 check("its window is the look up to the click (about CHECK_WINDOW)",
@@ -222,6 +228,8 @@ check("all dots: ours fits its calibration (calib-fit)",
       wait(lambda: eyes_state["cal"] is not None and not svc.checks.check, 4), True)
 check("the service sees it calibrated", wait(lambda: svc.checks.calibrated() is True, 4), True)
 check("and gaze mode stays on", "gaze off" in helper_state["heard"], False)
+check("and no second calibration opens", wait(lambda: svc.checks.check is not None, 3), False)
+check("one calibration in the log", sum(m.startswith("full check:") for m in logs), 1)
 
 print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)
 svc.running = False
