@@ -6,6 +6,8 @@ title: Install the Frametop Hand Recorder
 
 The Hand Recorder records your hands with the Steam Frame's tracking cameras for Frametop's open hand dataset ([DeeJanuz/frametop-hands](https://huggingface.co/datasets/DeeJanuz/frametop-hands) on Hugging Face). These are the Konsole commands to install it.
 
+Join the [Frametop Discord](https://discord.gg/W3X9f7z3Bc) for questions and help with recording.
+
 For now the recorder runs inside Frametop's desktop, so these steps install Frametop first. A standalone recorder that runs from the SteamVR dashboard without Frametop is planned.
 
 ## Before you start
@@ -61,4 +63,4 @@ This removes the menu entry. Your recordings stay in `~/.local/share/frametop/ha
 
 ## Help
 
-Ask in the [Frametop issues](https://github.com/DeeJanuz/frametop/issues) or on the dataset's [discussion page](https://huggingface.co/datasets/DeeJanuz/frametop-hands/discussions). Both are public.
+Ask in the [Frametop Discord](https://discord.gg/W3X9f7z3Bc), the [Frametop issues](https://github.com/DeeJanuz/frametop/issues), or the dataset's [discussion page](https://huggingface.co/datasets/DeeJanuz/frametop-hands/discussions). All three are public.
