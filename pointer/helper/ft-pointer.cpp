@@ -2405,7 +2405,11 @@ int main() {
 
         // A held-back press (see the top): held still long enough, it's a real press (a drag);
         // released, it's a click where the pointer is now (this frame's pose has gone out).
-        if (!active) aimHeld = aimRight = clickPress = aimHand = confirmLesson = false;  // released meanwhile: nothing to click
+        // Released meanwhile: nothing to click, and the click it was due (pressRight: a right one) is
+        // forgotten too, or the next press after the pointer wakes would go out as a right click.
+        // A "hide" read a loop after the release is too late: the click has gone out by then
+        // (input-relay.py stand_down).
+        if (!active) aimHeld = aimRight = clickPress = pressRight = aimHand = confirmLesson = false;
         if (aimHeld && !aimHand && nudgeMoved < 0.2 && tnow - aimSince >= std::chrono::duration<double>(gazeHold)) {
             aimHeld = false;
             gazeBack = true;
