@@ -1146,17 +1146,20 @@ void EndDrag(Screen &s) {
     ApplyAlpha(s);
 }
 
-// Run `ft-layout <cmd>` in the background, logging to /tmp/frametop-layout.log.
+// Run `ft-layout <cmd>` in the background, logging to the desktop's runtime directory
+// (XDG_RUNTIME_DIR, else /tmp with O_NOFOLLOW: a symlink there must not be followed).
 void RunLayout(const char *cmd) {
     char exe[PATH_MAX];
     if (!realpath("/proc/self/exe", exe)) return;
+    const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+    std::string logname = std::string(runtime && *runtime ? runtime : "/tmp") + "/frametop-layout.log";
     std::string layout(exe);  // <repo>/screens/build/ft-screens -> <repo>/layout/ft-layout
     for (int up = 0; up < 3 && layout.rfind('/') != std::string::npos; ++up) layout.resize(layout.rfind('/'));
     layout += "/layout/ft-layout";
     posix_spawn_file_actions_t io;
     posix_spawn_file_actions_init(&io);
     posix_spawn_file_actions_addopen(&io, 0, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_addopen(&io, 1, "/tmp/frametop-layout.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    posix_spawn_file_actions_addopen(&io, 1, logname.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0644);
     posix_spawn_file_actions_adddup2(&io, 1, 2);
     std::string arg(cmd);
     char *argv[] = {layout.data(), arg.data(), nullptr};
