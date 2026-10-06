@@ -1400,7 +1400,15 @@ def main():
                                         or (node.grabbed and code in VOLUME_STANDIN)):
                     volume.key(fd, code, value, now)
                     continue
-                if node.role != "pointer" and node.role != "volume":
+                if node.role == "volume":
+                    # A keyboard's media keys (its Consumer Control node) go to the desktop like a
+                    # pass-through keyboard's, and nowhere else: the node isn't grabbed, so gamescope
+                    # and SteamVR have them already. Not platform buttons: the headset's click button
+                    # is KEY_SELECT on gpio-keys (BUS_HOST). Nor a volume key a remap missed.
+                    if etype == EV_KEY and node.bus in (BUS_USB, BUS_BLUETOOTH) and code not in VOLUME_CODES:
+                        to_screens(code, value)
+                    continue
+                if node.role != "pointer":
                     # Observed only, unless typing goes to the desktop. Key combinations work on
                     # any pass-through keyboard.
                     if (node.role == "passthrough" and etype == EV_KEY and node.grabbed
