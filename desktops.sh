@@ -16,6 +16,7 @@ action=${1:-start}
 screens=${2:-${FT_SCREENS:-}}
 session=$FRAME_REPO/session
 override=.local/share/applications/deckard-nested-desktop.desktop
+native_copy=.local/share/applications/native-deckard-nested-desktop.desktop
 log=/tmp/frametop-session.log
 # Bracketed first letter so pgrep/pkill never match the ssh shell running them.
 match='[v]r-overlay-key frametop '
@@ -38,12 +39,14 @@ $running && echo 'started' || { echo 'failed:'; tail -20 $log; exit 1; }" ;;
     "$root/scripts/sync.sh" >/dev/null
     "$frame" --host "set -e; mkdir -p ~/.local/share/applications
 sed 's|@SESSION@|$session/frametop-session.sh|' $session/deckard-nested-desktop.desktop > ~/$override
+sed 's|Name=Desktop|Name=Native Desktop|' /usr/share/applications/deckard-nested-desktop.desktop > ~/$native_copy
 [ -f ~/.config/frametop.conf ] || cp $session/frametop.conf.example ~/.config/frametop.conf
 echo \"installed ~/$override\"; grep ^Exec= ~/$override; echo; cat ~/.config/frametop.conf" ;;
   uninstall)
     # Also what the session puts in place at each start: Launch as Standalone's app copies and
     # the title bar decoration (float/ft_apps.py, decoration/).
-    "$frame" --host "rm -f ~/$override
+  "$frame" --host "rm -f ~/$override
+rm -f ~/$native_copy
 rm -rf ~/.local/share/frametop/apps ~/.local/share/kwin/decorations/kwin4_decoration_qml_frametop
 rmdir ~/.local/share/frametop 2>/dev/null; echo 'removed; the launcher uses the stock desktop again'" ;;
   screens)
