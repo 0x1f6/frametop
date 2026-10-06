@@ -66,12 +66,18 @@ Typing on a keyboard sends the helper "typing" (at most 4 times a second): it ta
 pinches right after a key, since typing touches thumb to index like a pinch.
 
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
-types them into the desktop screen that has focus: from pass-through keyboards, and
-keys a pointer device passes through. Typing goes to the panel clicked last, and
-ft-screens says which ("keyboard desktop|steam" on the control socket, every second).
-While it's the desktop, pass-through keyboards are grabbed, so gamescope, which reads
-every keyboard itself, doesn't type them into its focused app too. Without word from
-ft-screens for 3 seconds they're released. With SHARE_KEYS=1 in ~/.config/frametop.conf,
+types them into the desktop screen that has focus: from pass-through keyboards, a USB or
+Bluetooth keyboard's media keys (its Consumer Control node, which has volume keys, so it's
+never grabbed and gamescope has them too), and keys a pointer device passes through. In
+pointer mode a mouse button passed through as a key (BTN_MOUSE..BTN_TASK, a side button for
+Back) goes there too, and ft-screens gives it the screen the pointer is on, not the one
+typing goes to (it releases the button itself when the pointer leaves the screens, they
+hide, or Frametop pauses). Other buttons and keys from KEY_OK up don't go there.
+Typing goes to the panel clicked last, and ft-screens says which ("keyboard
+desktop|steam" on the control socket, every second). While it's the desktop,
+pass-through keyboards are grabbed, so gamescope, which reads every keyboard itself,
+doesn't type them into its focused app too. Without word from ft-screens for 3 seconds
+they're released. With SHARE_KEYS=1 in ~/.config/frametop.conf,
 a grabbed keyboard's keys also go out as "key <code> <value> <device name>" datagrams on
 @frametop_keys, for programs that watch every keyboard for a hotkey and lose it to the grab.
 It's off by default: any local process that binds that name first gets every key typed
@@ -153,6 +159,7 @@ KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
 SCROLLS = {0x06, REL_WHEEL, 0x0B, 0x0C}  # REL_HWHEEL, REL_WHEEL and their _HI_RES
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
+BTN_MOUSE, BTN_TASK = 0x110, 0x117  # mouse buttons, the first and the last
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
 KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP = 113, 114, 115
 # Volume keys are remapped to KEY_MACRO28, KEY_MACRO29 and KEY_MACRO30: above 255, so X11
@@ -1048,9 +1055,14 @@ def main():
 
     screens_down = set()  # keys the desktop was told went down and not yet up (see reconcile_desktop_keys)
 
-    def to_screens(code, value):
-        """A key for the desktop screens (ft-screens decides whether it types)."""
-        if value in (0, 1):
+    def to_screens(code, value, button=False):
+        """A key for the desktop screens (ft-screens decides whether it types): one below
+        BTN_MISC, or with button, a mouse button (BTN_MOUSE..BTN_TASK), which ft-screens gives
+        the screen the pointer is on. Nothing else (gamepad, joystick, digitizer buttons, keys
+        from KEY_OK up), but the release of anything the desktop has down."""
+        if value not in (0, 1):
+            return
+        if code < BTN_MISC or (button and BTN_MOUSE <= code <= BTN_TASK) or (not value and code in screens_down):
             try:
                 screens_sock.sendto(f"key {code} {value}".encode(), SCREENS)
             except OSError:
@@ -1310,9 +1322,12 @@ def main():
     vr_bind(time.monotonic())  # a helper that's already running keeps its buttons in step
     waiting = False  # a keyboard's grab waits for its keys to come up
     # A relay that went away with a key down left it down on the desktop, where this one
-    # never sent it: modifiers come up there now (a release of a key that isn't down is nothing).
+    # never sent it: modifiers and mouse buttons come up there now (a release of a key that
+    # isn't down is nothing).
     for code in sorted(MODIFIERS):
         to_screens(code, 0)
+    for code in range(BTN_MOUSE, BTN_TASK + 1):
+        to_screens(code, 0, button=True)
     while True:
         now = time.monotonic()
         pointer = state["pointer"]
@@ -1400,7 +1415,15 @@ def main():
                                         or (node.grabbed and code in VOLUME_STANDIN)):
                     volume.key(fd, code, value, now)
                     continue
-                if node.role != "pointer" and node.role != "volume":
+                if node.role == "volume":
+                    # A keyboard's media keys (its Consumer Control node) go to the desktop like a
+                    # pass-through keyboard's, and nowhere else: the node isn't grabbed, so gamescope
+                    # and SteamVR have them already. Not platform buttons: the headset's click button
+                    # is KEY_SELECT on gpio-keys (BUS_HOST). Nor a volume key a remap missed.
+                    if etype == EV_KEY and node.bus in (BUS_USB, BUS_BLUETOOTH) and code not in VOLUME_CODES:
+                        to_screens(code, value)
+                    continue
+                if node.role != "pointer":
                     # Observed only, unless typing goes to the desktop. Key combinations work on
                     # any pass-through keyboard.
                     if (node.role == "passthrough" and etype == EV_KEY and node.grabbed
@@ -1433,7 +1456,11 @@ def main():
                         continue
                     target = mouse if code >= BTN_MISC else keyboard
                     target.emit(etype, code, value)
-                    to_screens(code, value)
+                    # A mouse button goes to the desktop only when pointer mode passes it through
+                    # as a key (a side button for Back there). The rest, like every click with
+                    # POINTER=0 or paused, reach the desktop through a laser, if at all. (A
+                    # key-mapped button still goes to the virtual mouse too.)
+                    to_screens(code, value, button=bool(pointer))
                     if value:
                         node.held.add(code)
                     else:

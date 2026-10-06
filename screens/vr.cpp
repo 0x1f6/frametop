@@ -1960,6 +1960,11 @@ int ft_vr_modifiers(uint32_t format, uint64_t *out, int max) {
 bool ft_vr_screens_shown(void) { return g_vr && ModeVisible(); }
 bool ft_vr_paused(void) { return g_paused; }
 
+bool ft_vr_screen_visible(int index) {
+    const auto it = g_screens.find(index);
+    return !g_vr || (it != g_screens.end() && it->second.visible);
+}
+
 enum ft_attention ft_vr_screen_attention(int index) {
     const auto it = g_screens.find(index);
     return g_vr && it != g_screens.end() ? it->second.attention : FT_FOCUSED;
