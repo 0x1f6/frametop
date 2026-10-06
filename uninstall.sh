@@ -10,10 +10,10 @@
 # It never stops what you're using now: the input relay carries the keyboard and mouse, and the
 # desktop runs from the repo. So it goes in two steps:
 #   1. Frametop stops starting. The launcher's Desktop entry goes back to the stock desktop, and
-#      Frametop's services, SteamVR driver, menu entries, and system files (our eye tracker's
-#      frame grabber and the Bluetooth fixes, with sudo) are removed, and so are the file
-#      capabilities of hand tracking's camera broker (ft-camd, with sudo). What runs now keeps
-#      running until you restart the headset.
+#      Frametop's Native Desktop entry, services, SteamVR driver, menu entries, and system files
+#      (our eye tracker's frame grabber and the Bluetooth fixes, with sudo) are removed, and so
+#      are the file capabilities of hand tracking's camera broker (ft-camd, with sudo). What runs
+#      now keeps running until you restart the headset.
 #   2. After the restart, run it again. It deletes the code (~/frametop) and, if you want, your
 #      settings and the build container.
 # When nothing of Frametop is running, one run does both.
@@ -109,6 +109,7 @@ main() {
 
   # Step 1: what makes Frametop start. Nothing here stops a running program.
   [ -f "$override" ] && grep -q 'Frametop' "$override" || override=
+  [ -f "$native_copy" ] || native_copy=
   units=("$HOME"/.config/systemd/user/frametop-*.service)
   for f in ft-input-settings ft-display-settings ft-layout-reset ft-screens-toggle ft-remote-settings ft-gazeprobe; do
     [ -e "$apps/$f.desktop" ] && entries+=("$apps/$f.desktop")
@@ -118,12 +119,12 @@ main() {
   [ -L "$handsctl" ] || handsctl=
   exists "${eyegrab_files[@]}" "${bt_files[@]}" && sys=1
 
-  if [ -n "$override" ] || [ ${#units[@]} -gt 0 ] || [ ${#entries[@]} -gt 0 ] || [ -d "$driver" ] ||
-     [ -n "$handsctl" ] || [ "$sys" = 1 ] || [ -n "$camd_caps" ]; then
+  if [ -n "$override" ] || [ -n "$native_copy" ] || [ ${#units[@]} -gt 0 ] || [ ${#entries[@]} -gt 0 ] ||
+     [ -d "$driver" ] || [ -n "$handsctl" ] || [ "$sys" = 1 ] || [ -n "$camd_caps" ]; then
     step "Step 1 of 2: stop Frametop from starting"
     echo "This removes:"
     [ -n "$override" ] && echo "  - the launcher's Desktop entry (Launch a program -> Desktop opens the stock desktop again)"
-    [ -n "$native_copy" ] && echo "  - the native launcher's Desktop entry (use Desktop -> opens the stock desktop again)"
+    [ -n "$native_copy" ] && echo "  - the launcher's Native Desktop entry (Desktop opens the same stock desktop then)"
     for f in "${units[@]}"; do echo "  - the service $(basename "$f")"; done
     [ -d "$driver" ] && echo "  - the 3D mouse's SteamVR driver (ft_pointer)"
     [ ${#entries[@]} -gt 0 ] && echo "  - ${#entries[@]} menu entries (Frametop Display Settings, Input Settings, ...)"
