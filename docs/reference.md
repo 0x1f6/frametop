@@ -6,15 +6,17 @@ How each part of Frametop works, where its settings live, and the commands for r
 
 From the headset, open Launch a program → Desktop. The installer replaces that launcher entry with Frametop's (`~/.local/share/applications/deckard-nested-desktop.desktop`), and `desktops.sh uninstall` gives the stock single-screen desktop back.
 
+The installer also adds Native Desktop to the same list: a copy of SteamOS's entry for its own desktop (`~/.local/share/applications/native-deckard-nested-desktop.desktop`), skipped when SteamOS has no such entry. The copy is made at install time, so `scripts/update-check.py` warns when SteamOS's entry changes, and `desktops.sh install` refreshes it. In Native Desktop, typing goes to Steam's side, so the input relay doesn't grab keyboards there, and a Meta tap runs Frametop's Meta action (by default, the Steam menu) as well as opening Plasma's launcher.
+
 From a terminal, on the Frame or from a PC over SSH:
 
 ```
-desktops.sh install        # the launcher's Desktop entry starts Frametop
-desktops.sh uninstall      # back to the stock SteamOS desktop
+desktops.sh install        # the launcher's Desktop entry starts Frametop; Native Desktop is the stock one
+desktops.sh uninstall      # back to the stock SteamOS desktop, as Desktop
 desktops.sh start | stop | restart | status | log [lines]
 ```
 
-`session/frametop-session.sh` runs the desktop. It starts ft-screens in the `dev` container (log: `/tmp/frametop-screens.log`), then KWin and Plasma on the host inside it. Only one desktop runs at a time. `desktops.sh start` runs it in its own systemd unit, `frametop-desktop`. It keeps its Plasma config in `~/.config/frametop`, separate from the stock desktop's.
+`session/frametop-session.sh` runs the desktop. It starts ft-screens in the `dev` container (log: `/tmp/frametop-screens.log`), then KWin and Plasma on the host inside it. Only one Frametop desktop runs at a time. Its check doesn't look for Native Desktop, and running both at once is untested. `desktops.sh start` runs it in its own systemd unit, `frametop-desktop`. It keeps its Plasma config in `~/.config/frametop`, separate from the stock desktop's.
 
 When the VR launcher starts the desktop, it inherits the Steam client's environment. The session script drops the client's runtime from it (`LD_LIBRARY_PATH`, the `STEAM_*` settings, and the Steam overlay's Vulkan layer), so apps in the desktop use the system's libraries, including its video codecs, just as they would after a normal login.
 
