@@ -66,12 +66,18 @@ Typing on a keyboard sends the helper "typing" (at most 4 times a second): it ta
 pinches right after a key, since typing touches thumb to index like a pinch.
 
 Keys also go to ft-screens (@ft_screens, the Frametop desktop's compositor), which
-types them into the desktop screen that has focus: from pass-through keyboards, and
-keys a pointer device passes through. Typing goes to the panel clicked last, and
-ft-screens says which ("keyboard desktop|steam" on the control socket, every second).
-While it's the desktop, pass-through keyboards are grabbed, so gamescope, which reads
-every keyboard itself, doesn't type them into its focused app too. Without word from
-ft-screens for 3 seconds they're released. With SHARE_KEYS=1 in ~/.config/frametop.conf,
+types them into the desktop screen that has focus: from pass-through keyboards, a USB or
+Bluetooth keyboard's media keys (its Consumer Control node, which has volume keys, so it's
+never grabbed and gamescope has them too), and keys a pointer device passes through. In
+pointer mode a mouse button passed through as a key (BTN_MOUSE..BTN_TASK, a side button for
+Back) goes there too, and ft-screens gives it the screen the pointer is on, not the one
+typing goes to (it releases the button itself when the pointer leaves the screens, they
+hide, or Frametop pauses). Other buttons and keys from KEY_OK up don't go there.
+Typing goes to the panel clicked last, and ft-screens says which ("keyboard
+desktop|steam" on the control socket, every second). While it's the desktop,
+pass-through keyboards are grabbed, so gamescope, which reads every keyboard itself,
+doesn't type them into its focused app too. Without word from ft-screens for 3 seconds
+they're released. With SHARE_KEYS=1 in ~/.config/frametop.conf,
 a grabbed keyboard's keys also go out as "key <code> <value> <device name>" datagrams on
 @frametop_keys, for programs that watch every keyboard for a hotkey and lose it to the grab.
 It's off by default: any local process that binds that name first gets every key typed
