@@ -33,6 +33,8 @@ UID = os.getuid()
 KNOWN_GOOD = os.path.join(HOME, ".local/state/frametop/known-good.json")
 STEAMVR_BIN = "/opt/steamvr/bin/linuxarm64"
 LAUNCHER = os.path.join(HOME, ".local/share/applications/deckard-nested-desktop.desktop")
+STOCK_LAUNCHER = "/usr/share/applications/deckard-nested-desktop.desktop"
+NATIVE_LAUNCHER = os.path.join(HOME, ".local/share/applications/native-deckard-nested-desktop.desktop")
 VRPATHS = os.path.join(HOME, ".config/openvr/openvrpaths.vrpath")
 # The Frametop desktop has its own XDG_CONFIG_HOME (session/frametop-session.sh). An install from a
 # terminal there, before pointer/driver/install.sh set SteamVR's, left vrpathreg's registry here.
@@ -55,6 +57,7 @@ PACKAGES = {
                     "the registry stops and comes back after a desktop restart",
     "gamescope": "the headset's volume buttons with nothing focused; typing goes where you last clicked",
     "bluez": "a Bluetooth mouse reconnecting after it sleeps",
+    "steamdeck-kde-presets": "Launch a program -> Native Desktop opens SteamOS's own desktop",
 }
 KERNEL_HINT = "display power (ft-powerd) and hand tracking"
 
@@ -180,8 +183,8 @@ def check_host():
         (f"{STEAMVR_BIN}/vrpathreg", "warn", "the pointer driver can't be installed or removed"),
         ("/usr/share/deckard/mesavars.sh", "warn", "the desktop starts without SteamOS's Mesa settings"),
         ("/etc/profile.d/flatpak.sh", "warn", "Flatpak apps may open Discover instead of starting"),
-        ("/usr/share/applications/deckard-nested-desktop.desktop", "warn",
-         "SteamOS's Desktop launcher entry is gone or renamed, so Frametop's copy may not replace it"),
+        (STOCK_LAUNCHER, "warn", "SteamOS's Desktop launcher entry is gone or renamed, so Frametop's "
+         "copy may not replace it, and there's no Native Desktop"),
     ]
     missing = [n for n in needed if not os.path.exists(n[0])]
     for path, state, effect in missing:
@@ -248,12 +251,29 @@ def check_host():
         report("ok", "launcher", f"Desktop starts {session}")
     else:
         report("FAIL", "launcher", f"Desktop starts {session}, which doesn't exist")
+    if os.path.exists(NATIVE_LAUNCHER):
+        try:
+            same = launcher_keys(NATIVE_LAUNCHER) == launcher_keys(STOCK_LAUNCHER)
+        except OSError:
+            same = False
+        if same:
+            report("ok", "Native Desktop", "the launcher's copy matches SteamOS's Desktop entry")
+        else:
+            report("warn", "Native Desktop", "the launcher's copy no longer matches SteamOS's Desktop entry; "
+                   "./desktops.sh install refreshes it")
 
     if systemctl("is-enabled", "frametop-power") == "enabled":
         if os.access(BACKLIGHT, os.W_OK):
             report("ok", "backlight", "ft-powerd can turn the displays off")
         else:
             report("FAIL", "backlight", f"{BACKLIGHT} isn't writable, so ft-powerd can't turn the displays off")
+
+
+def launcher_keys(path):
+    """A launcher entry's keys, less the ones desktops.sh changes in its Native Desktop copy."""
+    with open(path) as f:
+        pairs = [line.rstrip("\n").split("=", 1) for line in f if "=" in line and not line.startswith("#")]
+    return {k: v for k, v in pairs if k != "X-Steam-Special" and k.split("[")[0] != "Name"}
 
 
 def launcher_session():
