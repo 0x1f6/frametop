@@ -548,9 +548,13 @@ static void send_key(struct server *s, uint32_t code, int pressed) {
     struct wlr_keyboard_key_event ev = {
         .time_msec = now_ms(), .keycode = code, .update_state = true,
         .state = pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED};
-    wlr_keyboard_notify_key(&s->keyboard, &ev);
-    wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
-    wlr_seat_keyboard_notify_key(s->seat, ev.time_msec, code, ev.state);
+    if (code < BTN_MISC) {
+        wlr_keyboard_notify_key(&s->keyboard, &ev);
+        wlr_seat_keyboard_notify_modifiers(s->seat, &s->keyboard.modifiers);
+        wlr_seat_keyboard_notify_key(s->seat, ev.time_msec, code, ev.state);
+    } else {
+        wlr_seat_pointer_notify_button(s->seat, ev.time_msec, code, ev.state);
+    }
 }
 
 // Keys from the input relay (physical keyboards): "key <evdev code> <1 press|0 release>".
