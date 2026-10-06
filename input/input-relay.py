@@ -1316,9 +1316,12 @@ def main():
     vr_bind(time.monotonic())  # a helper that's already running keeps its buttons in step
     waiting = False  # a keyboard's grab waits for its keys to come up
     # A relay that went away with a key down left it down on the desktop, where this one
-    # never sent it: modifiers come up there now (a release of a key that isn't down is nothing).
+    # never sent it: modifiers and mouse buttons come up there now (a release of a key that
+    # isn't down is nothing).
     for code in sorted(MODIFIERS):
         to_screens(code, 0)
+    for code in range(BTN_MOUSE, BTN_TASK + 1):
+        to_screens(code, 0, button=True)
     while True:
         now = time.monotonic()
         pointer = state["pointer"]
