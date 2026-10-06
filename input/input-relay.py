@@ -153,6 +153,7 @@ KEY_A = 30
 REL_X, REL_Y, REL_WHEEL, REL_MAX = 0x00, 0x01, 0x08, 0x0F
 SCROLLS = {0x06, REL_WHEEL, 0x0B, 0x0C}  # REL_HWHEEL, REL_WHEEL and their _HI_RES
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA = 0x110, 0x111, 0x112, 0x113, 0x114
+BTN_MOUSE, BTN_TASK = 0x110, 0x117  # mouse buttons, the first and the last
 KEY_LEFTMETA, KEY_RIGHTMETA = 125, 126
 KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP = 113, 114, 115
 # Volume keys are remapped to KEY_MACRO28, KEY_MACRO29 and KEY_MACRO30: above 255, so X11
@@ -1048,9 +1049,14 @@ def main():
 
     screens_down = set()  # keys the desktop was told went down and not yet up (see reconcile_desktop_keys)
 
-    def to_screens(code, value):
-        """A key for the desktop screens (ft-screens decides whether it types)."""
-        if value in (0, 1):
+    def to_screens(code, value, button=False):
+        """A key for the desktop screens (ft-screens decides whether it types): one below
+        BTN_MISC, or with button, a mouse button (BTN_MOUSE..BTN_TASK), which ft-screens gives
+        the screen the pointer is on. Nothing else (gamepad, joystick, digitizer buttons, keys
+        from KEY_OK up), but the release of anything the desktop has down."""
+        if value not in (0, 1):
+            return
+        if code < BTN_MISC or (button and BTN_MOUSE <= code <= BTN_TASK) or (not value and code in screens_down):
             try:
                 screens_sock.sendto(f"key {code} {value}".encode(), SCREENS)
             except OSError:
@@ -1441,7 +1447,11 @@ def main():
                         continue
                     target = mouse if code >= BTN_MISC else keyboard
                     target.emit(etype, code, value)
-                    to_screens(code, value)
+                    # A mouse button goes to the desktop only when pointer mode passes it through
+                    # as a key (a side button for Back there). The rest, like every click with
+                    # POINTER=0 or paused, reach the desktop through a laser, if at all. (A
+                    # key-mapped button still goes to the virtual mouse too.)
+                    to_screens(code, value, button=bool(pointer))
                     if value:
                         node.held.add(code)
                     else:
