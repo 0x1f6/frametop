@@ -163,6 +163,7 @@ jobs:
           cat out/ft.sha256 out/image-digest.txt
       # actions/upload-artifact@v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/pack/frametop-image'
         with:
           name: ft-${{ steps.meta.outputs.version }}
           path: out/
